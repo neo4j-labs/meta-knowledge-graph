@@ -104,7 +104,7 @@ def create_mcp_server(
 
         # Build document metadata
         content_hash = md5(text.encode("utf-8")).hexdigest()
-        doc_metadata = {"import_id": import_id, "content_hash": content_hash}
+        doc_metadata = {"content_hash": content_hash}
         if document_id:
             doc_metadata["id"] = document_id
         if source_uri:
@@ -129,20 +129,14 @@ def create_mcp_server(
             graph_docs = await transformer.aconvert_to_graph_documents(docs)
             duration_ms = int((time.time() - start_time) * 1000)
 
-            # Stamp import_id on all extracted nodes and relationships
-            for d in graph_docs:
-                for n in d.nodes:
-                    n.properties["import_id"] = import_id
-                for r in d.relationships:
-                    r.properties["import_id"] = import_id
-
-            # Import into Neo4j
+            # Import into Neo4j (import_ids accumulated as list by the import queries)
             await add_graph_documents(
                 driver=neo4j_driver,
                 graph_documents=graph_docs,
                 database=database,
                 include_source=True,
                 baseEntityLabel=True,
+                import_id=import_id,
             )
 
             # Build summary

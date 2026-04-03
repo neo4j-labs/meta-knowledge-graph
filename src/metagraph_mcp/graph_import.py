@@ -19,7 +19,26 @@ include_docs_query = (
     "ON MATCH SET d.updated_at = datetime(), d.source_count = coalesce(d.source_count, 0) + 1 "
     "SET d.text = $document.page_content "
     "SET d += $document.metadata "
+    "SET d.import_ids = CASE "
+    "WHEN d.import_ids IS NULL THEN [$import_id] "
+    "WHEN NOT $import_id IN d.import_ids THEN d.import_ids + $import_id "
+    "ELSE d.import_ids END "
     "WITH d "
+)
+
+
+_ACCUMULATE_IMPORT_IDS = (
+    "SET source.import_ids = CASE "
+    "WHEN source.import_ids IS NULL THEN [$import_id] "
+    "WHEN NOT $import_id IN source.import_ids THEN source.import_ids + $import_id "
+    "ELSE source.import_ids END "
+)
+
+_ACCUMULATE_IMPORT_IDS_REL = (
+    "SET r.import_ids = CASE "
+    "WHEN r.import_ids IS NULL THEN [$import_id] "
+    "WHEN NOT $import_id IN r.import_ids THEN r.import_ids + $import_id "
+    "ELSE r.import_ids END "
 )
 
 
@@ -33,6 +52,7 @@ def _get_node_import_query(baseEntityLabel: bool, include_source: bool) -> str:
             "ON MATCH SET source.updated_at = datetime(), source.source_count = coalesce(source.source_count, 0) + 1 "
             "SET source += row.properties "
             "SET source:$(row.type) "
+            f"{_ACCUMULATE_IMPORT_IDS}"
             f"{'MERGE (d)-[:MENTIONS]->(source) ' if include_source else ''}"
             "RETURN distinct 'done' AS result"
         )
@@ -44,6 +64,7 @@ def _get_node_import_query(baseEntityLabel: bool, include_source: bool) -> str:
             "ON CREATE SET source.created_at = datetime(), source.source_count = 1 "
             "ON MATCH SET source.updated_at = datetime(), source.source_count = coalesce(source.source_count, 0) + 1 "
             "SET source += row.properties "
+            f"{_ACCUMULATE_IMPORT_IDS}"
             f"{'MERGE (d)-[:MENTIONS]->(source) ' if include_source else ''}"
             "RETURN distinct 'done' AS result"
         )
@@ -60,6 +81,7 @@ def _get_rel_import_query(baseEntityLabel: bool) -> str:
             "ON CREATE SET r.created_at = datetime(), r.source_count = 1 "
             "ON MATCH SET r.updated_at = datetime(), r.source_count = coalesce(r.source_count, 0) + 1 "
             "SET r += row.properties "
+            f"{_ACCUMULATE_IMPORT_IDS_REL}"
             "RETURN distinct 'done'"
         )
     else:
@@ -72,6 +94,7 @@ def _get_rel_import_query(baseEntityLabel: bool) -> str:
             "ON CREATE SET r.created_at = datetime(), r.source_count = 1 "
             "ON MATCH SET r.updated_at = datetime(), r.source_count = coalesce(r.source_count, 0) + 1 "
             "SET r += row.properties "
+            f"{_ACCUMULATE_IMPORT_IDS_REL}"
             "RETURN distinct 'done'"
         )
 
@@ -86,6 +109,7 @@ async def add_graph_documents(
     database: str = "neo4j",
     include_source: bool = False,
     baseEntityLabel: bool = False,
+    import_id: Optional[str] = None,
 ) -> None:
     """
     Import graph documents into Neo4j.
@@ -136,6 +160,8 @@ async def add_graph_documents(
             node.type = _remove_backticks(node.type)
 
         # Import nodes
+        if import_id:
+            node_import_query_params["import_id"] = import_id
         await driver.execute_query(
             node_import_query,
             parameters_=node_import_query_params,
@@ -143,22 +169,25 @@ async def add_graph_documents(
         )
 
         # Import relationships
+        rel_import_query_params: Dict[str, Any] = {
+            "data": [
+                {
+                    "source": el.source.id,
+                    "source_label": _remove_backticks(el.source.type),
+                    "target": el.target.id,
+                    "target_label": _remove_backticks(el.target.type),
+                    "type": _remove_backticks(
+                        el.type.replace(" ", "_").upper()
+                    ),
+                    "properties": el.properties,
+                }
+                for el in document.relationships
+            ]
+        }
+        if import_id:
+            rel_import_query_params["import_id"] = import_id
         await driver.execute_query(
             rel_import_query,
-            parameters_={
-                "data": [
-                    {
-                        "source": el.source.id,
-                        "source_label": _remove_backticks(el.source.type),
-                        "target": el.target.id,
-                        "target_label": _remove_backticks(el.target.type),
-                        "type": _remove_backticks(
-                            el.type.replace(" ", "_").upper()
-                        ),
-                        "properties": el.properties,
-                    }
-                    for el in document.relationships
-                ]
-            },
+            parameters_=rel_import_query_params,
             database_=database,
         )
