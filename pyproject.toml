@@ -1,0 +1,20 @@
+[project]
+name = "metagraph-mcp"
+version = "0.1.0"
+description = "MCP server for Neo4j metagraph operations"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.10.5,<3",
+    "neo4j>=5.26.0",
+    "pydantic>=2.10.1",
+    "langchain-experimental>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "neo4j-mcp-server>=1.5.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+metagraph-mcp = "metagraph_mcp:main"

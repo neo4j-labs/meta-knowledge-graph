@@ -31,3 +31,56 @@ The system harvests and captures decision traces and four categories of metadata
   * **Hybrid Retrieval Agent:** Combines **semantic search** (text embeddings on decision reasoning) with **structural search** (enriched e.g. with graph embeddings) to retrieve precedents that are both semantically and structurally similar.
   * **External Metadata Connector:** Gather catalog metadata (schema, columns, types) from sources like Snowflake or Databricks.
   * **Approval Process:** Knowledge derived from user interactions (chat) requires explicit approval to become permanent rules, and patterns carry time-decaying confidence scores that trigger re-validation.
+
+# Metagraph MCP
+
+MCP server for Neo4j that provides tools for AI agents — importing, retrieval, and more — while building a **metagraph** alongside. The metagraph captures metadata about what was imported, queried, and how data relates, giving agents a persistent map of their own knowledge operations.
+
+## Quick Start
+
+### Run directly from the repo
+
+```bash
+npx @anthropic-ai/claude-code --mcp-server "metagraph-mcp: npx -y @anthropic-ai/sdk run -- pip install git+https://github.com/tomasonjo/metagraph-mcp.git && metagraph-mcp"
+```
+
+### Run locally during development
+
+Add to your Claude Desktop `claude_desktop_config.json` or `.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "metagraph-mcp": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/metagraph-mcp", "run", "metagraph-mcp"],
+      "env": {
+        "NEO4J_URI": "bolt://localhost:7687",
+        "NEO4J_USERNAME": "neo4j",
+        "NEO4J_PASSWORD": "<your-password>",
+        "NEO4J_DATABASE": "neo4j",
+        "OPENAI_API_KEY": "<your-openai-api-key>"
+      }
+    }
+  }
+}
+```
+
+## Configuration
+
+| Env Variable | CLI Flag | Default |
+|---|---|---|
+| `NEO4J_URI` | `--db-url` | `bolt://localhost:7687` |
+| `NEO4J_USERNAME` | `--username` | `neo4j` |
+| `NEO4J_PASSWORD` | `--password` | `password` |
+| `NEO4J_DATABASE` | `--database` | `neo4j` |
+| `NEO4J_TRANSPORT` | `--transport` | `stdio` |
+| `OPENAI_API_KEY` | — | — |
+| `LLM_MODEL` | — | `gpt-5.4-mini` |
+
+## Tools
+
+| Tool | Description |
+|---|---|
+| `get_node_count` | Returns the total number of nodes in the database |
+| `import_text_to_kg` | Extract entities and relationships from text using an LLM and import them into Neo4j |
