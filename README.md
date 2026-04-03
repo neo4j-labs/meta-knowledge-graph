@@ -80,7 +80,21 @@ Add to your Claude Desktop `claude_desktop_config.json` or `.claude/settings.jso
 
 ## Tools
 
+### Knowledge Graph
+
 | Tool | Description |
 |---|---|
-| `get_node_count` | Returns the total number of nodes in the database |
-| `import_text_to_kg` | Extract entities and relationships from text using an LLM and import them into Neo4j |
+| `import_text_to_kg` | Extract entities and relationships from text using an LLM and import them as a knowledge graph into Neo4j |
+| `neo4j_get_schema` | Get the schema of the Neo4j database (node labels, relationship types, properties) |
+| `neo4j_read_cypher` | Run a read-only Cypher query against the Neo4j database |
+
+### Memory
+
+Persistent key-value memory stored in Neo4j, organized by category (`tools`, `user`, `general`).
+
+| Tool | Description |
+|---|---|
+| `memory_write` | Write or update a markdown memory entry (learnings, user info, or facts) |
+| `memory_read` | Read a memory entry by category and key |
+| `memory_list` | List all stored memory entries, optionally filtered by category |
+| `memory_delete` | Delete a memory entry by category and key |
