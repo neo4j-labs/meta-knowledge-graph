@@ -2,7 +2,11 @@ import argparse
 import asyncio
 import os
 
+from dotenv import load_dotenv
+
 from metagraph_mcp import server
+
+load_dotenv()
 
 
 def main():
