@@ -13,12 +13,6 @@ from neo4j.exceptions import Neo4jError
 from pydantic import Field
 
 from metagraph_mcp.graph_import import add_graph_documents
-from metagraph_mcp.memory import (
-    memory_delete,
-    memory_list,
-    memory_read,
-    memory_write,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +48,26 @@ def create_mcp_server(
             "read-cypher": "neo4j_read_cypher",
         },
     )
+
+    # Mount Neo4j Agent Memory MCP server (https://github.com/neo4j-labs/agent-memory)
+    if os.environ.get("OPENAI_API_KEY"):
+        agent_memory_proxy = FastMCP.as_proxy(
+            StdioTransport(
+                command="uvx",
+                args=["--from", "neo4j-agent-memory[mcp,openai]", "neo4j-agent-memory", "mcp", "serve"],
+                env={
+                    "NEO4J_URI": db_url,
+                    "NEO4J_USERNAME": username,
+                    "NEO4J_PASSWORD": password,
+                    "NEO4J_DATABASE": database,
+                    "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"],
+                },
+            )
+        )
+        mcp.mount(agent_memory_proxy)
+        logger.info("Mounted Neo4j Agent Memory MCP proxy")
+    else:
+        logger.info("Neo4j Agent Memory MCP proxy not mounted (OPENAI_API_KEY unset)")
 
     # Mount Neocarta MCP server when required env vars are present
     neocarta_required = ("GCP_PROJECT_ID", "BIGQUERY_DATASET_ID", "OPENAI_API_KEY")
@@ -364,72 +378,6 @@ def create_mcp_server(
             result["error_message"] = error_message
 
         return json.dumps(result, default=str)
-
-    # ── Memory tools ────────────────────────────────────────────────
-
-    @mcp.tool(name="memory_write")
-    async def _memory_write(
-        category: str = Field(
-            ...,
-            description="Memory category: 'tools' (per-tool learnings), 'user' (persona & preferences), or 'general' (interesting facts)",
-        ),
-        key: str = Field(
-            ...,
-            description="Identifier for this memory entry, e.g. tool name ('import_text_to_kg') or topic ('persona')",
-        ),
-        content: str = Field(
-            ...,
-            description="Full markdown content to store. When updating, provide the complete updated text.",
-        ),
-    ) -> str:
-        """Write or update a markdown memory entry. Use this to persist learnings, user info, or interesting facts across conversations."""
-        return await memory_write(neo4j_driver, database, category, key, content)
-
-    @mcp.tool(name="memory_read")
-    async def _memory_read(
-        category: str = Field(
-            ...,
-            description="Memory category: 'tools', 'user', or 'general'",
-        ),
-        key: str = Field(
-            ...,
-            description="Identifier for the memory entry to read",
-        ),
-    ) -> str:
-        """Read a markdown memory entry by category and key."""
-        return await memory_read(neo4j_driver, database, category, key)
-
-    @mcp.tool(name="memory_list")
-    async def _memory_list(
-        category: Optional[str] = Field(
-            None,
-            description="Optional category filter: 'tools', 'user', or 'general'. Omit to list all.",
-        ),
-    ) -> str:
-        """List all stored memory entries, optionally filtered by category."""
-        result = await memory_list(neo4j_driver, database, category)
-        if not result:
-            return "No memories stored yet."
-        lines = []
-        for cat, keys in result.items():
-            lines.append(f"## {cat}")
-            for k in keys:
-                lines.append(f"- {k}")
-        return "\n".join(lines)
-
-    @mcp.tool(name="memory_delete")
-    async def _memory_delete(
-        category: str = Field(
-            ...,
-            description="Memory category: 'tools', 'user', or 'general'",
-        ),
-        key: str = Field(
-            ...,
-            description="Identifier for the memory entry to delete",
-        ),
-    ) -> str:
-        """Delete a memory entry by category and key."""
-        return await memory_delete(neo4j_driver, database, category, key)
 
     return mcp
 

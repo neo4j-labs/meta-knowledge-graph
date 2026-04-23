@@ -90,11 +90,4 @@ Add to your Claude Desktop `claude_desktop_config.json` or `.claude/settings.jso
 
 ### Memory
 
-Persistent key-value memory stored in Neo4j, organized by category (`tools`, `user`, `general`).
-
-| Tool | Description |
-|---|---|
-| `memory_write` | Write or update a markdown memory entry (learnings, user info, or facts) |
-| `memory_read` | Read a memory entry by category and key |
-| `memory_list` | List all stored memory entries, optionally filtered by category |
-| `memory_delete` | Delete a memory entry by category and key |
+Proxied from [neo4j-labs/agent-memory](https://github.com/neo4j-labs/agent-memory). Mounted when `OPENAI_API_KEY` is set. Exposes the extended-profile tools: `memory_search`, `memory_get_context`, `memory_store_message`, `memory_add_entity`, `memory_add_preference`, `memory_add_fact`, plus conversation history, entity details, graph export, relationship creation, reasoning traces, observations, and read-only Cypher.
