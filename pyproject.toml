@@ -12,6 +12,7 @@ dependencies = [
     "neo4j-mcp-server>=1.5.0",
     "python-dotenv>=1.0.0",
     "google-auth>=2.0.0",
+    "google-cloud-bigquery>=3.41.0",
 ]
 
 [build-system]
