@@ -50,24 +50,24 @@ def create_mcp_server(
     )
 
     # Mount Neo4j Agent Memory MCP server (https://github.com/neo4j-labs/agent-memory)
-    if os.environ.get("OPENAI_API_KEY"):
-        agent_memory_proxy = FastMCP.as_proxy(
-            StdioTransport(
-                command="uvx",
-                args=["--from", "neo4j-agent-memory[mcp,openai]", "neo4j-agent-memory", "mcp", "serve"],
-                env={
-                    "NEO4J_URI": db_url,
-                    "NEO4J_USERNAME": username,
-                    "NEO4J_PASSWORD": password,
-                    "NEO4J_DATABASE": database,
-                    "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"],
-                },
-            )
-        )
-        mcp.mount(agent_memory_proxy)
-        logger.info("Mounted Neo4j Agent Memory MCP proxy")
-    else:
-        logger.info("Neo4j Agent Memory MCP proxy not mounted (OPENAI_API_KEY unset)")
+    # if os.environ.get("OPENAI_API_KEY"):
+    #     agent_memory_proxy = FastMCP.as_proxy(
+    #         StdioTransport(
+    #             command="uvx",
+    #             args=["--from", "neo4j-agent-memory[mcp,openai]", "neo4j-agent-memory", "mcp", "serve"],
+    #             env={
+    #                 "NEO4J_URI": db_url,
+    #                 "NEO4J_USERNAME": username,
+    #                 "NEO4J_PASSWORD": password,
+    #                 "NEO4J_DATABASE": database,
+    #                 "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"],
+    #             },
+    #         )
+    #     )
+    #     mcp.mount(agent_memory_proxy)
+    #     logger.info("Mounted Neo4j Agent Memory MCP proxy")
+    # else:
+    #     logger.info("Neo4j Agent Memory MCP proxy not mounted (OPENAI_API_KEY unset)")
 
     # Mount Neocarta MCP server when required env vars are present
     neocarta_required = ("GCP_PROJECT_ID", "BIGQUERY_DATASET_ID", "OPENAI_API_KEY")
@@ -217,8 +217,6 @@ def create_mcp_server(
         chunk_index: Optional[int] = Field(None, description="Index of this chunk if text was split"),
         total_chunks: Optional[int] = Field(None, description="Total number of chunks if text was split"),
         chunk_of: Optional[str] = Field(None, description="Document ID of the parent document if this is a chunk"),
-        parent_import_id: Optional[str] = Field(None, description="Import ID of a previous import this is a re-run or continuation of"),
-        caller: Optional[str] = Field(None, description="Identifier for the agent or tool that triggered this import"),
     ) -> str:
         """Extract entities and relationships from text using an LLM and import them as a knowledge graph into Neo4j."""
         from hashlib import md5
@@ -301,58 +299,6 @@ def create_mcp_server(
             status = "failed"
             error_message = str(e)
             logger.error(f"Import failed: {e}")
-
-        # Create ImportEvent metadata node
-        await neo4j_driver.execute_query(
-            "CREATE (e:ImportEvent {"
-            "  id: $id,"
-            "  created_at: datetime(),"
-            "  status: $status,"
-            "  error_message: $error_message,"
-            "  model: $model,"
-            "  duration_ms: $duration_ms,"
-            "  text_length: $text_length,"
-            "  text_preview: $text_preview,"
-            "  content_hash: $content_hash,"
-            "  document_id: $document_id,"
-            "  source_uri: $source_uri,"
-            "  chunk_index: $chunk_index,"
-            "  total_chunks: $total_chunks,"
-            "  chunk_of: $chunk_of,"
-            "  parent_import_id: $parent_import_id,"
-            "  caller: $caller,"
-            "  allowed_nodes: $allowed_nodes,"
-            "  allowed_relationships: $allowed_relationships,"
-            "  nodes_created: $nodes_created,"
-            "  relationships_created: $relationships_created,"
-            "  node_types: $node_types,"
-            "  relationship_types: $relationship_types"
-            "})",
-            parameters_={
-                "id": import_id,
-                "status": status,
-                "error_message": error_message,
-                "model": model,
-                "duration_ms": duration_ms,
-                "text_length": len(text),
-                "text_preview": text[:200],
-                "content_hash": content_hash,
-                "document_id": document_id,
-                "source_uri": source_uri,
-                "chunk_index": chunk_index,
-                "total_chunks": total_chunks,
-                "chunk_of": chunk_of,
-                "parent_import_id": parent_import_id,
-                "caller": caller,
-                "allowed_nodes": allowed_nodes or [],
-                "allowed_relationships": json.dumps(allowed_relationships) if allowed_relationships else "[]",
-                "nodes_created": total_nodes,
-                "relationships_created": total_rels,
-                "node_types": sorted(node_types),
-                "relationship_types": sorted(rel_types),
-            },
-            database_=database,
-        )
 
         result = {
             "import_id": import_id,
