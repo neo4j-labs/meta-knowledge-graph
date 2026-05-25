@@ -19,8 +19,10 @@ class InjectSystemPromptTests(unittest.TestCase):
         self.assertIn("Neo4j did not return", prompt)
         self.assertIn("Inspect the available ``metagraph-mcp`` MCP tools", prompt)
         self.assertIn("ask", prompt)
+        self.assertIn("what project they are working on", prompt)
+        self.assertIn("what goals or", prompt)
+        self.assertIn("success criteria", prompt)
         self.assertIn("name and interests", prompt)
-        self.assertIn("store only a concise profile in Neo4j memory", prompt)
 
     def test_fallback_injection_log_is_concise(self) -> None:
         summary = inject_system_prompt.summarize_injection_content(
@@ -31,6 +33,8 @@ class InjectSystemPromptTests(unittest.TestCase):
 
         self.assertLess(len(summary), 300)
         self.assertIn("fallback MKG bootstrap prompt", summary)
+        self.assertIn("project", summary)
+        self.assertIn("goals", summary)
         self.assertNotIn("You are the Intelligence Agent", summary)
 
 

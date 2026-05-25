@@ -23,18 +23,18 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+HOOK_DIR = Path(__file__).resolve().parent
+if str(HOOK_DIR) not in sys.path:
+    sys.path.insert(0, str(HOOK_DIR))
+
+from project_common import (  # noqa: E402
+    ensure_project_schema,
+    link_event_to_project,
+    load_dotenv,
+    resolve_project,
+)
+
 MAX_RESPONSE_CHARS = 4000
-
-
-def load_dotenv(env_path: Path) -> None:
-    if not env_path.exists():
-        return
-    for raw in env_path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 def _neo4j_config() -> tuple[str, str, str, str]:
@@ -69,6 +69,7 @@ def _ensure_constraints(tx) -> None:
         "CREATE FULLTEXT INDEX memory_fulltext IF NOT EXISTS "
         "FOR (m:Memory) ON EACH [m.content, m.path]"
     )
+    ensure_project_schema(tx)
 
 
 def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
@@ -79,6 +80,7 @@ def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
         SET s.client = coalesce(s.client, $client)
         WITH s
         CREATE (e:Event $event_props)
+        CREATE (s)-[:HAS_EVENT]->(e)
         WITH s, e
         OPTIONAL MATCH (s)-[old_latest:LATEST_EVENT]->(prev:Event)
         DELETE old_latest
@@ -105,12 +107,15 @@ def log_event(data: dict, client: str) -> None:
     event_name = data.get("hook_event_name", "unknown")
     timestamp = datetime.now(timezone.utc).isoformat()
     event_id = f"{client}_{session_id}_{timestamp}_{event_name}"
+    project_root = Path(__file__).resolve().parents[1]
+    project = resolve_project(data, project_root)
 
     event_props = {
         "event_id": event_id,
         "event_name": event_name,
         "client": client,
         "timestamp": timestamp,
+        "project_id": project.id if project else None,
         "cwd": data.get("cwd"),
         "tool_name": data.get("tool_name"),
         "tool_use_id": data.get("tool_use_id"),
@@ -136,6 +141,14 @@ def log_event(data: dict, client: str) -> None:
         with driver.session(database=database) as session:
             session.execute_write(_ensure_constraints)
             session.execute_write(_append_event, session_id, client, event_props)
+            if project:
+                session.execute_write(
+                    link_event_to_project,
+                    project,
+                    session_id,
+                    event_id,
+                    timestamp,
+                )
 
 
 def main() -> int:

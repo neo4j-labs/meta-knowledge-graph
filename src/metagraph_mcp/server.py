@@ -1,9 +1,12 @@
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 import uuid
+from hashlib import sha1
+from pathlib import Path
 from typing import List, Literal, Optional, Union
 
 from fastmcp import Client, FastMCP
@@ -13,6 +16,32 @@ from neo4j.exceptions import Neo4jError
 from pydantic import Field
 
 from metagraph_mcp.graph_import import add_graph_documents
+
+
+MAX_LEARNING_TEXT = 500
+
+
+def _slugify_project_id(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
+    return slug or "default"
+
+
+def _resolve_project_id(explicit: Optional[str]) -> str:
+    if explicit and explicit.strip():
+        return _slugify_project_id(explicit)
+    return _slugify_project_id(Path(os.getcwd()).name or "default")
+
+
+def _learning_id(project_id: str, text: str) -> str:
+    digest = sha1(f"{project_id}\n{text.strip()}".encode("utf-8")).hexdigest()[:16]
+    return f"learning:{project_id}:{digest}"
+
+
+def _truncate(value: str, limit: int = MAX_LEARNING_TEXT) -> str:
+    value = " ".join(value.split())
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3].rstrip() + "..."
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +341,343 @@ def create_mcp_server(
         if error_message:
             result["error_message"] = error_message
 
+        return json.dumps(result, default=str)
+
+    @mcp.tool(name="project_get_context")
+    async def project_get_context(
+        project_id: Optional[str] = Field(
+            None,
+            description="Project id (slug). Defaults to the MCP server's CWD folder name.",
+        ),
+        query: Optional[str] = Field(
+            None,
+            description="Optional free-text query for fulltext ranking of learnings and decisions.",
+        ),
+        statuses: Optional[List[str]] = Field(
+            None,
+            description="Learning statuses to include. Defaults to ['approved', 'candidate'].",
+        ),
+        limit: int = Field(5, description="Max learnings AND max decisions to return."),
+    ) -> str:
+        """Return scoped project learnings and decisions for the given project.
+
+        Use this to self-bootstrap before answering questions about the active project,
+        or to recall what the agent has learned across sessions. Mirrors the data the
+        UserPromptSubmit hook injects, but on demand.
+        """
+        resolved_pid = _resolve_project_id(project_id)
+        resolved_statuses = statuses or ["approved", "candidate"]
+        normalized_query = (query or "").strip()
+
+        async with neo4j_driver.session(database=database) as session:
+            project_record = await (
+                await session.run(
+                    "MATCH (p:Project {id: $project_id}) "
+                    "RETURN p.id AS id, p.name AS name, p.status AS status, "
+                    "p.last_activity_at AS last_activity_at",
+                    project_id=resolved_pid,
+                )
+            ).single()
+
+            learnings: list[dict] = []
+            if normalized_query:
+                try:
+                    records = await session.run(
+                        """
+                        CALL db.index.fulltext.queryNodes('project_learning_fulltext', $q)
+                        YIELD node, score
+                        MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)
+                        WHERE node.status IN $statuses
+                        RETURN node.id AS id, node.text AS text, node.status AS status,
+                               node.confidence AS confidence, node.task_pattern AS task_pattern,
+                               score
+                        ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
+                                 score DESC, coalesce(node.confidence, 0.0) DESC
+                        LIMIT $limit
+                        """,
+                        project_id=resolved_pid,
+                        q=normalized_query,
+                        statuses=resolved_statuses,
+                        limit=limit,
+                    )
+                    learnings = [dict(r) async for r in records]
+                except Neo4jError:
+                    learnings = []
+
+            if not learnings:
+                records = await session.run(
+                    """
+                    MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
+                    WHERE l.status IN $statuses
+                    RETURN l.id AS id, l.text AS text, l.status AS status,
+                           l.confidence AS confidence, l.task_pattern AS task_pattern,
+                           0.0 AS score
+                    ORDER BY CASE l.status WHEN 'approved' THEN 0 ELSE 1 END,
+                             coalesce(l.last_used_at, l.updated_at, l.created_at) DESC
+                    LIMIT $limit
+                    """,
+                    project_id=resolved_pid,
+                    statuses=resolved_statuses,
+                    limit=limit,
+                )
+                learnings = [dict(r) async for r in records]
+
+            decisions: list[dict] = []
+            if normalized_query:
+                try:
+                    records = await session.run(
+                        """
+                        CALL db.index.fulltext.queryNodes('project_decision_fulltext', $q)
+                        YIELD node, score
+                        MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(node)
+                        RETURN node.id AS id, node.text AS text, node.rationale AS rationale,
+                               node.confidence AS confidence, node.task_pattern AS task_pattern,
+                               score
+                        ORDER BY score DESC, coalesce(node.confidence, 0.0) DESC
+                        LIMIT $limit
+                        """,
+                        project_id=resolved_pid,
+                        q=normalized_query,
+                        limit=limit,
+                    )
+                    decisions = [dict(r) async for r in records]
+                except Neo4jError:
+                    decisions = []
+
+            if not decisions:
+                records = await session.run(
+                    """
+                    MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(d:Decision)
+                    RETURN d.id AS id, d.text AS text, d.rationale AS rationale,
+                           d.confidence AS confidence, d.task_pattern AS task_pattern,
+                           0.0 AS score
+                    ORDER BY coalesce(d.updated_at, d.created_at) DESC
+                    LIMIT $limit
+                    """,
+                    project_id=resolved_pid,
+                    limit=limit,
+                )
+                decisions = [dict(r) async for r in records]
+
+            if learnings:
+                ids = [item["id"] for item in learnings if item.get("id")]
+                if ids:
+                    await session.run(
+                        """
+                        MATCH (l:Learning) WHERE l.id IN $ids
+                        SET l.last_used_at = datetime(),
+                            l.use_count = coalesce(l.use_count, 0) + 1
+                        """,
+                        ids=ids,
+                    )
+
+        payload = {
+            "project": dict(project_record) if project_record else {"id": resolved_pid},
+            "query": normalized_query or None,
+            "statuses": resolved_statuses,
+            "learnings": learnings,
+            "decisions": decisions,
+        }
+        return json.dumps(payload, default=str)
+
+    @mcp.tool(name="project_add_learning")
+    async def project_add_learning(
+        text: str = Field(..., description="Durable, reusable learning text (<=500 chars)."),
+        project_id: Optional[str] = Field(
+            None,
+            description="Project id (slug). Defaults to the MCP server's CWD folder name.",
+        ),
+        task_pattern: Optional[str] = Field(
+            None,
+            description="Short reusable task pattern this learning applies to.",
+        ),
+        confidence: float = Field(
+            0.6,
+            description="Confidence 0.0-1.0. Existing higher confidence is preserved.",
+        ),
+        status: str = Field(
+            "candidate",
+            description="'candidate' (default) or 'approved'. Approved skips the review queue.",
+        ),
+        source: str = Field(
+            "agent",
+            description="Provenance tag for the writer (e.g. 'agent', 'user', '<tool>_llm').",
+        ),
+    ) -> str:
+        """Persist a durable project learning. Idempotent on (project_id, text)."""
+        clean_text = _truncate((text or "").strip())
+        if not clean_text:
+            return json.dumps({"status": "error", "error": "text is required"})
+        normalized_status = status if status in {"candidate", "approved"} else "candidate"
+        clamped_confidence = max(0.0, min(1.0, float(confidence)))
+        resolved_pid = _resolve_project_id(project_id)
+        row_id = _learning_id(resolved_pid, clean_text)
+
+        async with neo4j_driver.session(database=database) as session:
+            for stmt in (
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE",
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (l:Learning) REQUIRE l.id IS UNIQUE",
+                "CREATE FULLTEXT INDEX project_learning_fulltext IF NOT EXISTS "
+                "FOR (l:Learning) ON EACH [l.text, l.task_pattern, l.summary]",
+            ):
+                await session.run(stmt)
+
+            record = await (
+                await session.run(
+                    """
+                    MERGE (p:Project {id: $project_id})
+                    ON CREATE SET p.created_at = datetime(),
+                                  p.name = $project_id,
+                                  p.source = 'agent'
+                    SET p.updated_at = datetime(),
+                        p.last_activity_at = datetime()
+                    MERGE (l:Learning {id: $row_id})
+                    ON CREATE SET l.created_at = datetime(),
+                                  l.use_count = 0,
+                                  l.support_count = 0
+                    SET l.text = $text,
+                        l.summary = $text,
+                        l.task_pattern = coalesce($task_pattern, l.task_pattern),
+                        l.status = CASE
+                            WHEN l.status = 'approved' THEN l.status
+                            ELSE $status
+                        END,
+                        l.scope = coalesce(l.scope, 'project'),
+                        l.source = coalesce(l.source, $source),
+                        l.last_source = $source,
+                        l.project_id = $project_id,
+                        l.updated_at = datetime(),
+                        l.support_count = coalesce(l.support_count, 0) + 1,
+                        l.confidence = CASE
+                            WHEN coalesce(l.confidence, 0.0) < $confidence THEN $confidence
+                            ELSE l.confidence
+                        END
+                    MERGE (p)-[:HAS_LEARNING]->(l)
+                    RETURN l.id AS id, l.text AS text, l.status AS status,
+                           l.confidence AS confidence, l.task_pattern AS task_pattern,
+                           l.support_count AS support_count,
+                           CASE WHEN l.created_at = l.updated_at THEN 'created' ELSE 'updated' END AS action
+                    """,
+                    project_id=resolved_pid,
+                    row_id=row_id,
+                    text=clean_text,
+                    task_pattern=task_pattern,
+                    status=normalized_status,
+                    source=source,
+                    confidence=clamped_confidence,
+                )
+            ).single()
+
+        return json.dumps(dict(record) if record else {}, default=str)
+
+    @mcp.tool(name="system_prompt_list")
+    async def system_prompt_list(
+        prompt_name: Optional[str] = Field(
+            None,
+            description="Filter both prompts and suggestions to this prompt_name (e.g. 'default'). None returns all.",
+        ),
+        project_id: Optional[str] = Field(
+            None,
+            description="Filter suggestions to this project_id. None returns suggestions from all projects.",
+        ),
+        statuses: Optional[List[str]] = Field(
+            None,
+            description="Suggestion statuses to include. Defaults to ['candidate'].",
+        ),
+    ) -> str:
+        """List live :SystemPrompt nodes and :SystemPromptSuggestion candidates for review."""
+        resolved_statuses = statuses or ["candidate"]
+        async with neo4j_driver.session(database=database) as session:
+            prompt_records = await session.run(
+                """
+                MATCH (p:SystemPrompt)
+                WHERE $prompt_name IS NULL OR p.name = $prompt_name
+                RETURN p.name AS name,
+                       p.content AS content,
+                       size(coalesce(p.content, '')) AS char_count,
+                       p.updated_at AS updated_at
+                ORDER BY p.name
+                """,
+                prompt_name=prompt_name,
+            )
+            prompts = [dict(r) async for r in prompt_records]
+
+            suggestion_records = await session.run(
+                """
+                MATCH (s:SystemPromptSuggestion)
+                WHERE s.status IN $statuses
+                  AND ($prompt_name IS NULL OR s.prompt_name = $prompt_name)
+                  AND ($project_id IS NULL OR s.project_id = $project_id)
+                RETURN s.id AS id,
+                       s.prompt_name AS prompt_name,
+                       s.project_id AS project_id,
+                       s.status AS status,
+                       s.instruction AS instruction,
+                       s.rationale AS rationale,
+                       s.confidence AS confidence,
+                       s.support_count AS support_count,
+                       s.source AS source,
+                       s.updated_at AS updated_at
+                ORDER BY coalesce(s.confidence, 0.0) DESC,
+                         coalesce(s.support_count, 0) DESC,
+                         s.updated_at DESC
+                """,
+                statuses=resolved_statuses,
+                prompt_name=prompt_name,
+                project_id=project_id,
+            )
+            suggestions = [dict(r) async for r in suggestion_records]
+
+        return json.dumps({"prompts": prompts, "suggestions": suggestions}, default=str)
+
+    @mcp.tool(name="system_prompt_replace")
+    async def system_prompt_replace(
+        prompt_name: str = Field(..., description="Name of the :SystemPrompt to write (e.g. 'default')."),
+        content: str = Field(..., description="Full prompt content. Replaces whatever was there."),
+    ) -> str:
+        """Replace the content of a :SystemPrompt node. Creates the node if it doesn't exist.
+
+        Also flips every :SystemPromptSuggestion with the same prompt_name from
+        'candidate' to 'applied' and links it to the prompt, so the listing query
+        stops surfacing them.
+        """
+        if not (prompt_name or "").strip():
+            return json.dumps({"status": "error", "error": "prompt_name is required"})
+        if not (content or "").strip():
+            return json.dumps({"status": "error", "error": "content is required"})
+
+        async with neo4j_driver.session(database=database) as session:
+            prompt_record = await (
+                await session.run(
+                    """
+                    MERGE (p:SystemPrompt {name: $name})
+                    ON CREATE SET p.created_at = datetime()
+                    SET p.content = $content,
+                        p.updated_at = datetime()
+                    RETURN p.name AS name,
+                           size(p.content) AS char_count,
+                           CASE WHEN p.created_at = p.updated_at THEN 'created' ELSE 'updated' END AS action
+                    """,
+                    name=prompt_name,
+                    content=content,
+                )
+            ).single()
+
+            applied_records = await session.run(
+                """
+                MATCH (p:SystemPrompt {name: $name})
+                MATCH (s:SystemPromptSuggestion {prompt_name: $name, status: 'candidate'})
+                SET s.status = 'applied',
+                    s.applied_at = datetime()
+                MERGE (s)-[:APPLIED_TO]->(p)
+                RETURN s.id AS id
+                """,
+                name=prompt_name,
+            )
+            applied_ids = [r["id"] async for r in applied_records]
+
+        result = dict(prompt_record) if prompt_record else {}
+        result["applied_suggestion_ids"] = applied_ids
         return json.dumps(result, default=str)
 
     return mcp

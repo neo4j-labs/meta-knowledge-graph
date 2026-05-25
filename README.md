@@ -32,17 +32,74 @@ The system harvests and captures decision traces and four categories of metadata
   * **External Metadata Connector:** Gather catalog metadata (schema, columns, types) from sources like Snowflake or Databricks.
   * **Approval Process:** Knowledge derived from user interactions (chat) requires explicit approval to become permanent rules, and patterns carry time-decaying confidence scores that trigger re-validation.
 
-# Metagraph MCP
+# Meta Knowledge Graph
 
-MCP server for Neo4j that provides tools for AI agents — importing, retrieval, and more — while building a **metagraph** alongside. The metagraph captures metadata about what was imported, queried, and how data relates, giving agents a persistent map of their own knowledge operations.
+A reference implementation of the architecture above for Claude Code agents,
+backed by Neo4j. It ships as two halves that form a closed capture-and-recall
+loop:
+
+- **MCP server (`metagraph-mcp`)** — surfaces project memory, the underlying
+  graph, the persisted system prompt, and (optionally) a data catalog and
+  warehouse to the agent as tools.
+- **Claude Code hooks** — log every session event, inject scoped project
+  context on prompt submit, and run an LLM adjudicator at Stop / SessionEnd
+  that distills durable `:Learning` / `:Decision` / `:SystemPromptSuggestion`
+  candidates from what just happened.
+
+The hooks write to the same graph the MCP tools read from, so each new session
+starts with the most relevant prior learnings already injected.
+
+## Architecture
+
+### MCP server
+
+Mounted under the `metagraph-mcp` prefix. Tool availability varies by
+environment — the data-catalog and warehouse tools are only mounted when the
+required env vars are present.
+
+| Tool | Purpose |
+|---|---|
+| `project_get_context` | Fetch approved + candidate `:Learning` and `:Decision` nodes for the current project, optionally fulltext-ranked by a query. |
+| `project_add_learning` | Idempotent direct write of one durable learning. Use for user-asserted constraints the auto-capture would miss; routine work should be left to the adjudicator. |
+| `system_prompt_list` / `system_prompt_replace` | Read/update the persisted `(:SystemPrompt {name})` node that `inject_system_prompt.py` loads on session start. |
+| `neo4j_get_schema` / `neo4j_read_cypher` | Read access to the graph (proxied from the official neo4j-mcp-server). |
+| `import_text_to_kg` | Extract entities and relationships from raw text via an LLM and persist them. |
+| `bigquery_execute_query` | Read-only SQL against the configured BigQuery project. Optional. |
+| `neocarta_*` | Data-catalog navigation plus hybrid vector + fulltext search over schemas, tables, and columns. Optional; requires `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID`, and `OPENAI_API_KEY`. |
+
+### Hooks
+
+Wire these into `.claude/settings.json` under the corresponding events. All
+hooks swallow their own exceptions so a Neo4j outage never blocks the session.
+
+| Hook event | Script | Behavior |
+|---|---|---|
+| `SessionStart` | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: $MKG_PROMPT_NAME})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and write a refined system prompt back via `system_prompt_replace` so the next session skips the fallback. |
+| `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits scoped to the current project. Marks served learnings as used. |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd` | `hooks/log_event.py` | Persists each event as an `:Event` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the adjudicator later reads. |
+| `Stop`, `SessionEnd` | `hooks/process_project.py` | Pulls the session's events that the current `(project, mode)` hasn't processed yet, builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions per category. Writes new `:Learning` / `:Decision` / `:SystemPromptSuggestion` nodes with status `candidate`. |
+
+### Graph model
+
+```
+(:Project {id})
+   ├─[:HAS_SESSION]→ (:Session)─[:HAS_EVENT]→ (:Event)─[:NEXT]→ ...
+   │                            ─[:INJECTED]→ (:Injection)
+   ├─[:HAS_LEARNING]→ (:Learning {status: 'candidate'|'approved', confidence})
+   ├─[:HAS_DECISION]→ (:Decision)
+   ├─[:HAS_SYSTEM_PROMPT_SUGGESTION]→ (:SystemPromptSuggestion)
+   └─[:HAS_PROCESSING]→ (:ProjectProcessing)─[:PROCESSED_EVENT]→ (:Event)
+                                            ─[:PRODUCED_LEARNING]→ (:Learning)
+                                            ─[:UPDATED_LEARNING]→ (:Learning)
+                                            ─[:PRODUCED_DECISION]→ (:Decision)
+```
+
+Candidate learnings flow through retrieval but are review-gated — they stay
+`candidate` until promoted to `approved`. Fulltext indexes
+`project_learning_fulltext` and `project_decision_fulltext` back the retrieval
+path.
 
 ## Quick Start
-
-### Run directly from the repo
-
-```bash
-npx @anthropic-ai/claude-code --mcp-server "metagraph-mcp: npx -y @anthropic-ai/sdk run -- pip install git+https://github.com/tomasonjo/metagraph-mcp.git && metagraph-mcp"
-```
 
 ### Run locally during development
 
@@ -53,7 +110,7 @@ Add to your Claude Desktop `claude_desktop_config.json` or `.claude/settings.jso
   "mcpServers": {
     "metagraph-mcp": {
       "command": "uv",
-      "args": ["--directory", "/path/to/metagraph-mcp", "run", "metagraph-mcp"],
+      "args": ["--directory", "/path/to/meta-knowledge-graph", "run", "metagraph-mcp"],
       "env": {
         "NEO4J_URI": "bolt://localhost:7687",
         "NEO4J_USERNAME": "neo4j",
@@ -66,28 +123,21 @@ Add to your Claude Desktop `claude_desktop_config.json` or `.claude/settings.jso
 }
 ```
 
+Then register the four hook scripts in `.claude/settings.json` under their
+corresponding `hooks.SessionStart` / `UserPromptSubmit` / `PreToolUse` /
+`PostToolUse` / `Stop` / `SessionEnd` entries.
+
 ## Configuration
 
-| Env Variable | CLI Flag | Default |
-|---|---|---|
-| `NEO4J_URI` | `--db-url` | `bolt://localhost:7687` |
-| `NEO4J_USERNAME` | `--username` | `neo4j` |
-| `NEO4J_PASSWORD` | `--password` | `password` |
-| `NEO4J_DATABASE` | `--database` | `neo4j` |
-| `NEO4J_TRANSPORT` | `--transport` | `stdio` |
-| `OPENAI_API_KEY` | — | — |
-| `LLM_MODEL` | — | `gpt-5.4-mini` |
-
-## Tools
-
-### Knowledge Graph
-
-| Tool | Description |
-|---|---|
-| `import_text_to_kg` | Extract entities and relationships from text using an LLM and import them as a knowledge graph into Neo4j |
-| `neo4j_get_schema` | Get the schema of the Neo4j database (node labels, relationship types, properties) |
-| `neo4j_read_cypher` | Run a read-only Cypher query against the Neo4j database |
-
-### Memory
-
-Proxied from [neo4j-labs/agent-memory](https://github.com/neo4j-labs/agent-memory). Mounted when `OPENAI_API_KEY` is set. Exposes the extended-profile tools: `memory_search`, `memory_get_context`, `memory_store_message`, `memory_add_entity`, `memory_add_preference`, `memory_add_fact`, plus conversation history, entity details, graph export, relationship creation, reasoning traces, observations, and read-only Cypher.
+| Env Variable | CLI Flag | Default | Notes |
+|---|---|---|---|
+| `NEO4J_URI` | `--db-url` | `bolt://localhost:7687` | |
+| `NEO4J_USERNAME` | `--username` | `neo4j` | |
+| `NEO4J_PASSWORD` | `--password` | `password` | |
+| `NEO4J_DATABASE` | `--database` | `neo4j` | |
+| `NEO4J_TRANSPORT` | `--transport` | `stdio` | |
+| `OPENAI_API_KEY` | — | — | Required by `import_text_to_kg`, `process_project.py`, and Neocarta. |
+| `LLM_MODEL` | — | `gpt-5.4-mini` | Default model for LLM calls. |
+| `MKG_LEARNING_MODEL` | — | falls back to `LLM_MODEL` | Override just the adjudicator model. |
+| `MKG_PROMPT_NAME` | — | `default` | Which `(:SystemPrompt {name})` node to load on session start. |
+| `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID` | — | — | Required to mount the Neocarta and BigQuery tools. |
