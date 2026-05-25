@@ -2,13 +2,7 @@
   "mcpServers": {
     "metagraph-mcp": {
       "command": "uv",
-      "args": [
-        "run",
-        "--project",
-        "${CLAUDE_PROJECT_DIR}",
-        "--no-sync",
-        "metagraph-mcp"
-      ]
+      "args": ["run", "--no-sync", "metagraph-mcp"]
     }
   }
 }

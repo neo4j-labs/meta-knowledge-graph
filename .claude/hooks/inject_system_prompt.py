@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_PROMPT = """You are the Intelligence Agent for the Meta Knowledge Graph (MKG).
@@ -28,9 +29,12 @@ You have specialized tools available — prefer them over generic search:
 - **Neocarta** (`mcp__metagraph-mcp__neocarta_*`)
   Search and read the data catalog. Use to discover schemas, tables, and columns
   before answering questions about enterprise data. Start with
-  ``neocarta_list_schemas`` / ``neocarta_list_tables`` for navigation,
-  ``neocarta_get_context_by_*_vector_search`` for semantic lookup,
-  ``neocarta_full_schema`` when you need the complete picture.
+  ``neocarta_list_schemas`` / ``neocarta_list_tables_by_schema`` for navigation,
+  ``neocarta_get_context_by_column_hybrid_search`` /
+  ``neocarta_get_context_by_table_hybrid_search`` /
+  ``neocarta_get_context_by_schema_and_table_vector_search`` for semantic lookup
+  (each takes ``text_content``),
+  ``neocarta_get_full_metadata_schema`` when you need the complete picture.
 
 - **Memory** (`mcp__metagraph-mcp__memory_*`)
   Persistent agent memory backed by Neo4j. ``memory_search`` / ``memory_get_context``
@@ -67,16 +71,21 @@ def load_dotenv(env_path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def _neo4j_config() -> tuple[str, str, str, str]:
+    uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    user = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD", "password")
+    database = os.getenv("NEO4J_DATABASE", "neo4j")
+    return uri, user, password, database
+
+
 def fetch_prompt_from_neo4j(name: str) -> str | None:
     try:
         from neo4j import GraphDatabase
     except ImportError:
         return None
 
-    uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    user = os.getenv("NEO4J_USERNAME", "neo4j")
-    password = os.getenv("NEO4J_PASSWORD", "password")
-    database = os.getenv("NEO4J_DATABASE", "neo4j")
+    uri, user, password, database = _neo4j_config()
 
     try:
         with GraphDatabase.driver(uri, auth=(user, password)) as driver:
@@ -93,12 +102,82 @@ def fetch_prompt_from_neo4j(name: str) -> str | None:
     return None
 
 
+def log_injection(
+    session_id: str,
+    hook_event: str,
+    target: str,
+    prompt_name: str,
+    content: str,
+    source: str,
+) -> None:
+    try:
+        from neo4j import GraphDatabase
+    except ImportError:
+        return
+
+    uri, user, password, database = _neo4j_config()
+    timestamp = datetime.now(timezone.utc).isoformat()
+    injection_id = f"{session_id}_{timestamp}_{hook_event}_{target}"
+
+    try:
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database) as session:
+                session.run(
+                    """
+                    MERGE (s:Session {session_id: $session_id})
+                    ON CREATE SET s.created_at = $timestamp
+                    CREATE (i:Injection {
+                        injection_id: $injection_id,
+                        hook_event: $hook_event,
+                        target: $target,
+                        prompt_name: $prompt_name,
+                        source: $source,
+                        content: $content,
+                        char_count: $char_count,
+                        timestamp: $timestamp
+                    })
+                    CREATE (s)-[:INJECTED]->(i)
+                    """,
+                    session_id=session_id,
+                    injection_id=injection_id,
+                    hook_event=hook_event,
+                    target=target,
+                    prompt_name=prompt_name,
+                    source=source,
+                    content=content,
+                    char_count=len(content),
+                    timestamp=timestamp,
+                )
+    except Exception as exc:  # pragma: no cover - hook must never crash the session
+        print(f"[inject_system_prompt] injection log failed: {exc}", file=sys.stderr)
+
+
 def main() -> int:
     project_root = Path(__file__).resolve().parents[2]
     load_dotenv(project_root / ".env")
 
+    try:
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else {}
+    except Exception:
+        payload = {}
+
+    session_id = payload.get("session_id", "unknown")
+    hook_event = payload.get("hook_event_name", "SessionStart")
+
     prompt_name = os.getenv("MKG_PROMPT_NAME", "default")
-    prompt = fetch_prompt_from_neo4j(prompt_name) or DEFAULT_PROMPT
+    fetched = fetch_prompt_from_neo4j(prompt_name)
+    prompt = fetched or DEFAULT_PROMPT
+    source = "neo4j" if fetched else "default"
+
+    log_injection(
+        session_id=session_id,
+        hook_event=hook_event,
+        target="additionalContext",
+        prompt_name=prompt_name,
+        content=prompt,
+        source=source,
+    )
 
     output = {
         "hookSpecificOutput": {

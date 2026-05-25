@@ -121,18 +121,7 @@ def create_mcp_server(
                 env=neocarta_env,
             )
         )
-        mcp.mount(
-            neocarta_proxy,
-            prefix="neocarta",
-            tool_names={
-                "list_schemas": "neocarta_list_schemas",
-                "list_tables_by_schema": "neocarta_list_tables",
-                "get_full_metadata_schema": "neocarta_full_schema",
-                "get_metadata_schema_by_column_semantic_similarity": "neocarta_search_columns",
-                "get_metadata_schema_by_table_semantic_similarity": "neocarta_search_tables",
-                "get_metadata_schema_by_schema_and_table_semantic_similarity": "neocarta_search_schema_tables",
-            },
-        )
+        mcp.mount(neocarta_proxy, prefix="neocarta")
         logger.info("Mounted Neocarta MCP proxy")
     else:
         missing = [v for v in neocarta_required if not os.environ.get(v)]

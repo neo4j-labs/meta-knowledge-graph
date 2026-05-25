@@ -2,8 +2,8 @@
 """Hook: log every Claude Code lifecycle event to Neo4j as a linked list.
 
 Wired in .claude/settings.json for SessionStart, UserPromptSubmit, PreToolUse,
-PostToolUse, and Stop. Reads the hook payload from stdin and appends an Event
-to the per-session chain.
+PostToolUse, Notification, Stop, SubagentStop, PreCompact, and SessionEnd.
+Reads the hook payload from stdin and appends an Event to the per-session chain.
 
 Graph shape::
 
