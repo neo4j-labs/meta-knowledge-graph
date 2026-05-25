@@ -2,3 +2,14 @@
 .venv
 *.pyc
 __pycache__
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+!.env.sample
+cred.json
+*-credentials.json
+*-service-account.json
+
+worktrees
