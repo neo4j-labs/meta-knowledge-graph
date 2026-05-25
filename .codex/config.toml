@@ -1,0 +1,7 @@
+[mcp_servers.metagraph-mcp]
+args = [
+    "run",
+    "--no-sync",
+    "metagraph-mcp",
+]
+command = "uv"

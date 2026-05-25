@@ -2,7 +2,7 @@
 """SessionStart / UserPromptSubmit hook.
 
 Injects a system prompt fetched from a Neo4j ``(:SystemPrompt {name})`` node into
-the Claude Code session as additional context. Falls back to ``DEFAULT_PROMPT``
+the agent session as additional context. Falls back to a bootstrap prompt
 if Neo4j is unreachable or the requested prompt does not exist.
 
 Customize the active prompt by either:
@@ -57,6 +57,21 @@ Operating principles:
    compounds over time.
 """
 
+FALLBACK_BOOTSTRAP_PROMPT = DEFAULT_PROMPT + """
+
+Neo4j did not return a ``SystemPrompt`` for this session. Bootstrap the MKG
+context before continuing:
+
+1. Inspect the available ``metagraph-mcp`` MCP tools so you know which Neo4j,
+   memory, Neocarta, and BigQuery capabilities are callable in this runtime.
+2. If the user's name and interests are not already available from memory, ask
+   the user to share their name and the topics or projects they care about.
+3. After the user answers, store only a concise profile in Neo4j memory. Keep it
+   short, factual, and user-provided, for example: "User is <name>; interests:
+   <comma-separated interests>." Do not store a raw transcript or a verbose
+   biography.
+"""
+
 
 def load_dotenv(env_path: Path) -> None:
     if not env_path.exists():
@@ -96,10 +111,23 @@ def fetch_prompt_from_neo4j(name: str) -> str | None:
                     name=name,
                 ).single()
         if record and record.get("content"):
-            return str(record["content"])
+            content = str(record["content"])
+            if content.strip():
+                return content
     except Exception as exc:  # pragma: no cover - hook must never crash the session
         print(f"[inject_system_prompt] Neo4j lookup failed: {exc}", file=sys.stderr)
     return None
+
+
+def summarize_injection_content(prompt_name: str, content: str, source: str) -> str:
+    if source == "neo4j":
+        return f"Injected SystemPrompt {prompt_name!r} from Neo4j ({len(content)} chars)."
+    return (
+        "Injected fallback MKG bootstrap prompt because Neo4j did not return a "
+        "SystemPrompt. It tells the agent to inspect metagraph-mcp tools, ask "
+        "for the user's name and interests, and store a concise Neo4j memory "
+        "profile."
+    )
 
 
 def log_injection(
@@ -118,6 +146,7 @@ def log_injection(
     uri, user, password, database = _neo4j_config()
     timestamp = datetime.now(timezone.utc).isoformat()
     injection_id = f"{session_id}_{timestamp}_{hook_event}_{target}"
+    content_summary = summarize_injection_content(prompt_name, content, source)
 
     try:
         with GraphDatabase.driver(uri, auth=(user, password)) as driver:
@@ -132,8 +161,11 @@ def log_injection(
                         target: $target,
                         prompt_name: $prompt_name,
                         source: $source,
-                        content: $content,
-                        char_count: $char_count,
+                        content: $content_summary,
+                        content_summary: $content_summary,
+                        char_count: $stored_char_count,
+                        original_char_count: $original_char_count,
+                        stored_char_count: $stored_char_count,
                         timestamp: $timestamp
                     })
                     CREATE (s)-[:INJECTED]->(i)
@@ -144,8 +176,9 @@ def log_injection(
                     target=target,
                     prompt_name=prompt_name,
                     source=source,
-                    content=content,
-                    char_count=len(content),
+                    content_summary=content_summary,
+                    original_char_count=len(content),
+                    stored_char_count=len(content_summary),
                     timestamp=timestamp,
                 )
     except Exception as exc:  # pragma: no cover - hook must never crash the session
@@ -167,7 +200,7 @@ def main() -> int:
 
     prompt_name = os.getenv("MKG_PROMPT_NAME", "default")
     fetched = fetch_prompt_from_neo4j(prompt_name)
-    prompt = fetched or DEFAULT_PROMPT
+    prompt = fetched or FALLBACK_BOOTSTRAP_PROMPT
     source = "neo4j" if fetched else "default"
 
     log_injection(
