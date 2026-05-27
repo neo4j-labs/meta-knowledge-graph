@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -172,6 +173,14 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("--session-id", command)
         self.assertIn("session-1", command)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_codex_stop_hook_logs_then_processes_project(self) -> None:
+        config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
+        stop_hooks = config["hooks"]["Stop"][0]["hooks"]
+
+        self.assertEqual(len(stop_hooks), 2)
+        self.assertIn("hooks/log_event.py --client codex", stop_hooks[0]["command"])
+        self.assertIn("hooks/process_project.py --mode turn --background", stop_hooks[1]["command"])
 
 
 if __name__ == "__main__":

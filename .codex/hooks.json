@@ -65,6 +65,10 @@
           {
             "type": "command",
             "command": "uv run --no-sync python hooks/log_event.py --client codex"
+          },
+          {
+            "type": "command",
+            "command": "uv run --no-sync python hooks/process_project.py --mode turn --background"
           }
         ]
       }

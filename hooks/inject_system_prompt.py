@@ -51,28 +51,30 @@ available in this session):
 
 FALLBACK_BOOTSTRAP_PROMPT = DEFAULT_PROMPT + """
 
-Neo4j did not return a ``SystemPrompt`` for this session. Bootstrap the MKG
-context before continuing — and once you have done it, persist what you learned
-so future sessions skip this step:
+Session bootstrap (run before doing other work, unless the answers are already
+in project context):
 
 1. Inspect the available ``metagraph-mcp`` MCP tools and confirm what is
-   actually callable in this runtime. Treat the live tool list as authoritative.
-2. Pull existing project-scoped learnings and decisions for this project. If
-   they already cover the active project context, do not ask the user to repeat
-   themselves.
-3. Only if project context is still unclear, ask:
+   actually callable in this runtime. Treat the live tool list as authoritative,
+   and note which capabilities (graph reads, BigQuery, neocarta, project memory,
+   system-prompt management, etc.) are present.
+2. Pull existing project-scoped learnings and decisions. If they already cover
+   the active project context, do not ask the user to repeat themselves.
+3. If the user's name, the active project, or its goals are still unknown, ask
+   for them — concise answers only:
+   - the user's name,
    - what project they are working on,
    - what goals or outcomes they want,
    - important constraints, relevant systems/assets,
-   - what success criteria define "done",
-   - and the user's name and interests if not already known.
-   Keep project and goals first; name/interests are secondary.
+   - what success criteria define "done".
+   Keep project and goals first; name is secondary but worth having.
 4. Store only concise, factual, user-provided answers as durable learnings:
-   project name, goals, constraints, success criteria, short user profile. Do
-   not store a raw transcript or a verbose biography.
-5. After bootstrapping, write a refined ``SystemPrompt`` back to Neo4j that
-   reflects the discovered tools and project specifics, so the next session
-   loads that prompt instead of this fallback.
+   user name, project name, goals, constraints, success criteria. Do not store
+   a raw transcript or a verbose biography.
+5. Once bootstrap answers are gathered, write a refined ``SystemPrompt`` back
+   to Neo4j (via ``system_prompt_replace`` or the equivalent tool in this
+   runtime) that folds in the discovered tools, the user's name, and the
+   project specifics, so the next session loads that prompt directly.
 """
 
 
@@ -126,10 +128,10 @@ def summarize_injection_content(prompt_name: str, content: str, source: str) -> 
     if source == "neo4j":
         return f"Injected SystemPrompt {prompt_name!r} from Neo4j ({len(content)} chars)."
     return (
-        "Injected fallback MKG bootstrap prompt because Neo4j did not return a "
-        "SystemPrompt. It tells the agent to inspect metagraph-mcp tools, ask "
-        "for the active project, goals, constraints, success criteria, and "
-        "concise user profile details when missing."
+        f"Injected default MKG SystemPrompt (no persisted node for {prompt_name!r}; "
+        f"{len(content)} chars). Drives session bootstrap: inspect metagraph-mcp "
+        "tools, gather user name / project / goals / constraints / success "
+        "criteria when missing, then persist a refined SystemPrompt to Neo4j."
     )
 
 
@@ -164,11 +166,12 @@ def log_injection(
                         target: $target,
                         prompt_name: $prompt_name,
                         source: $source,
-                        content: $content_summary,
+                        content: $content,
                         content_summary: $content_summary,
-                        char_count: $stored_char_count,
+                        char_count: $char_count,
                         original_char_count: $original_char_count,
                         stored_char_count: $stored_char_count,
+                        summary_char_count: $summary_char_count,
                         timestamp: $timestamp
                     })
                     CREATE (s)-[:INJECTED]->(i)
@@ -179,9 +182,12 @@ def log_injection(
                     target=target,
                     prompt_name=prompt_name,
                     source=source,
+                    content=content,
                     content_summary=content_summary,
+                    char_count=len(content),
                     original_char_count=len(content),
-                    stored_char_count=len(content_summary),
+                    stored_char_count=len(content),
+                    summary_char_count=len(content_summary),
                     timestamp=timestamp,
                 )
     except Exception as exc:  # pragma: no cover - hook must never crash the session
