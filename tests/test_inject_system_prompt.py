@@ -20,13 +20,13 @@ class InjectSystemPromptTests(unittest.TestCase):
         prompt = inject_system_prompt.FALLBACK_BOOTSTRAP_PROMPT
 
         self.assertIn("Session bootstrap", prompt)
-        self.assertIn("Inspect the available ``metagraph-mcp`` MCP tools", prompt)
+        self.assertIn("Inspect the available ``meta-knowledge-graph`` MCP tools", prompt)
         self.assertIn("ask", prompt)
         self.assertIn("the user's name", prompt)
         self.assertIn("what project they are working on", prompt)
         self.assertIn("what goals or", prompt)
         self.assertIn("success criteria", prompt)
-        self.assertIn("system_prompt_replace", prompt)
+        self.assertIn("persist a refined ``SystemPrompt`` back", prompt)
 
     def test_fallback_injection_log_is_concise(self) -> None:
         summary = inject_system_prompt.summarize_injection_content(

@@ -1,7 +1,7 @@
-[mcp_servers.metagraph-mcp]
+[mcp_servers.meta-knowledge-graph]
 args = [
     "run",
     "--no-sync",
-    "metagraph-mcp",
+    "meta-knowledge-graph",
 ]
 command = "uv"

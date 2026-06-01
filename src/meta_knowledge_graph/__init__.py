@@ -4,13 +4,13 @@ import os
 
 from dotenv import load_dotenv
 
-from metagraph_mcp import server
+from meta_knowledge_graph import server
 
 load_dotenv()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Neo4j Metagraph MCP Server")
+    parser = argparse.ArgumentParser(description="Meta Knowledge Graph MCP Server")
     parser.add_argument(
         "--db-url",
         default=os.environ.get("NEO4J_URI", "bolt://localhost:7687"),

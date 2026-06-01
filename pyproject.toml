@@ -1,10 +1,11 @@
 [project]
-name = "metagraph-mcp"
+name = "meta-knowledge-graph"
 version = "0.1.0"
-description = "MCP server for Neo4j metagraph operations"
+description = "Meta Knowledge Graph: MCP server and hooks for Neo4j-backed agent memory"
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp>=2.10.5,<3",
+    "httpx>=0.28.0,<1",
     "neo4j>=5.26.0",
     "pydantic>=2.10.1",
     "langchain-experimental>=0.3.0",
@@ -21,4 +22,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-metagraph-mcp = "metagraph_mcp:main"
+meta-knowledge-graph = "meta_knowledge_graph:main"

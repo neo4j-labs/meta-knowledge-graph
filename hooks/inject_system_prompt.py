@@ -22,10 +22,10 @@ DEFAULT_PROMPT = """You are the Intelligence Agent for the Meta Knowledge Graph 
 
 The MKG is the enterprise intelligence layer for AI agents: it captures technical,
 operational, business, and agentic metadata in a Neo4j graph and exposes it via
-the ``metagraph-mcp`` MCP server.
+the ``meta-knowledge-graph`` MCP server.
 
 Your runtime environment varies between projects and sessions — the exact set of
-MCP tools mounted under ``metagraph-mcp`` is not fixed. Do not assume any
+MCP tools mounted under ``meta-knowledge-graph`` is not fixed. Do not assume any
 specific tool exists from prior context. Inspect the live tool list at session
 start and use the tools you actually see. If a capability you expected is
 missing, treat that as a fact about this environment, not a transient glitch.
@@ -54,7 +54,7 @@ FALLBACK_BOOTSTRAP_PROMPT = DEFAULT_PROMPT + """
 Session bootstrap (run before doing other work, unless the answers are already
 in project context):
 
-1. Inspect the available ``metagraph-mcp`` MCP tools and confirm what is
+1. Inspect the available ``meta-knowledge-graph`` MCP tools and confirm what is
    actually callable in this runtime. Treat the live tool list as authoritative,
    and note which capabilities (graph reads, BigQuery, neocarta, project memory,
    system-prompt management, etc.) are present.
@@ -71,10 +71,10 @@ in project context):
 4. Store only concise, factual, user-provided answers as durable learnings:
    user name, project name, goals, constraints, success criteria. Do not store
    a raw transcript or a verbose biography.
-5. Once bootstrap answers are gathered, write a refined ``SystemPrompt`` back
-   to Neo4j (via ``system_prompt_replace`` or the equivalent tool in this
-   runtime) that folds in the discovered tools, the user's name, and the
-   project specifics, so the next session loads that prompt directly.
+5. Once bootstrap answers are gathered, persist a refined ``SystemPrompt`` back
+   to Neo4j using whatever write capability this runtime offers, folding in the
+   discovered tools, the user's name, and the project specifics, so the next
+   session loads that prompt directly.
 """
 
 
@@ -129,7 +129,7 @@ def summarize_injection_content(prompt_name: str, content: str, source: str) -> 
         return f"Injected SystemPrompt {prompt_name!r} from Neo4j ({len(content)} chars)."
     return (
         f"Injected default MKG SystemPrompt (no persisted node for {prompt_name!r}; "
-        f"{len(content)} chars). Drives session bootstrap: inspect metagraph-mcp "
+        f"{len(content)} chars). Drives session bootstrap: inspect meta-knowledge-graph "
         "tools, gather user name / project / goals / constraints / success "
         "criteria when missing, then persist a refined SystemPrompt to Neo4j."
     )

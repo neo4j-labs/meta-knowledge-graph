@@ -7,18 +7,43 @@ import time
 import uuid
 from hashlib import sha1
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import Any, List, Literal, Optional, Union
 
+import httpx
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
-from neo4j import AsyncGraphDatabase, AsyncDriver, RoutingControl
+from neo4j import AsyncGraphDatabase, AsyncDriver
 from neo4j.exceptions import Neo4jError
 from pydantic import Field
 
-from metagraph_mcp.graph_import import add_graph_documents
+from meta_knowledge_graph.graph_import import add_graph_documents
 
 
 MAX_LEARNING_TEXT = 500
+DIFFBOT_API_BASE_URL = "https://kg.diffbot.com/kg/v3"
+DIFFBOT_TIMEOUT_SECONDS = 30.0
+DIFFBOT_NEWS_FILTER = (
+    "title pageUrl siteName date author sentiment tags.label publisherCountry"
+)
+DIFFBOT_ORGANIZATION_ENHANCE_FILTER = (
+    "name allNames homepageUri linkedInUri twitterUri description summary "
+    "industries categories nbEmployees revenue locations ceo"
+)
+DIFFBOT_PERSON_ENHANCE_FILTER = (
+    "name allNames linkedInUri twitterUri description summary location "
+    "employments skills"
+)
+DIFFBOT_PERSON_ONLY_ENHANCE_FIELDS = {"email", "employer", "title"}
+DIFFBOT_ENHANCE_IDENTIFIER_FIELDS = {
+    "id",
+    "name",
+    "url",
+    "email",
+    "phone",
+    "location",
+    "employer",
+    "title",
+}
 
 
 def _slugify_project_id(value: str) -> str:
@@ -43,6 +68,145 @@ def _truncate(value: str, limit: int = MAX_LEARNING_TEXT) -> str:
         return value
     return value[: limit - 3].rstrip() + "..."
 
+
+def _json_error(error: str, **extra: Any) -> str:
+    return json.dumps({"status": "error", "error": error, **extra}, default=str)
+
+
+def _diffbot_payload_error_message(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+
+    error = payload.get("error")
+    message = payload.get("message")
+    if isinstance(error, str) and error:
+        return error
+    if isinstance(message, str) and message:
+        return message
+    if error:
+        return str(error)
+    return None
+
+
+def _diffbot_filter_parse_failed(response: httpx.Response) -> bool:
+    if response.status_code != 422:
+        return False
+
+    try:
+        payload: Any = response.json()
+    except ValueError:
+        payload = {}
+
+    message = _diffbot_payload_error_message(payload) or response.text
+    return "parse filter failed" in message.lower()
+
+
+def _diffbot_token() -> Optional[str]:
+    for env_var in ("DIFFBOT_TOKEN", "DIFFBOT_API_TOKEN", "DIFFBOT_API_KEY"):
+        token = os.environ.get(env_var)
+        if token and token.strip():
+            return token.strip()
+    return None
+
+
+def _has_diffbot_token() -> bool:
+    return _diffbot_token() is not None
+
+
+def _compact_params(params: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in params.items() if value not in (None, "")}
+
+
+def _bounded_int(value: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, int(value)))
+
+
+def _build_diffbot_enhance_params(
+    entity_type: str,
+    values: dict[str, Any],
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    normalized_type = (entity_type or "").strip()
+    if normalized_type not in {"Organization", "Person"}:
+        return None, "entity_type must be either 'Organization' or 'Person'"
+
+    compact_values = _compact_params(values)
+    identifiers = DIFFBOT_ENHANCE_IDENTIFIER_FIELDS & compact_values.keys()
+    if not identifiers:
+        return (
+            None,
+            "At least one identifier is required, such as name, url, id, email, or phone",
+        )
+
+    person_only = DIFFBOT_PERSON_ONLY_ENHANCE_FIELDS & compact_values.keys()
+    if normalized_type == "Organization" and person_only:
+        return (
+            None,
+            "These fields are only valid for Person enhance requests: "
+            + ", ".join(sorted(person_only)),
+        )
+
+    params = {"type": normalized_type}
+    params.update(compact_values)
+    return params, None
+
+
+def _diffbot_enhance_filter(entity_type: str) -> str:
+    if entity_type == "Person":
+        return DIFFBOT_PERSON_ENHANCE_FILTER
+    return DIFFBOT_ORGANIZATION_ENHANCE_FILTER
+
+
+def _diffbot_response_payload(response: httpx.Response) -> dict[str, Any]:
+    try:
+        payload: Any = response.json()
+    except ValueError:
+        payload = {"raw": response.text}
+
+    if response.is_error:
+        message = _diffbot_payload_error_message(payload)
+        return {
+            "status": "error",
+            "status_code": response.status_code,
+            "error": message or response.reason_phrase,
+            "response": payload,
+        }
+
+    return payload if isinstance(payload, dict) else {"data": payload}
+
+
+async def _diffbot_get_json(path: str, params: dict[str, Any]) -> str:
+    token = _diffbot_token()
+    if not token:
+        return _json_error(
+            "Diffbot token is required. Set DIFFBOT_TOKEN, DIFFBOT_API_TOKEN, "
+            "or DIFFBOT_API_KEY."
+        )
+
+    request_params = {"token": token, **_compact_params(params)}
+    try:
+        async with httpx.AsyncClient(timeout=DIFFBOT_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                f"{DIFFBOT_API_BASE_URL}/{path.lstrip('/')}",
+                params=request_params,
+                headers={"Accept": "application/json"},
+            )
+            if "filter" in request_params and _diffbot_filter_parse_failed(response):
+                retry_params = {
+                    key: value
+                    for key, value in request_params.items()
+                    if key != "filter"
+                }
+                response = await client.get(
+                    f"{DIFFBOT_API_BASE_URL}/{path.lstrip('/')}",
+                    params=retry_params,
+                    headers={"Accept": "application/json"},
+                )
+    except httpx.HTTPError as e:
+        return _json_error(f"Diffbot request failed: {e}")
+
+    return json.dumps(_diffbot_response_payload(response), default=str)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,7 +217,7 @@ def create_mcp_server(
     username: str = "",
     password: str = "",
 ) -> FastMCP:
-    mcp = FastMCP("metagraph-mcp")
+    mcp = FastMCP("meta-knowledge-graph")
 
     # Mount official Neo4j MCP server (read-only: excludes write-cypher)
     neo4j_mcp_proxy = FastMCP.as_proxy(
@@ -230,6 +394,114 @@ def create_mcp_server(
         )
     else:
         logger.info("BigQuery remote MCP proxy not mounted (BIGQUERY_MCP_URL unset)")
+
+    if _has_diffbot_token():
+
+        @mcp.tool(name="search_news")
+        async def search_news(
+            dql: str = Field(
+                ...,
+                description=(
+                    "Diffbot DQL Article query for sales news monitoring. Examples: "
+                    'company news from the last 3 days = `type:Article tags.label:"Acme Corp" '
+                    'date<3d language:"en" sortBy:date`; topic news from the last 3 days = '
+                    '`type:Article tags.label:"supply chain disruption" date<3d '
+                    'language:"en" sortBy:date`.'
+                ),
+            ),
+            max_results: int = Field(
+                10,
+                description="Maximum news articles to return, from 1 to 25.",
+            ),
+        ) -> str:
+            """Search recent Diffbot news/articles with a concise sales-friendly payload."""
+            clean_dql = (dql or "").strip()
+            if not clean_dql:
+                return _json_error("dql is required")
+            if "type:article" not in clean_dql.lower():
+                return _json_error("search_news requires a DQL query with type:Article")
+
+            params = {
+                "query": clean_dql,
+                "size": _bounded_int(max_results, 1, 25),
+                "format": "json",
+                "cluster": "dedupe",
+                "filter": DIFFBOT_NEWS_FILTER,
+            }
+
+            return await _diffbot_get_json("dql", params)
+
+        @mcp.tool(name="enhance_entity")
+        async def enhance_entity(
+            entity_type: Literal["Organization", "Person"] = Field(
+                ...,
+                description="Entity type to enrich. Allowed values: Organization or Person.",
+            ),
+            name: Optional[str] = Field(
+                None,
+                description="Organization or person name to enhance.",
+            ),
+            url: Optional[str] = Field(
+                None,
+                description="Origin or homepage URL for the entity.",
+            ),
+            id: Optional[str] = Field(
+                None,
+                description="Diffbot ID of the entity to enhance.",
+            ),
+            location: Optional[str] = Field(
+                None,
+                description="Location hint for either an Organization or Person.",
+            ),
+            phone: Optional[str] = Field(
+                None,
+                description="Phone hint for either an Organization or Person.",
+            ),
+            email: Optional[str] = Field(
+                None,
+                description="Person email hint. Diffbot Enhance accepts email only for Person.",
+            ),
+            employer: Optional[str] = Field(
+                None,
+                description="Person employer hint.",
+            ),
+            title: Optional[str] = Field(
+                None,
+                description="Person title hint.",
+            ),
+            max_results: int = Field(
+                1,
+                description="Maximum enriched entity matches to return, from 1 to 5.",
+            ),
+        ) -> str:
+            """Enrich a Person or Organization with concise sales-relevant fields."""
+            params, error = _build_diffbot_enhance_params(
+                entity_type,
+                {
+                    "id": id,
+                    "name": name,
+                    "url": url,
+                    "location": location,
+                    "phone": phone,
+                    "email": email,
+                    "employer": employer,
+                    "title": title,
+                },
+            )
+            if error:
+                return _json_error(error)
+
+            assert params is not None
+            params["size"] = _bounded_int(max_results, 1, 5)
+            params["filter"] = _diffbot_enhance_filter(entity_type)
+
+            return await _diffbot_get_json("enhance", params)
+
+        logger.info("Registered Diffbot search_news and enhance_entity tools")
+    else:
+        logger.info(
+            "Diffbot tools not registered (DIFFBOT_TOKEN / DIFFBOT_API_TOKEN unset)"
+        )
 
     @mcp.tool(name="import_text_to_kg")
     async def import_text_to_kg(
@@ -569,116 +841,6 @@ def create_mcp_server(
             ).single()
 
         return json.dumps(dict(record) if record else {}, default=str)
-
-    @mcp.tool(name="system_prompt_list")
-    async def system_prompt_list(
-        prompt_name: Optional[str] = Field(
-            None,
-            description="Filter both prompts and suggestions to this prompt_name (e.g. 'default'). None returns all.",
-        ),
-        project_id: Optional[str] = Field(
-            None,
-            description="Filter suggestions to this project_id. None returns suggestions from all projects.",
-        ),
-        statuses: Optional[List[str]] = Field(
-            None,
-            description="Suggestion statuses to include. Defaults to ['candidate'].",
-        ),
-    ) -> str:
-        """List live :SystemPrompt nodes and :SystemPromptSuggestion candidates for review."""
-        resolved_statuses = statuses or ["candidate"]
-        async with neo4j_driver.session(database=database) as session:
-            prompt_records = await session.run(
-                """
-                MATCH (p:SystemPrompt)
-                WHERE $prompt_name IS NULL OR p.name = $prompt_name
-                RETURN p.name AS name,
-                       p.content AS content,
-                       size(coalesce(p.content, '')) AS char_count,
-                       p.updated_at AS updated_at
-                ORDER BY p.name
-                """,
-                prompt_name=prompt_name,
-            )
-            prompts = [dict(r) async for r in prompt_records]
-
-            suggestion_records = await session.run(
-                """
-                MATCH (s:SystemPromptSuggestion)
-                WHERE s.status IN $statuses
-                  AND ($prompt_name IS NULL OR s.prompt_name = $prompt_name)
-                  AND ($project_id IS NULL OR s.project_id = $project_id)
-                RETURN s.id AS id,
-                       s.prompt_name AS prompt_name,
-                       s.project_id AS project_id,
-                       s.status AS status,
-                       s.instruction AS instruction,
-                       s.rationale AS rationale,
-                       s.confidence AS confidence,
-                       s.support_count AS support_count,
-                       s.source AS source,
-                       s.updated_at AS updated_at
-                ORDER BY coalesce(s.confidence, 0.0) DESC,
-                         coalesce(s.support_count, 0) DESC,
-                         s.updated_at DESC
-                """,
-                statuses=resolved_statuses,
-                prompt_name=prompt_name,
-                project_id=project_id,
-            )
-            suggestions = [dict(r) async for r in suggestion_records]
-
-        return json.dumps({"prompts": prompts, "suggestions": suggestions}, default=str)
-
-    @mcp.tool(name="system_prompt_replace")
-    async def system_prompt_replace(
-        prompt_name: str = Field(..., description="Name of the :SystemPrompt to write (e.g. 'default')."),
-        content: str = Field(..., description="Full prompt content. Replaces whatever was there."),
-    ) -> str:
-        """Replace the content of a :SystemPrompt node. Creates the node if it doesn't exist.
-
-        Also flips every :SystemPromptSuggestion with the same prompt_name from
-        'candidate' to 'applied' and links it to the prompt, so the listing query
-        stops surfacing them.
-        """
-        if not (prompt_name or "").strip():
-            return json.dumps({"status": "error", "error": "prompt_name is required"})
-        if not (content or "").strip():
-            return json.dumps({"status": "error", "error": "content is required"})
-
-        async with neo4j_driver.session(database=database) as session:
-            prompt_record = await (
-                await session.run(
-                    """
-                    MERGE (p:SystemPrompt {name: $name})
-                    ON CREATE SET p.created_at = datetime()
-                    SET p.content = $content,
-                        p.updated_at = datetime()
-                    RETURN p.name AS name,
-                           size(p.content) AS char_count,
-                           CASE WHEN p.created_at = p.updated_at THEN 'created' ELSE 'updated' END AS action
-                    """,
-                    name=prompt_name,
-                    content=content,
-                )
-            ).single()
-
-            applied_records = await session.run(
-                """
-                MATCH (p:SystemPrompt {name: $name})
-                MATCH (s:SystemPromptSuggestion {prompt_name: $name, status: 'candidate'})
-                SET s.status = 'applied',
-                    s.applied_at = datetime()
-                MERGE (s)-[:APPLIED_TO]->(p)
-                RETURN s.id AS id
-                """,
-                name=prompt_name,
-            )
-            applied_ids = [r["id"] async for r in applied_records]
-
-        result = dict(prompt_record) if prompt_record else {}
-        result["applied_suggestion_ids"] = applied_ids
-        return json.dumps(result, default=str)
 
     return mcp
 
