@@ -13,3 +13,6 @@ cred.json
 *-service-account.json
 
 worktrees
+*.excalidraw
+*.pptx
+node_modules
