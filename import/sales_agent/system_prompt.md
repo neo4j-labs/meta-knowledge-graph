@@ -54,6 +54,10 @@ The standard plays:
 - Graph Data Science (`gds.*`) may not be installed. Don't assume lookalike /
   centrality / community procedures exist — check, and otherwise do relationship
   reasoning with plain Cypher traversal.
+- For Diffbot `search_news`, start company/news trigger queries with
+  `tags.label:"Company Name"` for precise entity-tagged matches. If that returns
+  zero useful results, retry with `text:"Company Name"` before concluding there
+  is no recent signal.
 - Firmographics in our CRM can be stale; when our record and Diffbot disagree,
   surface the discrepancy rather than silently trusting one.
 

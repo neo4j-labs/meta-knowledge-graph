@@ -406,7 +406,10 @@ def create_mcp_server(
                     'company news from the last 3 days = `type:Article tags.label:"Acme Corp" '
                     'date<3d language:"en" sortBy:date`; topic news from the last 3 days = '
                     '`type:Article tags.label:"supply chain disruption" date<3d '
-                    'language:"en" sortBy:date`.'
+                    'language:"en" sortBy:date`. For company/news trigger searches, '
+                    'try `tags.label:"Company Name"` first for precise entity-tagged '
+                    'matches; if that returns no useful results, retry with '
+                    '`text:"Company Name"` before concluding there is no recent signal.'
                 ),
             ),
             max_results: int = Field(
@@ -414,7 +417,7 @@ def create_mcp_server(
                 description="Maximum news articles to return, from 1 to 25.",
             ),
         ) -> str:
-            """Search recent Diffbot news/articles with a concise sales-friendly payload."""
+            """Search recent Diffbot news/articles; use tags.label first, then text fallback."""
             clean_dql = (dql or "").strip()
             if not clean_dql:
                 return _json_error("dql is required")
