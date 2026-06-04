@@ -1,8 +1,9 @@
 # sales_agent
 
 A self-contained demo **dataset + persona** for the Meta Knowledge Graph: a
-sales / customer-success intelligence assistant working a book of 50 Atlas
-accounts. It seeds a BigQuery warehouse, a Neo4j relationship graph, and a
+sales / customer-success intelligence assistant working a book of ~48
+fleet-operator accounts for Fleetwise (a connected-vehicle / fleet-ops
+platform). It seeds a BigQuery warehouse, a Neo4j relationship graph, and a
 `(:SystemPrompt)` persona that the SessionStart hook injects.
 
 ## Layout

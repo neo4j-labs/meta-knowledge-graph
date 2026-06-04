@@ -67,20 +67,27 @@ SIZE_CLASSES = {
 
 # Curated so well-known names read at a believable scale next to Diffbot truth.
 SIZE_OVERRIDES = {
-    "openai": "strategic", "anthropic": "ent", "databricks": "strategic",
-    "snowflake": "strategic", "stripe": "strategic", "shopify": "strategic",
-    "spotify": "strategic", "airbnb": "strategic", "tesla": "strategic",
-    "booking": "strategic", "github": "strategic", "reddit": "ent",
-    "cloudflare": "ent", "datadog": "ent", "mongodb": "ent", "twilio": "ent",
-    "figma": "ent", "notion": "ent", "robinhood": "ent", "klarna": "ent",
-    "affirm": "ent", "confluent": "ent", "samsara": "ent", "oscar-health": "ent",
-    "discord": "ent", "twitch": "ent", "rivian": "ent", "sunrun": "ent",
-    "plaid": "mid", "huggingface": "mid", "vercel": "mid", "warby-parker": "mid",
-    "patagonia": "mid", "brex": "mid", "ramp": "mid", "flexport": "mid",
-    "shipbob": "mid", "hims": "mid", "ro": "mid", "tempus": "mid",
-    "lucid": "mid", "chargepoint": "mid",
-    "langchain": "smb", "mercury": "smb", "convoy": "smb", "allbirds": "smb",
-    "glossier": "smb", "faherty": "smb", "substack": "smb", "hopper": "smb",
+    # strategic — national fleets, thousands of power units
+    "sysco": "strategic", "us-foods": "strategic", "grainger": "strategic",
+    "old-dominion": "strategic", "jb-hunt": "strategic", "ryder": "strategic",
+    "united-rentals": "strategic", "republic-services": "strategic",
+    "cintas": "strategic",
+    # enterprise
+    "pfg": "ent", "gordon-food": "ent", "mclane": "ent",
+    "coke-consolidated": "ent", "reyes": "ent", "keurig-dr-pepper": "ent",
+    "fastenal": "ent", "ferguson": "ent", "wesco": "ent", "xpo": "ent",
+    "schneider": "ent", "werner": "ent", "knight-swift": "ent",
+    "sunbelt": "ent", "vulcan": "ent", "kroger": "ent", "aramark": "ent",
+    "sherwin-williams": "ent",
+    # mid-market
+    "watsco": "mid", "saia": "mid", "estes": "mid", "arcbest": "mid",
+    "penske": "mid", "martin-marietta": "mid", "cemex-usa": "mid",
+    "builders-firstsource": "mid", "waste-connections": "mid",
+    "clean-harbors": "mid", "stericycle": "mid", "unifirst": "mid",
+    "abm": "mid", "rollins": "mid", "terminix": "mid", "brightview": "mid",
+    # smaller / regional
+    "casella": "smb", "trugreen": "smb", "abc-supply": "smb",
+    "herc": "smb", "comfort-systems": "smb",
 }
 
 # Probability an account in each size carries a support / services line. Bigger
@@ -91,15 +98,15 @@ SERVICES_PROB = {"smb": 0.10, "mid": 0.30, "ent": 0.50, "strategic": 0.70}
 # Preferred platform tier by size; a minority are intentionally under-tiered to
 # create realistic upgrade opportunities the assistant can surface.
 PLATFORM_PREF = {
-    "smb": "atlas-core-starter",
-    "mid": "atlas-core-growth",
-    "ent": "atlas-core-enterprise",
-    "strategic": "atlas-core-enterprise",
+    "smb": "fleetwise-starter",
+    "mid": "fleetwise-pro",
+    "ent": "fleetwise-enterprise",
+    "strategic": "fleetwise-enterprise",
 }
 PLATFORM_DOWNGRADE = {
-    "atlas-core-enterprise": "atlas-core-growth",
-    "atlas-core-growth": "atlas-core-starter",
-    "atlas-core-starter": "atlas-core-starter",
+    "fleetwise-enterprise": "fleetwise-pro",
+    "fleetwise-pro": "fleetwise-starter",
+    "fleetwise-starter": "fleetwise-starter",
 }
 MISTIER_PROB = 0.22
 
@@ -112,92 +119,91 @@ TRAJECTORY_WEIGHTS = {
 
 # (account_id, name, domain, industry, region)
 ACCOUNTS_RAW: list[tuple[str, str, str, str, str]] = [
-    # Tech / AI
-    ("openai",        "OpenAI",        "openai.com",        "AI",            "NA"),
-    ("anthropic",     "Anthropic",     "anthropic.com",     "AI",            "NA"),
-    ("huggingface",   "Hugging Face",  "huggingface.co",    "AI",            "NA"),
-    ("langchain",     "LangChain",     "langchain.com",     "AI",            "NA"),
-    ("databricks",    "Databricks",    "databricks.com",    "Data",          "NA"),
-    ("snowflake",     "Snowflake",     "snowflake.com",     "Data",          "NA"),
-    ("mongodb",       "MongoDB",       "mongodb.com",       "Data",          "NA"),
-    ("confluent",     "Confluent",     "confluent.io",      "Data",          "NA"),
-    ("datadog",       "Datadog",       "datadoghq.com",     "Observability", "NA"),
-    ("cloudflare",    "Cloudflare",    "cloudflare.com",    "Infrastructure", "NA"),
-    ("vercel",        "Vercel",        "vercel.com",        "Infrastructure", "NA"),
-    ("github",        "GitHub",        "github.com",        "DevTools",      "NA"),
-    ("twilio",        "Twilio",        "twilio.com",        "Communications", "NA"),
-    ("notion",        "Notion",        "notion.so",         "Productivity",  "NA"),
-    ("figma",         "Figma",         "figma.com",         "Design",        "NA"),
-    # Fintech
-    ("stripe",        "Stripe",        "stripe.com",        "Fintech",       "NA"),
-    ("plaid",         "Plaid",         "plaid.com",         "Fintech",       "NA"),
-    ("brex",          "Brex",          "brex.com",          "Fintech",       "NA"),
-    ("ramp",          "Ramp",          "ramp.com",          "Fintech",       "NA"),
-    ("mercury",       "Mercury",       "mercury.com",       "Fintech",       "NA"),
-    ("robinhood",     "Robinhood",     "robinhood.com",     "Fintech",       "NA"),
-    ("klarna",        "Klarna",        "klarna.com",        "Fintech",       "EMEA"),
-    ("affirm",        "Affirm",        "affirm.com",        "Fintech",       "NA"),
-    # Retail / Consumer
-    ("shopify",       "Shopify",       "shopify.com",       "Retail",        "NA"),
-    ("allbirds",      "Allbirds",      "allbirds.com",      "Retail",        "NA"),
-    ("warby-parker",  "Warby Parker",  "warbyparker.com",   "Retail",        "NA"),
-    ("glossier",      "Glossier",      "glossier.com",      "Retail",        "NA"),
-    ("patagonia",     "Patagonia",     "patagonia.com",     "Retail",        "NA"),
-    ("faherty",       "Faherty",       "fahertybrand.com",  "Retail",        "NA"),
-    # Logistics
-    ("flexport",      "Flexport",      "flexport.com",      "Logistics",     "NA"),
-    ("convoy",        "Convoy",        "convoy.com",        "Logistics",     "NA"),
-    ("samsara",       "Samsara",       "samsara.com",       "Logistics",     "NA"),
-    ("shipbob",       "ShipBob",       "shipbob.com",       "Logistics",     "NA"),
-    # Healthcare
-    ("oscar-health",  "Oscar Health",  "hioscar.com",       "Healthcare",    "NA"),
-    ("hims",          "Hims & Hers",   "forhims.com",       "Healthcare",    "NA"),
-    ("ro",            "Ro",            "ro.co",             "Healthcare",    "NA"),
-    ("tempus",        "Tempus",        "tempus.com",        "Healthcare",    "NA"),
-    # Media / Consumer Internet
-    ("spotify",       "Spotify",       "spotify.com",       "Media",         "EMEA"),
-    ("reddit",        "Reddit",        "reddit.com",        "Media",         "NA"),
-    ("discord",       "Discord",       "discord.com",       "Media",         "NA"),
-    ("twitch",        "Twitch",        "twitch.tv",         "Media",         "NA"),
-    ("substack",      "Substack",      "substack.com",      "Media",         "NA"),
-    # Travel
-    ("airbnb",        "Airbnb",        "airbnb.com",        "Travel",        "NA"),
-    ("hopper",        "Hopper",        "hopper.com",        "Travel",        "NA"),
-    ("booking",       "Booking",       "booking.com",       "Travel",        "EMEA"),
-    # Auto / Mobility
-    ("rivian",        "Rivian",        "rivian.com",        "Auto",          "NA"),
-    ("lucid",         "Lucid Motors",  "lucidmotors.com",   "Auto",          "NA"),
-    ("tesla",         "Tesla",         "tesla.com",         "Auto",          "NA"),
-    # Energy
-    ("sunrun",        "Sunrun",        "sunrun.com",        "Energy",        "NA"),
-    ("chargepoint",   "ChargePoint",   "chargepoint.com",   "Energy",        "NA"),
+    # Food distribution
+    ("sysco",                "Sysco",                     "sysco.com",             "Food Distribution",       "NA"),
+    ("us-foods",             "US Foods",                  "usfoods.com",           "Food Distribution",       "NA"),
+    ("pfg",                  "Performance Food Group",    "pfgc.com",              "Food Distribution",       "NA"),
+    ("gordon-food",          "Gordon Food Service",       "gfs.com",               "Food Distribution",       "NA"),
+    ("mclane",               "McLane Company",            "mclaneco.com",          "Food Distribution",       "NA"),
+    # Beverage
+    ("coke-consolidated",    "Coca-Cola Consolidated",    "cokeconsolidated.com",  "Beverage",                "NA"),
+    ("reyes",                "Reyes Holdings",            "reyesholdings.com",     "Beverage",                "NA"),
+    ("keurig-dr-pepper",     "Keurig Dr Pepper",          "keurigdrpepper.com",    "Beverage",                "NA"),
+    # Industrial distribution
+    ("grainger",             "W.W. Grainger",             "grainger.com",          "Industrial Distribution", "NA"),
+    ("fastenal",             "Fastenal",                  "fastenal.com",          "Industrial Distribution", "NA"),
+    ("ferguson",             "Ferguson",                  "ferguson.com",          "Industrial Distribution", "NA"),
+    ("wesco",                "WESCO International",        "wesco.com",             "Industrial Distribution", "NA"),
+    ("watsco",               "Watsco",                    "watsco.com",            "Industrial Distribution", "NA"),
+    # LTL freight & trucking
+    ("old-dominion",         "Old Dominion Freight Line", "odfl.com",              "LTL Freight",             "NA"),
+    ("xpo",                  "XPO",                       "xpo.com",               "LTL Freight",             "NA"),
+    ("saia",                 "Saia",                      "saia.com",              "LTL Freight",             "NA"),
+    ("estes",                "Estes Express Lines",       "estes-express.com",     "LTL Freight",             "NA"),
+    ("arcbest",              "ArcBest",                   "arcb.com",              "LTL Freight",             "NA"),
+    ("schneider",            "Schneider National",        "schneider.com",         "Trucking",                "NA"),
+    ("werner",               "Werner Enterprises",        "werner.com",            "Trucking",                "NA"),
+    ("knight-swift",         "Knight-Swift",              "knight-swift.com",      "Trucking",                "NA"),
+    # 3PL & fleet leasing
+    ("jb-hunt",              "J.B. Hunt",                 "jbhunt.com",            "Logistics",               "NA"),
+    ("ryder",                "Ryder System",              "ryder.com",             "Logistics",               "NA"),
+    ("penske",               "Penske Truck Leasing",      "gopenske.com",          "Logistics",               "NA"),
+    # Equipment rental
+    ("united-rentals",       "United Rentals",            "unitedrentals.com",     "Equipment Rental",        "NA"),
+    ("sunbelt",              "Sunbelt Rentals",           "sunbeltrentals.com",    "Equipment Rental",        "NA"),
+    ("herc",                 "Herc Rentals",              "hercrentals.com",       "Equipment Rental",        "NA"),
+    # Construction materials & building products
+    ("vulcan",               "Vulcan Materials",          "vulcanmaterials.com",   "Construction Materials",  "NA"),
+    ("martin-marietta",      "Martin Marietta",           "martinmarietta.com",    "Construction Materials",  "NA"),
+    ("cemex-usa",            "Cemex USA",                 "cemexusa.com",          "Construction Materials",  "NA"),
+    ("builders-firstsource", "Builders FirstSource",      "bldr.com",              "Building Products",       "NA"),
+    ("abc-supply",           "ABC Supply",                "abcsupply.com",         "Building Products",       "NA"),
+    # Waste & environmental services
+    ("republic-services",    "Republic Services",         "republicservices.com",  "Waste Services",          "NA"),
+    ("waste-connections",    "Waste Connections",         "wasteconnections.com",  "Waste Services",          "NA"),
+    ("casella",              "Casella Waste Systems",     "casella.com",           "Waste Services",          "NA"),
+    ("clean-harbors",        "Clean Harbors",             "cleanharbors.com",      "Environmental Services",  "NA"),
+    ("stericycle",           "Stericycle",                "stericycle.com",        "Environmental Services",  "NA"),
+    # Route-based facility & field services
+    ("cintas",               "Cintas",                    "cintas.com",            "Facility Services",       "NA"),
+    ("aramark",              "Aramark",                   "aramark.com",           "Facility Services",       "NA"),
+    ("unifirst",             "UniFirst",                  "unifirst.com",          "Facility Services",       "NA"),
+    ("abm",                  "ABM Industries",            "abm.com",               "Facility Services",       "NA"),
+    ("comfort-systems",      "Comfort Systems USA",       "comfortsystemsusa.com", "Field Services",          "NA"),
+    ("rollins",              "Rollins",                   "rollins.com",           "Pest Control",            "NA"),
+    ("terminix",             "Terminix",                  "terminix.com",          "Pest Control",            "NA"),
+    ("brightview",           "BrightView",                "brightview.com",        "Landscaping",             "NA"),
+    ("trugreen",             "TruGreen",                  "trugreen.com",          "Landscaping",             "NA"),
+    # Grocery & specialty retail (private delivery fleets)
+    ("kroger",               "Kroger",                    "kroger.com",            "Grocery",                 "NA"),
+    ("sherwin-williams",     "Sherwin-Williams",          "sherwin-williams.com",  "Specialty Retail",        "NA"),
 ]
 
 PRODUCTS: list[dict[str, Any]] = [
-    # Platform tiers
-    {"sku": "atlas-core-starter",     "name": "Atlas Core Starter",         "category": "platform", "tier": "starter",    "list_price_usd": 199},
-    {"sku": "atlas-core-growth",      "name": "Atlas Core Growth",          "category": "platform", "tier": "growth",     "list_price_usd": 999},
-    {"sku": "atlas-core-enterprise",  "name": "Atlas Core Enterprise",      "category": "platform", "tier": "enterprise", "list_price_usd": 4999},
-    {"sku": "atlas-self-hosted",      "name": "Atlas Self-Hosted",          "category": "platform", "tier": "enterprise", "list_price_usd": 3500},
-    # Add-ons
-    {"sku": "vector-index",           "name": "Vector Index",               "category": "addon",    "tier": None,         "list_price_usd": 299},
-    {"sku": "graphrag-service",       "name": "GraphRAG Service",           "category": "addon",    "tier": None,         "list_price_usd": 499},
-    {"sku": "streaming-cdc",          "name": "Streaming CDC",              "category": "addon",    "tier": None,         "list_price_usd": 799},
-    {"sku": "schema-versioning",      "name": "Schema Versioning",          "category": "addon",    "tier": None,         "list_price_usd": 149},
-    {"sku": "graphql-api",            "name": "GraphQL API",                "category": "addon",    "tier": None,         "list_price_usd": 199},
-    {"sku": "sdk-pack",               "name": "SDK Pack",                   "category": "addon",    "tier": None,         "list_price_usd": 99},
-    {"sku": "backup-restore",         "name": "Backup & Restore",           "category": "addon",    "tier": None,         "list_price_usd": 249},
-    {"sku": "disaster-recovery",      "name": "Disaster Recovery",          "category": "addon",    "tier": None,         "list_price_usd": 899},
-    {"sku": "sso-addon",              "name": "SSO Add-on",                 "category": "addon",    "tier": None,         "list_price_usd": 299},
-    {"sku": "audit-log-pro",          "name": "Audit Log Pro",              "category": "addon",    "tier": None,         "list_price_usd": 199},
-    {"sku": "compliance-pack",        "name": "Compliance Pack SOC2/HIPAA", "category": "addon",    "tier": None,         "list_price_usd": 1499},
+    # Platform tiers — per-vehicle telematics subscription
+    {"sku": "fleetwise-starter",        "name": "Fleetwise Starter",                 "category": "platform", "tier": "starter",    "list_price_usd": 199},
+    {"sku": "fleetwise-pro",            "name": "Fleetwise Pro",                     "category": "platform", "tier": "pro",        "list_price_usd": 999},
+    {"sku": "fleetwise-enterprise",     "name": "Fleetwise Enterprise",              "category": "platform", "tier": "enterprise", "list_price_usd": 4999},
+    {"sku": "fleetwise-asset-tracking", "name": "Fleetwise Asset Tracking",          "category": "platform", "tier": "enterprise", "list_price_usd": 3500},
+    # Add-ons — modules that drive attach / whitespace plays
+    {"sku": "maintenance",            "name": "Maintenance & Service Scheduling",    "category": "addon",    "tier": None,         "list_price_usd": 299},
+    {"sku": "eld-compliance",         "name": "ELD & Hours-of-Service Compliance",   "category": "addon",    "tier": None,         "list_price_usd": 499},
+    {"sku": "dashcam-ai",             "name": "AI Dashcam & Safety",                 "category": "addon",    "tier": None,         "list_price_usd": 799},
+    {"sku": "tpms",                   "name": "Tire & TPMS Monitoring",              "category": "addon",    "tier": None,         "list_price_usd": 149},
+    {"sku": "fuel-cards",             "name": "Fuel Card Program",                   "category": "addon",    "tier": None,         "list_price_usd": 199},
+    {"sku": "driver-app",             "name": "Driver Mobile App",                   "category": "addon",    "tier": None,         "list_price_usd": 99},
+    {"sku": "asset-tags",             "name": "Trailer & Asset Tags",                "category": "addon",    "tier": None,         "list_price_usd": 249},
+    {"sku": "cold-chain",             "name": "Cold Chain Temperature Monitoring",   "category": "addon",    "tier": None,         "list_price_usd": 899},
+    {"sku": "route-optimization",     "name": "Route Optimization",                  "category": "addon",    "tier": None,         "list_price_usd": 299},
+    {"sku": "ifta-fuel-tax",          "name": "IFTA Fuel Tax Reporting",             "category": "addon",    "tier": None,         "list_price_usd": 199},
+    {"sku": "ev-fleet",               "name": "EV Fleet & Charging Management",      "category": "addon",    "tier": None,         "list_price_usd": 1499},
     # Support
-    {"sku": "support-premium",        "name": "Premium Support",            "category": "support",  "tier": "premium",    "list_price_usd": 999},
-    {"sku": "support-enterprise",     "name": "Enterprise 24x7 Support",    "category": "support",  "tier": "enterprise", "list_price_usd": 3999},
+    {"sku": "support-priority",       "name": "Priority Support",                    "category": "support",  "tier": "premium",    "list_price_usd": 999},
+    {"sku": "support-247",            "name": "24x7 Fleet Support",                  "category": "support",  "tier": "enterprise", "list_price_usd": 3999},
     # Services
-    {"sku": "training-pack",          "name": "Training Pack",              "category": "services", "tier": None,         "list_price_usd": 2500},
-    {"sku": "pro-services",           "name": "Professional Services",      "category": "services", "tier": None,         "list_price_usd": 4500},
-    {"sku": "beta-access",            "name": "Beta Feature Access",        "category": "services", "tier": None,         "list_price_usd": 0},
+    {"sku": "installation-pack",      "name": "Hardware Installation & Onboarding",  "category": "services", "tier": None,         "list_price_usd": 2500},
+    {"sku": "pro-services",           "name": "Fleet Consulting Services",           "category": "services", "tier": None,         "list_price_usd": 4500},
+    {"sku": "beta-access",            "name": "Beta Feature Access",                 "category": "services", "tier": None,         "list_price_usd": 0},
 ]
 
 LAUNCH_DATES = {
@@ -208,10 +214,10 @@ LAUNCH_DATES = {
 }
 
 CONTACT_ROLES = [
-    ("champion",       ["Staff Engineer", "Engineering Manager", "Lead Data Engineer", "Principal Architect"], False, True),
-    ("economic_buyer", ["VP Engineering", "CTO", "VP Data", "Head of Platform"],                               True,  False),
-    ("technical",      ["Senior Engineer", "Data Scientist", "DevOps Lead", "ML Engineer"],                    False, False),
-    ("executive",      ["CIO", "Chief Data Officer", "SVP Engineering"],                                       True,  False),
+    ("champion",       ["Fleet Manager", "Fleet Operations Manager", "Maintenance Manager", "Safety Manager"], False, True),
+    ("economic_buyer", ["VP Operations", "VP Fleet", "Director of Logistics", "Director of Fleet"],            True,  False),
+    ("technical",      ["Telematics Administrator", "Dispatch Lead", "Shop Foreman", "Compliance Specialist"], False, False),
+    ("executive",      ["Chief Operating Officer", "SVP Supply Chain", "EVP Operations"],                      True,  False),
 ]
 N_CONTACTS_BY_SIZE = {"smb": 2, "mid": 3, "ent": 3, "strategic": 4}
 
@@ -501,7 +507,7 @@ if __name__ == "__main__":
     soon = [r for r in data["renewals"]
             if (date.fromisoformat(r["renewal_date"]) - date.today()).days <= 90]
     print(f"renewals <=90d: {len(soon)}")
-    sample = next(a for a in data["accounts"] if a["account_id"] == "anthropic")
-    print("sample (anthropic):", {k: sample[k] for k in
+    sample = next(a for a in data["accounts"] if a["account_id"] == "sysco")
+    print("sample (sysco):", {k: sample[k] for k in
           ("size_class", "employee_count_band", "trajectory",
            "arr_band_usd", "arr_usd", "health_score", "owner_csm")})
