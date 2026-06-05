@@ -383,6 +383,8 @@ def _write_processing(
         SET pp.project_id = $project_id,
             pp.session_id = $session_id,
             pp.mode = $mode,
+            pp.status = 'ok',
+            pp.type = 'processing',
             pp.event_count = $event_count,
             pp.learning_count = $learning_count,
             pp.decision_count = $decision_count,
@@ -612,6 +614,70 @@ def _write_processing(
         )
 
 
+def _write_processing_error(
+    tx,
+    project: ProjectRef,
+    session_id: str,
+    mode: str,
+    events: list[dict[str, Any]],
+    error_text: str,
+    timestamp: str,
+) -> None:
+    """Record a failed processing run as a :ProjectProcessing {status:'error'} node.
+
+    Mirrors the success node's label and provenance edges so failures are queryable
+    alongside successful runs, but deliberately omits PROCESSED_EVENT edges: the
+    events stay unprocessed and backfill on a later healthy run.
+    """
+    event_ids = [event["event_id"] for event in events if event.get("event_id")]
+    seed = "\n".join(event_ids) if event_ids else f"{session_id}:{mode}:{timestamp}"
+    digest = sha1(seed.encode("utf-8")).hexdigest()[:16]
+    processing_id = f"processing:{project.id}:{session_id}:{mode}:error:{digest}"
+    summary = (
+        f"Adjudication failed for {len(event_ids)} {mode} events "
+        f"({truncate(error_text, 200)}); events left unprocessed for backfill."
+    )
+
+    tx.run(
+        """
+        MERGE (p:Project {id: $project_id})
+        ON CREATE SET p.created_at = $timestamp
+        SET p.updated_at = $timestamp,
+            p.last_activity_at = $timestamp
+        MERGE (s:Session {session_id: $session_id})
+        ON CREATE SET s.created_at = $timestamp
+        MERGE (p)-[:HAS_SESSION]->(s)
+        MERGE (pp:ProjectProcessing {id: $processing_id})
+        ON CREATE SET pp.created_at = $timestamp,
+                      pp.first_error_at = $timestamp
+        SET pp.project_id = $project_id,
+            pp.session_id = $session_id,
+            pp.mode = $mode,
+            pp.status = 'error',
+            pp.type = 'error',
+            pp.event_count = $event_count,
+            pp.learning_count = 0,
+            pp.decision_count = 0,
+            pp.system_prompt_suggestion_count = 0,
+            pp.error = $error_text,
+            pp.summary = $summary,
+            pp.attempt_count = coalesce(pp.attempt_count, 0) + 1,
+            pp.last_error_at = $timestamp,
+            pp.updated_at = $timestamp
+        MERGE (p)-[:HAS_PROCESSING]->(pp)
+        MERGE (s)-[:HAS_PROCESSING]->(pp)
+        """,
+        project_id=project.id,
+        session_id=session_id,
+        processing_id=processing_id,
+        mode=mode,
+        event_count=len(event_ids),
+        error_text=truncate(error_text, 1000),
+        summary=summary,
+        timestamp=timestamp,
+    )
+
+
 def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
     project_root = Path(__file__).resolve().parents[1]
     project = resolve_project(payload, project_root)
@@ -640,45 +706,68 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
             )
             if not events:
                 return
-            corpus = _event_corpus(events)
-            search_query = _search_query(corpus)
-            similar_learnings = fetch_project_learnings(
-                session,
-                project_id=project.id,
-                query=search_query,
-                statuses=["approved", "candidate"],
-                limit=8,
-            )
-            similar_decisions = fetch_project_decisions(
-                session,
-                project_id=project.id,
-                query=search_query,
-                limit=8,
-            )
-            prompt = build_memory_adjudication_prompt(
-                project,
-                mode,
-                events,
-                similar_learnings,
-                similar_decisions,
-            )
-            actions = ask_llm_for_memory_actions(prompt)
-            learning_rows, decision_rows, system_prompt_rows = _memory_rows_from_actions(
-                project,
-                mode,
-                actions,
-            )
-            session.execute_write(
-                _write_processing,
-                project,
-                session_id,
-                mode,
-                events,
-                learning_rows,
-                decision_rows,
-                system_prompt_rows,
-                timestamp,
-            )
+            try:
+                corpus = _event_corpus(events)
+                search_query = _search_query(corpus)
+                similar_learnings = fetch_project_learnings(
+                    session,
+                    project_id=project.id,
+                    query=search_query,
+                    statuses=["approved", "candidate"],
+                    limit=8,
+                )
+                similar_decisions = fetch_project_decisions(
+                    session,
+                    project_id=project.id,
+                    query=search_query,
+                    limit=8,
+                )
+                prompt = build_memory_adjudication_prompt(
+                    project,
+                    mode,
+                    events,
+                    similar_learnings,
+                    similar_decisions,
+                )
+                actions = ask_llm_for_memory_actions(prompt)
+                learning_rows, decision_rows, system_prompt_rows = _memory_rows_from_actions(
+                    project,
+                    mode,
+                    actions,
+                )
+                session.execute_write(
+                    _write_processing,
+                    project,
+                    session_id,
+                    mode,
+                    events,
+                    learning_rows,
+                    decision_rows,
+                    system_prompt_rows,
+                    timestamp,
+                )
+            except Exception as exc:
+                error_text = f"{type(exc).__name__}: {exc}"
+                print(
+                    f"[process_project] adjudication failed; recording error node: {error_text}",
+                    file=sys.stderr,
+                )
+                error_timestamp = datetime.now(timezone.utc).isoformat()
+                try:
+                    session.execute_write(
+                        _write_processing_error,
+                        project,
+                        session_id,
+                        mode,
+                        events,
+                        error_text,
+                        error_timestamp,
+                    )
+                except Exception as write_exc:
+                    print(
+                        f"[process_project] failed to record error node: {write_exc}",
+                        file=sys.stderr,
+                    )
 
 
 def _spawn_background(mode: str, limit: int, session_id: str) -> None:
