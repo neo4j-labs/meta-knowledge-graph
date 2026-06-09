@@ -2,8 +2,8 @@
 
 A self-contained demo **dataset + persona** for the Meta Knowledge Graph: a
 sales / customer-success intelligence assistant working a book of ~48
-fleet-operator accounts for Fleetwise (a connected-vehicle / fleet-ops
-platform). It seeds a BigQuery warehouse, a Neo4j relationship graph, and a
+enterprise car-rental customer accounts for RoadFlex (a corporate mobility and
+rental-car provider). It seeds a BigQuery warehouse, a Neo4j relationship graph, and a
 `(:SystemPrompt)` persona that the SessionStart hook injects.
 
 ## Layout
@@ -50,8 +50,8 @@ uv run python import/sales_agent/seed_data.py
   `arr_band_usd`, and `arr_usd` all derive from one `size_class` + real usage, so
   they reconcile instead of contradicting each other.
 - **Trajectories.** Every account is `expanding` / `steady` / `at_risk` / `new`,
-  which shapes its monthly usage — so expansion, churn/renewal-risk, and ramping
-  new logos are all detectable (not "everything grows forever").
+  which shapes its monthly rental usage — so expansion, churn/renewal-risk, and
+  ramping new logos are all detectable (not "everything grows forever").
 - **Actionable.** Named contacts (champion / economic buyer / technical / exec)
   and per-account renewal dates power "who do I email" and "what renews in 90 days".
 - **Graph-native.** `USES_PRODUCT` edges (with utilization/revenue) and `OWNS`

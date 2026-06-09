@@ -14,9 +14,9 @@ Design goals (why this is shaped the way it is):
 * **Actionable.** Accounts carry contacts (champion / economic buyer / ...) and a
   renewal/contract record, so "who do I email" and "what renews in 90 days" have
   answers.
-* **Real where it helps.** Company names + domains are real so Diffbot
-  ``enhance_entity`` / ``search_news`` return live hits. Everything else is
-  synthetic and deterministic for a fixed seed.
+* **Real where it helps.** Enterprise customer names + domains are real so
+  Diffbot ``enhance_entity`` / ``search_news`` return live hits. Everything
+  else is synthetic and deterministic for a fixed seed.
 
 ``build_seed_dataset()`` returns the whole dataset; the BigQuery and Neo4j
 seeders consume the same dict so both stores stay in lock-step.
@@ -59,35 +59,36 @@ EMPLOYEE_BAND_BY_SIZE = {
 }
 
 SIZE_CLASSES = {
-    "smb":       {"seat_range": (5, 40),    "n_products": (1, 3)},
-    "mid":       {"seat_range": (25, 120),  "n_products": (2, 4)},
-    "ent":       {"seat_range": (80, 350),  "n_products": (3, 6)},
-    "strategic": {"seat_range": (200, 800), "n_products": (4, 8)},
+    "smb":       {"seat_range": (8, 45),      "n_products": (1, 3)},
+    "mid":       {"seat_range": (40, 160),    "n_products": (2, 4)},
+    "ent":       {"seat_range": (150, 650),   "n_products": (3, 6)},
+    "strategic": {"seat_range": (500, 1600),  "n_products": (4, 8)},
 }
 
-# Curated so well-known names read at a believable scale next to Diffbot truth.
+# Curated so well-known enterprise buyers read at a believable scale next to
+# Diffbot truth.
 SIZE_OVERRIDES = {
-    # strategic — national fleets, thousands of power units
-    "sysco": "strategic", "us-foods": "strategic", "grainger": "strategic",
-    "old-dominion": "strategic", "jb-hunt": "strategic", "ryder": "strategic",
-    "united-rentals": "strategic", "republic-services": "strategic",
-    "cintas": "strategic",
+    # strategic — global workforces, heavy business travel, field mobility, or both
+    "accenture": "strategic", "deloitte": "strategic", "pwc": "strategic",
+    "ey": "strategic", "ibm": "strategic", "microsoft": "strategic",
+    "pfizer": "strategic", "novartis": "strategic", "merck": "strategic",
+    "thermo-fisher": "strategic", "unitedhealth": "strategic",
+    "state-farm": "strategic", "jpmorgan": "strategic",
+    "bank-of-america": "strategic", "wells-fargo": "strategic",
+    "walmart": "strategic", "target": "strategic", "home-depot": "strategic",
+    "lowes": "strategic", "shell": "strategic", "chevron": "strategic",
+    "aecom": "strategic",
     # enterprise
-    "pfg": "ent", "gordon-food": "ent", "mclane": "ent",
-    "coke-consolidated": "ent", "reyes": "ent", "keurig-dr-pepper": "ent",
-    "fastenal": "ent", "ferguson": "ent", "wesco": "ent", "xpo": "ent",
-    "schneider": "ent", "werner": "ent", "knight-swift": "ent",
-    "sunbelt": "ent", "vulcan": "ent", "kroger": "ent", "aramark": "ent",
-    "sherwin-williams": "ent",
-    # mid-market
-    "watsco": "mid", "saia": "mid", "estes": "mid", "arcbest": "mid",
-    "penske": "mid", "martin-marietta": "mid", "cemex-usa": "mid",
-    "builders-firstsource": "mid", "waste-connections": "mid",
-    "clean-harbors": "mid", "stericycle": "mid", "unifirst": "mid",
-    "abm": "mid", "rollins": "mid", "terminix": "mid", "brightview": "mid",
-    # smaller / regional
-    "casella": "smb", "trugreen": "smb", "abc-supply": "smb",
-    "herc": "smb", "comfort-systems": "smb",
+    "kpmg": "ent", "mckinsey": "ent", "bcg": "ent", "bain": "ent",
+    "salesforce": "ent", "oracle": "ent", "sap": "ent", "cisco": "ent",
+    "johnson-controls": "ent", "otis": "ent", "schindler": "ent",
+    "abbott": "ent", "medtronic": "ent", "astrazeneca": "ent",
+    "humana": "ent", "allstate": "ent", "liberty-mutual": "ent",
+    "travelers": "ent", "best-buy": "ent", "duke-energy": "ent",
+    "nextera-energy": "ent", "jacobs": "ent", "turner": "ent",
+    "bechtel": "ent", "caterpillar": "ent",
+    # mid-market enterprise programs
+    "stanley-black-decker": "mid",
 }
 
 # Probability an account in each size carries a support / services line. Bigger
@@ -95,18 +96,18 @@ SIZE_OVERRIDES = {
 SUPPORT_PROB = {"smb": 0.30, "mid": 0.60, "ent": 0.85, "strategic": 0.95}
 SERVICES_PROB = {"smb": 0.10, "mid": 0.30, "ent": 0.50, "strategic": 0.70}
 
-# Preferred platform tier by size; a minority are intentionally under-tiered to
+# Preferred rental program by size; a minority are intentionally under-tiered to
 # create realistic upgrade opportunities the assistant can surface.
-PLATFORM_PREF = {
-    "smb": "fleetwise-starter",
-    "mid": "fleetwise-pro",
-    "ent": "fleetwise-enterprise",
-    "strategic": "fleetwise-enterprise",
+PROGRAM_PREF = {
+    "smb": "roadflex-business",
+    "mid": "roadflex-premium",
+    "ent": "roadflex-global",
+    "strategic": "roadflex-global",
 }
-PLATFORM_DOWNGRADE = {
-    "fleetwise-enterprise": "fleetwise-pro",
-    "fleetwise-pro": "fleetwise-starter",
-    "fleetwise-starter": "fleetwise-starter",
+PROGRAM_DOWNGRADE = {
+    "roadflex-global": "roadflex-premium",
+    "roadflex-premium": "roadflex-business",
+    "roadflex-business": "roadflex-business",
 }
 MISTIER_PROB = 0.22
 
@@ -119,105 +120,103 @@ TRAJECTORY_WEIGHTS = {
 
 # (account_id, name, domain, industry, region)
 ACCOUNTS_RAW: list[tuple[str, str, str, str, str]] = [
-    # Food distribution
-    ("sysco",                "Sysco",                     "sysco.com",             "Food Distribution",       "NA"),
-    ("us-foods",             "US Foods",                  "usfoods.com",           "Food Distribution",       "NA"),
-    ("pfg",                  "Performance Food Group",    "pfgc.com",              "Food Distribution",       "NA"),
-    ("gordon-food",          "Gordon Food Service",       "gfs.com",               "Food Distribution",       "NA"),
-    ("mclane",               "McLane Company",            "mclaneco.com",          "Food Distribution",       "NA"),
-    # Beverage
-    ("coke-consolidated",    "Coca-Cola Consolidated",    "cokeconsolidated.com",  "Beverage",                "NA"),
-    ("reyes",                "Reyes Holdings",            "reyesholdings.com",     "Beverage",                "NA"),
-    ("keurig-dr-pepper",     "Keurig Dr Pepper",          "keurigdrpepper.com",    "Beverage",                "NA"),
-    # Industrial distribution
-    ("grainger",             "W.W. Grainger",             "grainger.com",          "Industrial Distribution", "NA"),
-    ("fastenal",             "Fastenal",                  "fastenal.com",          "Industrial Distribution", "NA"),
-    ("ferguson",             "Ferguson",                  "ferguson.com",          "Industrial Distribution", "NA"),
-    ("wesco",                "WESCO International",        "wesco.com",             "Industrial Distribution", "NA"),
-    ("watsco",               "Watsco",                    "watsco.com",            "Industrial Distribution", "NA"),
-    # LTL freight & trucking
-    ("old-dominion",         "Old Dominion Freight Line", "odfl.com",              "LTL Freight",             "NA"),
-    ("xpo",                  "XPO",                       "xpo.com",               "LTL Freight",             "NA"),
-    ("saia",                 "Saia",                      "saia.com",              "LTL Freight",             "NA"),
-    ("estes",                "Estes Express Lines",       "estes-express.com",     "LTL Freight",             "NA"),
-    ("arcbest",              "ArcBest",                   "arcb.com",              "LTL Freight",             "NA"),
-    ("schneider",            "Schneider National",        "schneider.com",         "Trucking",                "NA"),
-    ("werner",               "Werner Enterprises",        "werner.com",            "Trucking",                "NA"),
-    ("knight-swift",         "Knight-Swift",              "knight-swift.com",      "Trucking",                "NA"),
-    # 3PL & fleet leasing
-    ("jb-hunt",              "J.B. Hunt",                 "jbhunt.com",            "Logistics",               "NA"),
-    ("ryder",                "Ryder System",              "ryder.com",             "Logistics",               "NA"),
-    ("penske",               "Penske Truck Leasing",      "gopenske.com",          "Logistics",               "NA"),
-    # Equipment rental
-    ("united-rentals",       "United Rentals",            "unitedrentals.com",     "Equipment Rental",        "NA"),
-    ("sunbelt",              "Sunbelt Rentals",           "sunbeltrentals.com",    "Equipment Rental",        "NA"),
-    ("herc",                 "Herc Rentals",              "hercrentals.com",       "Equipment Rental",        "NA"),
-    # Construction materials & building products
-    ("vulcan",               "Vulcan Materials",          "vulcanmaterials.com",   "Construction Materials",  "NA"),
-    ("martin-marietta",      "Martin Marietta",           "martinmarietta.com",    "Construction Materials",  "NA"),
-    ("cemex-usa",            "Cemex USA",                 "cemexusa.com",          "Construction Materials",  "NA"),
-    ("builders-firstsource", "Builders FirstSource",      "bldr.com",              "Building Products",       "NA"),
-    ("abc-supply",           "ABC Supply",                "abcsupply.com",         "Building Products",       "NA"),
-    # Waste & environmental services
-    ("republic-services",    "Republic Services",         "republicservices.com",  "Waste Services",          "NA"),
-    ("waste-connections",    "Waste Connections",         "wasteconnections.com",  "Waste Services",          "NA"),
-    ("casella",              "Casella Waste Systems",     "casella.com",           "Waste Services",          "NA"),
-    ("clean-harbors",        "Clean Harbors",             "cleanharbors.com",      "Environmental Services",  "NA"),
-    ("stericycle",           "Stericycle",                "stericycle.com",        "Environmental Services",  "NA"),
-    # Route-based facility & field services
-    ("cintas",               "Cintas",                    "cintas.com",            "Facility Services",       "NA"),
-    ("aramark",              "Aramark",                   "aramark.com",           "Facility Services",       "NA"),
-    ("unifirst",             "UniFirst",                  "unifirst.com",          "Facility Services",       "NA"),
-    ("abm",                  "ABM Industries",            "abm.com",               "Facility Services",       "NA"),
-    ("comfort-systems",      "Comfort Systems USA",       "comfortsystemsusa.com", "Field Services",          "NA"),
-    ("rollins",              "Rollins",                   "rollins.com",           "Pest Control",            "NA"),
-    ("terminix",             "Terminix",                  "terminix.com",          "Pest Control",            "NA"),
-    ("brightview",           "BrightView",                "brightview.com",        "Landscaping",             "NA"),
-    ("trugreen",             "TruGreen",                  "trugreen.com",          "Landscaping",             "NA"),
-    # Grocery & specialty retail (private delivery fleets)
-    ("kroger",               "Kroger",                    "kroger.com",            "Grocery",                 "NA"),
-    ("sherwin-williams",     "Sherwin-Williams",          "sherwin-williams.com",  "Specialty Retail",        "NA"),
+    # Professional services and consulting: high business-travel demand
+    ("accenture",             "Accenture",                 "accenture.com",                "Professional Services", "Global"),
+    ("deloitte",              "Deloitte",                  "deloitte.com",                 "Professional Services", "Global"),
+    ("pwc",                   "PwC",                       "pwc.com",                      "Professional Services", "Global"),
+    ("kpmg",                  "KPMG",                      "kpmg.com",                     "Professional Services", "Global"),
+    ("ey",                    "EY",                        "ey.com",                       "Professional Services", "Global"),
+    ("mckinsey",              "McKinsey & Company",        "mckinsey.com",                 "Consulting",            "Global"),
+    ("bcg",                   "Boston Consulting Group",   "bcg.com",                      "Consulting",            "Global"),
+    ("bain",                  "Bain & Company",            "bain.com",                     "Consulting",            "Global"),
+    # Technology: sales, implementation, and customer-success travel
+    ("salesforce",            "Salesforce",                "salesforce.com",               "Software",              "Global"),
+    ("oracle",                "Oracle",                    "oracle.com",                   "Software",              "Global"),
+    ("sap",                   "SAP",                       "sap.com",                      "Software",              "Global"),
+    ("cisco",                 "Cisco",                     "cisco.com",                    "Technology",            "Global"),
+    ("ibm",                   "IBM",                       "ibm.com",                      "Technology",            "Global"),
+    ("microsoft",             "Microsoft",                 "microsoft.com",                "Technology",            "Global"),
+    # Field service and manufacturing
+    ("johnson-controls",       "Johnson Controls",          "johnsoncontrols.com",          "Field Services",        "Global"),
+    ("otis",                  "Otis",                      "otis.com",                     "Field Services",        "Global"),
+    ("schindler",             "Schindler",                 "schindler.com",                "Field Services",        "Global"),
+    ("stanley-black-decker",   "Stanley Black & Decker",    "stanleyblackanddecker.com",    "Manufacturing",         "Global"),
+    ("caterpillar",           "Caterpillar",               "caterpillar.com",              "Manufacturing",         "Global"),
+    # Healthcare, pharma, and life sciences
+    ("abbott",                "Abbott",                    "abbott.com",                   "Healthcare",            "Global"),
+    ("medtronic",             "Medtronic",                 "medtronic.com",                "MedTech",               "Global"),
+    ("thermo-fisher",         "Thermo Fisher Scientific",  "thermofisher.com",             "Life Sciences",         "Global"),
+    ("pfizer",                "Pfizer",                    "pfizer.com",                   "Pharmaceuticals",       "Global"),
+    ("novartis",              "Novartis",                  "novartis.com",                 "Pharmaceuticals",       "Global"),
+    ("merck",                 "Merck",                     "merck.com",                    "Pharmaceuticals",       "Global"),
+    ("astrazeneca",           "AstraZeneca",               "astrazeneca.com",              "Pharmaceuticals",       "Global"),
+    ("unitedhealth",          "UnitedHealth Group",        "unitedhealthgroup.com",        "Healthcare",            "NA"),
+    ("humana",                "Humana",                    "humana.com",                   "Healthcare",            "NA"),
+    # Insurance and financial services
+    ("allstate",              "Allstate",                  "allstate.com",                 "Insurance",             "NA"),
+    ("state-farm",            "State Farm",                "statefarm.com",                "Insurance",             "NA"),
+    ("liberty-mutual",        "Liberty Mutual",            "libertymutual.com",            "Insurance",             "NA"),
+    ("travelers",             "Travelers",                 "travelers.com",                "Insurance",             "NA"),
+    ("jpmorgan",              "JPMorgan Chase",            "jpmorganchase.com",            "Financial Services",    "Global"),
+    ("bank-of-america",       "Bank of America",           "bankofamerica.com",            "Financial Services",    "NA"),
+    ("wells-fargo",           "Wells Fargo",               "wellsfargo.com",               "Financial Services",    "NA"),
+    # Retail operations and corporate travel
+    ("walmart",               "Walmart",                   "walmart.com",                  "Retail",                "NA"),
+    ("target",                "Target",                    "target.com",                   "Retail",                "NA"),
+    ("best-buy",              "Best Buy",                  "bestbuy.com",                  "Retail",                "NA"),
+    ("home-depot",            "The Home Depot",            "homedepot.com",                "Retail",                "NA"),
+    ("lowes",                 "Lowe's",                    "lowes.com",                    "Retail",                "NA"),
+    # Energy, utilities, engineering, and construction
+    ("shell",                 "Shell",                     "shell.com",                    "Energy",                "Global"),
+    ("chevron",               "Chevron",                   "chevron.com",                  "Energy",                "Global"),
+    ("duke-energy",           "Duke Energy",               "duke-energy.com",              "Utilities",             "NA"),
+    ("nextera-energy",        "NextEra Energy",            "nexteraenergy.com",            "Utilities",             "NA"),
+    ("jacobs",                "Jacobs",                    "jacobs.com",                   "Engineering",           "Global"),
+    ("aecom",                 "AECOM",                     "aecom.com",                    "Engineering",           "Global"),
+    ("turner",                "Turner Construction",       "turnerconstruction.com",       "Construction",          "NA"),
+    ("bechtel",               "Bechtel",                   "bechtel.com",                  "Construction",          "Global"),
 ]
 
 PRODUCTS: list[dict[str, Any]] = [
-    # Platform tiers — per-vehicle telematics subscription
-    {"sku": "fleetwise-starter",        "name": "Fleetwise Starter",                 "category": "platform", "tier": "starter",    "list_price_usd": 199},
-    {"sku": "fleetwise-pro",            "name": "Fleetwise Pro",                     "category": "platform", "tier": "pro",        "list_price_usd": 999},
-    {"sku": "fleetwise-enterprise",     "name": "Fleetwise Enterprise",              "category": "platform", "tier": "enterprise", "list_price_usd": 4999},
-    {"sku": "fleetwise-asset-tracking", "name": "Fleetwise Asset Tracking",          "category": "platform", "tier": "enterprise", "list_price_usd": 3500},
-    # Add-ons — modules that drive attach / whitespace plays
-    {"sku": "maintenance",            "name": "Maintenance & Service Scheduling",    "category": "addon",    "tier": None,         "list_price_usd": 299},
-    {"sku": "eld-compliance",         "name": "ELD & Hours-of-Service Compliance",   "category": "addon",    "tier": None,         "list_price_usd": 499},
-    {"sku": "dashcam-ai",             "name": "AI Dashcam & Safety",                 "category": "addon",    "tier": None,         "list_price_usd": 799},
-    {"sku": "tpms",                   "name": "Tire & TPMS Monitoring",              "category": "addon",    "tier": None,         "list_price_usd": 149},
-    {"sku": "fuel-cards",             "name": "Fuel Card Program",                   "category": "addon",    "tier": None,         "list_price_usd": 199},
-    {"sku": "driver-app",             "name": "Driver Mobile App",                   "category": "addon",    "tier": None,         "list_price_usd": 99},
-    {"sku": "asset-tags",             "name": "Trailer & Asset Tags",                "category": "addon",    "tier": None,         "list_price_usd": 249},
-    {"sku": "cold-chain",             "name": "Cold Chain Temperature Monitoring",   "category": "addon",    "tier": None,         "list_price_usd": 899},
-    {"sku": "route-optimization",     "name": "Route Optimization",                  "category": "addon",    "tier": None,         "list_price_usd": 299},
-    {"sku": "ifta-fuel-tax",          "name": "IFTA Fuel Tax Reporting",             "category": "addon",    "tier": None,         "list_price_usd": 199},
-    {"sku": "ev-fleet",               "name": "EV Fleet & Charging Management",      "category": "addon",    "tier": None,         "list_price_usd": 1499},
+    # Rental programs — recurring enterprise rental agreements
+    {"sku": "roadflex-business",       "name": "RoadFlex Business Rental Program",     "category": "program",  "tier": "business",   "list_price_usd": 1800},
+    {"sku": "roadflex-premium",        "name": "RoadFlex Premium Rental Program",      "category": "program",  "tier": "premium",    "list_price_usd": 3200},
+    {"sku": "roadflex-global",         "name": "RoadFlex Global Mobility Program",     "category": "program",  "tier": "global",     "list_price_usd": 6200},
+    {"sku": "roadflex-project-pool",   "name": "RoadFlex Project Vehicle Pool",        "category": "program",  "tier": "enterprise", "list_price_usd": 4800},
+    # Add-ons that drive attach / whitespace plays
+    {"sku": "damage-waiver",           "name": "Corporate Damage Waiver",              "category": "addon",    "tier": None,         "list_price_usd": 850},
+    {"sku": "liability-cover",         "name": "Supplemental Liability Coverage",      "category": "addon",    "tier": None,         "list_price_usd": 950},
+    {"sku": "airport-delivery",        "name": "Airport & Office Delivery",            "category": "addon",    "tier": None,         "list_price_usd": 1200},
+    {"sku": "ev-hybrid-upgrade",       "name": "EV & Hybrid Vehicle Access",           "category": "addon",    "tier": None,         "list_price_usd": 1500},
+    {"sku": "fuel-service",            "name": "Fuel & Charging Service",              "category": "addon",    "tier": None,         "list_price_usd": 450},
+    {"sku": "mileage-package",         "name": "High-Mileage Package",                 "category": "addon",    "tier": None,         "list_price_usd": 700},
+    {"sku": "corporate-billing",       "name": "Corporate Billing Integration",        "category": "addon",    "tier": None,         "list_price_usd": 900},
+    {"sku": "driver-verification",     "name": "Driver Eligibility Verification",      "category": "addon",    "tier": None,         "list_price_usd": 550},
+    {"sku": "roadside-plus",           "name": "Roadside Plus",                        "category": "addon",    "tier": None,         "list_price_usd": 650},
+    {"sku": "one-way-rentals",         "name": "One-Way Rental Network",               "category": "addon",    "tier": None,         "list_price_usd": 800},
+    {"sku": "chauffeur-network",       "name": "Executive Chauffeur Network",          "category": "addon",    "tier": None,         "list_price_usd": 2200},
     # Support
-    {"sku": "support-priority",       "name": "Priority Support",                    "category": "support",  "tier": "premium",    "list_price_usd": 999},
-    {"sku": "support-247",            "name": "24x7 Fleet Support",                  "category": "support",  "tier": "enterprise", "list_price_usd": 3999},
+    {"sku": "support-priority",        "name": "Priority Mobility Support",            "category": "support",  "tier": "premium",    "list_price_usd": 1200},
+    {"sku": "support-247",             "name": "24x7 Traveler Support",                "category": "support",  "tier": "enterprise", "list_price_usd": 4200},
     # Services
-    {"sku": "installation-pack",      "name": "Hardware Installation & Onboarding",  "category": "services", "tier": None,         "list_price_usd": 2500},
-    {"sku": "pro-services",           "name": "Fleet Consulting Services",           "category": "services", "tier": None,         "list_price_usd": 4500},
-    {"sku": "beta-access",            "name": "Beta Feature Access",                 "category": "services", "tier": None,         "list_price_usd": 0},
+    {"sku": "implementation-pack",     "name": "Program Implementation & Onboarding",  "category": "services", "tier": None,         "list_price_usd": 3000},
+    {"sku": "travel-policy-design",    "name": "Travel Policy Design",                 "category": "services", "tier": None,         "list_price_usd": 4500},
+    {"sku": "mobility-analytics",      "name": "Mobility Analytics Advisory",          "category": "services", "tier": None,         "list_price_usd": 5200},
+    {"sku": "beta-access",             "name": "Beta Feature Access",                  "category": "services", "tier": None,         "list_price_usd": 0},
 ]
 
 LAUNCH_DATES = {
-    "platform": date(2022, 1, 1),
+    "program":  date(2022, 1, 1),
     "addon":    date(2022, 6, 1),
     "support":  date(2022, 1, 1),
     "services": date(2023, 1, 1),
 }
 
 CONTACT_ROLES = [
-    ("champion",       ["Fleet Manager", "Fleet Operations Manager", "Maintenance Manager", "Safety Manager"], False, True),
-    ("economic_buyer", ["VP Operations", "VP Fleet", "Director of Logistics", "Director of Fleet"],            True,  False),
-    ("technical",      ["Telematics Administrator", "Dispatch Lead", "Shop Foreman", "Compliance Specialist"], False, False),
-    ("executive",      ["Chief Operating Officer", "SVP Supply Chain", "EVP Operations"],                      True,  False),
+    ("champion",       ["Global Travel Manager", "Mobility Program Manager", "Corporate Mobility Manager", "Travel Operations Manager"], False, True),
+    ("economic_buyer", ["VP Procurement", "VP Travel & Expense", "Director of Strategic Sourcing", "VP Operations"],                  True,  False),
+    ("technical",      ["Travel Systems Administrator", "Expense Platform Lead", "Accounts Payable Lead", "Mobility Data Analyst"],   False, False),
+    ("executive",      ["Chief Procurement Officer", "Chief Financial Officer", "SVP Operations"],                                     True,  False),
 ]
 N_CONTACTS_BY_SIZE = {"smb": 2, "mid": 3, "ent": 3, "strategic": 4}
 
@@ -266,11 +265,11 @@ def _select_skus(rng: random.Random, size_class: str) -> list[str]:
     support_skus = [p["sku"] for p in by_cat["support"]]
     services_skus = [p["sku"] for p in by_cat["services"]]
 
-    platform = PLATFORM_PREF[size_class]
+    program = PROGRAM_PREF[size_class]
     if rng.random() < MISTIER_PROB:
-        platform = PLATFORM_DOWNGRADE[platform]
+        program = PROGRAM_DOWNGRADE[program]
 
-    chosen = [platform]
+    chosen = [program]
     if rng.random() < SUPPORT_PROB[size_class]:
         chosen.append(rng.choice(support_skus))
     if rng.random() < SERVICES_PROB[size_class]:
@@ -334,7 +333,7 @@ def generate_usage(
         rng = _account_rng(account["account_id"] + ":usage")
         trajectory = account["trajectory"]
         skus = _select_skus(rng, account["size_class"])
-        # "new" accounts only have a short, recent history.
+        # "new" accounts only have a short, recent rental-program history.
         active_months = months_back if trajectory != "new" else rng.randint(6, 10)
         churn_sku = rng.choice(skus) if trajectory == "at_risk" and rng.random() < 0.5 else None
 
@@ -397,7 +396,7 @@ def _finalize_accounts(
     accounts: list[dict[str, Any]],
     usage: list[dict[str, Any]],
 ) -> None:
-    """Derive arr_usd / arr_band / health_score / seats_total from real usage."""
+    """Derive ARR / health / contracted vehicle totals from real usage."""
     latest = latest_usage_by_account(usage)
     for account in accounts:
         lines = latest.get(account["account_id"], [])
@@ -507,7 +506,7 @@ if __name__ == "__main__":
     soon = [r for r in data["renewals"]
             if (date.fromisoformat(r["renewal_date"]) - date.today()).days <= 90]
     print(f"renewals <=90d: {len(soon)}")
-    sample = next(a for a in data["accounts"] if a["account_id"] == "sysco")
-    print("sample (sysco):", {k: sample[k] for k in
+    sample = next(a for a in data["accounts"] if a["account_id"] == "accenture")
+    print("sample (accenture):", {k: sample[k] for k in
           ("size_class", "employee_count_band", "trajectory",
            "arr_band_usd", "arr_usd", "health_score", "owner_csm")})

@@ -1,4 +1,4 @@
-"""Sales-assistant demo dataset + seeders for the Meta Knowledge Graph.
+"""Enterprise car-rental sales-assistant demo dataset + seeders for the MKG.
 
 This package is self-contained so that other datasets/personas can live beside
 it under ``import/`` as sibling folders (e.g. ``import/support_agent/``)

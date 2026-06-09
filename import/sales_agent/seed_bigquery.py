@@ -1,4 +1,4 @@
-"""Seed BigQuery with the sales-demo warehouse tables.
+"""Seed BigQuery with the RoadFlex enterprise car-rental demo warehouse tables.
 
 Creates five tables under ``$GCP_PROJECT_ID.$BIGQUERY_DATASET_ID``:
 
@@ -35,8 +35,8 @@ load_dotenv()
 
 
 DATASET_DESCRIPTION = (
-    "Fleetwise sales / customer-success demo warehouse — system-of-record for "
-    "~48 fleet-operator accounts. Tables: accounts, products, "
+    "RoadFlex enterprise car-rental sales / customer-success demo warehouse — "
+    "system-of-record for ~48 corporate mobility accounts. Tables: accounts, products, "
     "account_product_usage (monthly time series), account_contacts, "
     "account_renewals. Mirrors the Neo4j relationship graph; join on account_id "
     "(slug) or domain."
@@ -44,30 +44,30 @@ DATASET_DESCRIPTION = (
 
 
 ACCOUNTS_DESCRIPTION = (
-    "One row per Fleetwise customer account (fleet operators). System-of-record "
-    "roster: firmographics, derived ARR / health / utilization, trajectory, "
+    "One row per RoadFlex enterprise car-rental customer account. System-of-record "
+    "roster: firmographics, derived ARR / health / rental utilization, trajectory, "
     "renewal date, and owning CSM. Join on account_id (slug) or domain; mirrors "
     "Neo4j (:Account)."
 )
 ACCOUNTS_SCHEMA = [
     bigquery.SchemaField(
         "account_id", "STRING", mode="REQUIRED",
-        description="Account slug and primary key (e.g. 'sysco'); join key to "
+        description="Account slug and primary key (e.g. 'accenture'); join key to "
                     "every other table and to Neo4j (:Account).",
     ),
     bigquery.SchemaField(
         "name", "STRING", mode="REQUIRED",
-        description="Company display name (e.g. 'Sysco').",
+        description="Company display name (e.g. 'Accenture').",
     ),
     bigquery.SchemaField(
         "domain", "STRING", mode="REQUIRED",
-        description="Primary web domain (e.g. 'sysco.com'); secondary join key "
+        description="Primary web domain (e.g. 'accenture.com'); secondary join key "
                     "and the key Diffbot enrichment resolves on.",
     ),
     bigquery.SchemaField(
         "industry", "STRING",
-        description="Vertical segment (e.g. 'Food Distribution', 'LTL Freight', "
-                    "'Waste Services').",
+        description="Vertical segment (e.g. 'Professional Services', "
+                    "'Pharmaceuticals', 'Insurance', 'Retail', 'Utilities').",
     ),
     bigquery.SchemaField(
         "region", "STRING",
@@ -95,13 +95,14 @@ ACCOUNTS_SCHEMA = [
     ),
     bigquery.SchemaField(
         "seats_total", "INTEGER",
-        description="Total contracted seats across product lines; a seat is one "
-                    "enrolled vehicle/device.",
+        description="Total contracted rental-vehicle capacity across product "
+                    "lines; one seat is one reserved vehicle.",
     ),
     bigquery.SchemaField(
         "avg_utilization", "FLOAT",
-        description="Mean fleet activation across lines = active vehicles (mau) "
-                    "/ contracted seats in the latest month; >=1.0 signals a true-up.",
+        description="Mean rental activation across lines = monthly active rental "
+                    "vehicles (mau) / contracted vehicle capacity in the latest "
+                    "month; >=1.0 signals a true-up.",
     ),
     bigquery.SchemaField(
         "health_score", "INTEGER",
@@ -130,13 +131,13 @@ ACCOUNTS_SCHEMA = [
 ]
 
 PRODUCTS_DESCRIPTION = (
-    "Fleetwise product catalog: platform telematics tiers, attachable add-on "
-    "modules, support plans, and services. One row per sku."
+    "RoadFlex product catalog: enterprise rental programs, attachable mobility "
+    "add-ons, support plans, and services. One row per sku."
 )
 PRODUCTS_SCHEMA = [
     bigquery.SchemaField(
         "sku", "STRING", mode="REQUIRED",
-        description="Product identifier and primary key (e.g. 'fleetwise-pro'); "
+        description="Product identifier and primary key (e.g. 'roadflex-global'); "
                     "join key to account_product_usage.sku.",
     ),
     bigquery.SchemaField(
@@ -145,19 +146,20 @@ PRODUCTS_SCHEMA = [
     ),
     bigquery.SchemaField(
         "category", "STRING",
-        description="Product family: 'platform' (per-vehicle telematics tiers), "
-                    "'addon' (attachable modules), 'support', or 'services'.",
+        description="Product family: 'program' (enterprise rental agreements), "
+                    "'addon' (attachable mobility options), 'support', or 'services'.",
     ),
     bigquery.SchemaField(
         "tier", "STRING",
         description="Tier within the category where applicable "
-                    "('starter'/'pro'/'enterprise'/'premium'); NULL for add-ons "
+                    "('business'/'premium'/'global'/'enterprise'); NULL for add-ons "
                     "and services.",
     ),
     bigquery.SchemaField(
         "list_price_usd", "NUMERIC",
-        description="Monthly list price (USD), pre-discount. Platform tiers bill "
-                    "per enrolled vehicle; add-ons / support / services per account.",
+        description="Monthly list price (USD), pre-discount. Rental programs and "
+                    "add-ons scale with contracted vehicle capacity; support and "
+                    "services are account-level lines.",
     ),
     bigquery.SchemaField(
         "launched_at", "DATE",
@@ -167,8 +169,8 @@ PRODUCTS_SCHEMA = [
 
 USAGE_DESCRIPTION = (
     "Monthly usage facts, one row per (account, product, month). The time series "
-    "behind trends, utilization, and churn detection: active vehicles (mau) vs "
-    "contracted seats and recognized revenue."
+    "behind trends, utilization, and churn detection: active rental vehicles "
+    "(mau) vs contracted rental-vehicle capacity and recognized revenue."
 )
 USAGE_SCHEMA = [
     bigquery.SchemaField(
@@ -186,8 +188,8 @@ USAGE_SCHEMA = [
     ),
     bigquery.SchemaField(
         "mau", "INTEGER",
-        description="Monthly active vehicles/devices for this account-product-"
-                    "month (the 'active' count behind utilization).",
+        description="Monthly active rental vehicles for this account-product-month "
+                    "(the active count behind utilization).",
     ),
     bigquery.SchemaField(
         "monthly_revenue_usd", "NUMERIC",
@@ -199,8 +201,8 @@ USAGE_SCHEMA = [
     ),
     bigquery.SchemaField(
         "contracted_seats", "INTEGER",
-        description="Contracted seats = enrolled vehicles/devices for this line; "
-                    "the denominator of utilization.",
+        description="Contracted seats = reserved rental-vehicle capacity for this "
+                    "line; the denominator of utilization.",
     ),
 ]
 
@@ -212,7 +214,7 @@ CONTACTS_DESCRIPTION = (
 CONTACTS_SCHEMA = [
     bigquery.SchemaField(
         "contact_id", "STRING", mode="REQUIRED",
-        description="Contact primary key (e.g. 'sysco-c1').",
+        description="Contact primary key (e.g. 'accenture-c1').",
     ),
     bigquery.SchemaField(
         "account_id", "STRING", mode="REQUIRED",
@@ -232,7 +234,7 @@ CONTACTS_SCHEMA = [
     ),
     bigquery.SchemaField(
         "title", "STRING",
-        description="Job title (e.g. 'Fleet Manager', 'VP Operations').",
+        description="Job title (e.g. 'Global Travel Manager', 'VP Procurement').",
     ),
     bigquery.SchemaField(
         "role", "STRING",
@@ -246,7 +248,7 @@ CONTACTS_SCHEMA = [
     ),
     bigquery.SchemaField(
         "is_champion", "BOOL",
-        description="TRUE if the contact is the internal champion for Fleetwise.",
+        description="TRUE if the contact is the internal champion for RoadFlex.",
     ),
 ]
 
@@ -280,7 +282,7 @@ RENEWALS_SCHEMA = [
     ),
     bigquery.SchemaField(
         "seats_total", "INTEGER",
-        description="Total contracted seats (enrolled vehicles) on the contract.",
+        description="Total contracted rental-vehicle capacity on the contract.",
     ),
     bigquery.SchemaField(
         "auto_renew", "BOOL",

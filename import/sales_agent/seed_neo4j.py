@@ -1,7 +1,7 @@
-"""Seed Neo4j with the sales-demo graph.
+"""Seed Neo4j with the RoadFlex enterprise car-rental sales-demo graph.
 
 Unlike a flat warehouse load, this materializes the *relationships* that make
-the graph useful to a sales assistant:
+the graph useful to an enterprise mobility sales assistant:
 
     (:CSM)-[:OWNS]->(:Account)
     (:Account)-[:USES_PRODUCT {mau, contracted_seats, utilization, ...}]->(:Product)
