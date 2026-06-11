@@ -81,6 +81,10 @@
           {
             "type": "command",
             "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/apply_system_prompt.py --background"
+          },
+          {
+            "type": "command",
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/apply_memory_extraction_prompt.py --background"
           }
         ]
       }

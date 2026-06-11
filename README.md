@@ -42,8 +42,9 @@ loop:
   graph, the persisted system prompt, and (optionally) a data catalog and
   warehouse to the agent as tools.
 - **Claude Code hooks** — log every session event, inject scoped project
-  context on prompt submit, and run an LLM adjudicator at Stop / SessionEnd
-  that distills durable `:Learning` / `:Decision` / `:SystemPromptSuggestion`
+  context on prompt submit, and run an LLM memory extraction processor at Stop / SessionEnd
+  that distills durable `:Learning` / `:Decision` / `:SystemPromptSuggestion` /
+  `:MemoryExtractionPromptSuggestion`
   candidates from what just happened.
 
 The hooks write to the same graph the MCP tools read from, so each new session
@@ -60,7 +61,7 @@ required env vars are present.
 | Tool | Purpose |
 |---|---|
 | `project_get_context` | Fetch approved + candidate `:Learning` and `:Decision` nodes for the current project, optionally fulltext-ranked by a query. |
-| `project_add_learning` | Idempotent direct write of one durable learning. Use for user-asserted constraints the auto-capture would miss; routine work should be left to the adjudicator. |
+| `project_add_learning` | Idempotent direct write of one durable learning. Use for user-asserted constraints the auto-capture would miss; routine work should be left to the memory extraction processor. |
 | `neo4j_get_schema` / `neo4j_read_cypher` | Read access to the graph (proxied from the official neo4j-mcp-server). |
 | `import_text_to_kg` | Extract entities and relationships from raw text via an LLM and persist them. |
 | `search_news` | Search Diffbot Knowledge Graph Article/news data with a DQL string and a small `max_results` count. Returns concise fields for sales research. Optional; mounted only when `DIFFBOT_TOKEN` or `DIFFBOT_API_TOKEN` is set. |
@@ -82,9 +83,10 @@ hooks swallow their own exceptions so a Neo4j outage never blocks the session.
 |---|---|---|
 | `SessionStart` | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: $MKG_PROMPT_NAME})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and persist a refined system prompt back to Neo4j so the next session skips the fallback. |
 | `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits scoped to the current project. Marks served learnings as used. |
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd` | `hooks/log_event.py` | Persists each event as an `:Event` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the adjudicator later reads. |
-| `Stop`, `SessionEnd` | `hooks/process_project.py` | Pulls the session's events that the current `(project, mode)` hasn't processed yet, builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions per category. System-prompt suggestions are reserved for rare operating-principle changes or explicit/reinforced high-level user preferences and interests, not transient facts, secrets, sensitive personal data, or one-off task context. Writes new `:Learning` / `:Decision` / `:SystemPromptSuggestion` nodes with status `candidate`. |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd` | `hooks/log_event.py` | Persists each event as an `:Event` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the memory extraction processor later reads. |
+| `Stop`, `SessionEnd` | `hooks/process_project.py` | Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: $MKG_MEMORY_EXTRACTION_PROMPT_NAME})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions per category. System-prompt suggestions are reserved for rare operating-principle changes or explicit/reinforced high-level user preferences and interests; memory-extraction-prompt suggestions are reserved for improving future extraction quality. Writes new `:Learning` / `:Decision` / `:SystemPromptSuggestion` / `:MemoryExtractionPromptSuggestion` nodes with status `candidate`. |
 | `Stop` | `hooks/apply_system_prompt.py` | Rate-limited rebuild of the live `(:SystemPrompt)`. Runs in the background on every Stop but only acts when at least `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` candidate suggestions are pending **and** `MKG_PROMPT_REBUILD_MIN_HOURS` have passed since the last rebuild (gate + claim in one conditional write, so concurrent Stops can't double-rebuild). Seeds the prompt node from the default if it doesn't exist, snapshots the previous content as `(:SystemPromptVersion)`, folds suggestions in via LLM (verbatim append under a learned-notes section when `OPENAI_API_KEY` is absent), and marks each suggestion `applied` or `rejected`. |
+| `Stop` | `hooks/apply_memory_extraction_prompt.py` | Rate-limited rebuild of the live `(:MemoryExtractionPrompt)`. It mirrors `apply_system_prompt.py`: gates on pending `:MemoryExtractionPromptSuggestion` nodes, snapshots prior content as `(:MemoryExtractionPromptVersion)`, preserves required runtime tokens, and marks suggestions `applied` or `rejected`. |
 
 ### Graph model
 
@@ -95,12 +97,14 @@ hooks swallow their own exceptions so a Neo4j outage never blocks the session.
    ├─[:HAS_LEARNING]→ (:Learning {status: 'candidate'|'approved', confidence})
    ├─[:HAS_DECISION]→ (:Decision)
    ├─[:HAS_SYSTEM_PROMPT_SUGGESTION]→ (:SystemPromptSuggestion {status})─[:APPLIED_TO]→ (:SystemPrompt)
+   ├─[:HAS_MEMORY_EXTRACTION_PROMPT_SUGGESTION]→ (:MemoryExtractionPromptSuggestion {status})─[:APPLIED_TO]→ (:MemoryExtractionPrompt)
    └─[:HAS_PROCESSING]→ (:ProjectProcessing)─[:PROCESSED_EVENT]→ (:Event)
                                             ─[:PRODUCED_LEARNING]→ (:Learning)
                                             ─[:UPDATED_LEARNING]→ (:Learning)
                                             ─[:PRODUCED_DECISION]→ (:Decision)
 
 (:SystemPrompt {name, version})─[:HAS_VERSION]→ (:SystemPromptVersion)
+(:MemoryExtractionPrompt {name, version})─[:HAS_VERSION]→ (:MemoryExtractionPromptVersion)
 ```
 
 Candidate learnings flow through retrieval but are review-gated — they stay
@@ -109,7 +113,9 @@ Candidate learnings flow through retrieval but are review-gated — they stay
 path. System-prompt suggestions follow `candidate → applied | rejected`: the
 Stop-event rebuild consumes them in batches once the time and count gates pass,
 and every rebuild snapshots the prior prompt as a `(:SystemPromptVersion)` for
-rollback.
+rollback. Memory-extraction-prompt suggestions follow the same
+`candidate → applied | rejected` path into `(:MemoryExtractionPrompt)` while
+preserving the runtime tokens used to render project/event context.
 
 ## Quick Start
 
@@ -135,9 +141,16 @@ Add to your Claude Desktop `claude_desktop_config.json` or `.claude/settings.jso
 }
 ```
 
-Then register the four hook scripts in `.claude/settings.json` under their
+Then register the hook scripts in `.claude/settings.json` under their
 corresponding `hooks.SessionStart` / `UserPromptSubmit` / `PreToolUse` /
 `PostToolUse` / `Stop` / `SessionEnd` entries.
+
+To seed the extraction prompt template explicitly instead of waiting for the
+next `process_project.py` run:
+
+```bash
+uv run python hooks/seed_memory_extraction_prompt.py
+```
 
 ## Configuration
 
@@ -151,10 +164,15 @@ corresponding `hooks.SessionStart` / `UserPromptSubmit` / `PreToolUse` /
 | `OPENAI_API_KEY` | — | — | Required by `import_text_to_kg`, `process_project.py`, and Neocarta. |
 | `DIFFBOT_TOKEN` / `DIFFBOT_API_TOKEN` | — | — | Enables `search_news` and `enhance_entity` when set. |
 | `LLM_MODEL` | — | `gpt-5.4-mini` | Default model for LLM calls. |
-| `MKG_LEARNING_MODEL` | — | falls back to `LLM_MODEL` | Override just the adjudicator model. |
+| `MKG_LEARNING_MODEL` | — | falls back to `LLM_MODEL` | Override just the memory extraction model. |
 | `MKG_PROMPT_NAME` | — | `default` | Which `(:SystemPrompt {name})` node to load on session start. |
 | `MKG_PROMPT_REBUILD_MIN_HOURS` | — | `8` | Minimum hours between system-prompt rebuilds on Stop. |
 | `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` | — | `2` | Pending candidate suggestions required before a rebuild runs. |
 | `MKG_PROMPT_MAX_CHARS` | — | `12000` | Length budget for the rebuilt system prompt. |
 | `MKG_PROMPT_REBUILD_MODEL` | — | falls back to `MKG_LEARNING_MODEL` | Override just the prompt-rebuild model. |
+| `MKG_MEMORY_EXTRACTION_PROMPT_NAME` | — | `default` | Which `(:MemoryExtractionPrompt {name})` template to render in `process_project.py`. |
+| `MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MIN_HOURS` | — | falls back to `MKG_PROMPT_REBUILD_MIN_HOURS` or `8` | Minimum hours between memory-extraction-prompt rebuilds on Stop. |
+| `MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MIN_SUGGESTIONS` | — | falls back to `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` or `2` | Pending candidate suggestions required before a memory-extraction-prompt rebuild runs. |
+| `MKG_MEMORY_EXTRACTION_PROMPT_MAX_CHARS` | — | falls back to `MKG_PROMPT_MAX_CHARS` or `12000` | Length budget for the rebuilt memory extraction prompt template. |
+| `MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MODEL` | — | falls back to `MKG_PROMPT_REBUILD_MODEL`, then `MKG_LEARNING_MODEL` | Override just the memory-extraction-prompt rebuild model. |
 | `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID` | — | — | Required to mount the Neocarta and BigQuery tools. |

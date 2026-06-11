@@ -5,7 +5,7 @@ re-discovers facts the demo already knows: where the warehouse lives, how to
 pick an engine per question, how to discover schema. This script seeds those
 as curated, approved learnings and decisions attached to the ``(:Project)``,
 using the same ids (``learning_id`` / ``decision_id``) and node shapes the
-Stop-hook adjudicator writes, so runtime captures dedupe against them.
+Stop-hook memory extraction writes, so runtime captures dedupe against them.
 
     uv run python import/sales_agent/seed_learnings.py
     uv run python import/sales_agent/seed_learnings.py --project my-project-id
@@ -123,7 +123,7 @@ DECISIONS: list[dict[str, str | float]] = [
         ),
         "rationale": (
             "Bootstrap facts are needed by the very next session, and the "
-            "Stop-hook adjudicator only runs if the session ends cleanly."
+            "Stop-hook memory extraction only runs if the session ends cleanly."
         ),
         "summary": "Capture bootstrap facts immediately",
         "task_pattern": "session bootstrap",

@@ -73,6 +73,10 @@
           {
             "type": "command",
             "command": "uv run --no-sync python hooks/apply_system_prompt.py --background"
+          },
+          {
+            "type": "command",
+            "command": "uv run --no-sync python hooks/apply_memory_extraction_prompt.py --background"
           }
         ]
       }

@@ -39,7 +39,7 @@ available in this session):
    that future sessions will need, store it as a learning right away rather
    than relying on end-of-session auto-capture to notice.
 3. Trust the auto-capture for routine work. Stop / SessionEnd processing sends
-   the session corpus to an LLM adjudicator that writes ``:Learning`` /
+   the session corpus to an LLM memory extractor that writes ``:Learning`` /
    ``:Decision`` candidates. Do not double-record what the pipeline will catch.
 4. Keep stored items small, durable, and reusable across tasks. Avoid
    transcripts, ephemeral state, and project-internal trivia.

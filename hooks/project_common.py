@@ -90,6 +90,18 @@ def ensure_project_schema(tx) -> None:
         "REQUIRE v.id IS UNIQUE"
     )
     tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (s:MemoryExtractionPromptSuggestion) "
+        "REQUIRE s.id IS UNIQUE"
+    )
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (p:MemoryExtractionPrompt) "
+        "REQUIRE p.name IS UNIQUE"
+    )
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (v:MemoryExtractionPromptVersion) "
+        "REQUIRE v.id IS UNIQUE"
+    )
+    tx.run(
         "CREATE CONSTRAINT IF NOT EXISTS FOR (p:ProjectProcessing) "
         "REQUIRE p.id IS UNIQUE"
     )
@@ -165,6 +177,11 @@ def decision_id(project_id: str, text: str) -> str:
 def system_prompt_suggestion_id(project_id: str, instruction: str) -> str:
     digest = sha1(f"{project_id}\n{instruction.strip()}".encode("utf-8")).hexdigest()[:16]
     return f"system-prompt-suggestion:{project_id}:{digest}"
+
+
+def memory_extraction_prompt_suggestion_id(project_id: str, instruction: str) -> str:
+    digest = sha1(f"{project_id}\n{instruction.strip()}".encode("utf-8")).hexdigest()[:16]
+    return f"memory-extraction-prompt-suggestion:{project_id}:{digest}"
 
 
 def truncate(value: str, limit: int = MAX_LEARNING_TEXT) -> str:

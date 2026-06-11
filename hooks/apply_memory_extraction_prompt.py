@@ -1,22 +1,10 @@
 #!/usr/bin/env python3
-"""Stop hook: fold accumulated system prompt suggestions into the live prompt.
+"""Stop hook: fold suggestions into the live memory extraction prompt.
 
-The memory extraction processor (process_project.py) queues ``(:SystemPromptSuggestion
-{status: 'candidate'})`` nodes but never touches the live ``(:SystemPrompt)``.
-This hook closes that loop on Stop, rate-limited so the prompt is not churned
-on every turn. A rebuild only runs when both gates pass:
-
-  * at least ``MKG_PROMPT_REBUILD_MIN_HOURS`` (default 8) since the prompt's
-    last rebuild, and
-  * at least ``MKG_PROMPT_REBUILD_MIN_SUGGESTIONS`` (default 2) pending
-    candidate suggestions.
-
-Gate check and claim happen in one conditional write so concurrent Stop events
-cannot double-rebuild. The previous prompt content is snapshotted as a
-``(:SystemPromptVersion)`` node and each consumed suggestion is marked
-``applied`` or ``rejected``. With ``OPENAI_API_KEY`` set the rewrite is an LLM
-fold-in; without it the instructions are appended verbatim under a
-"Learned operating notes" section so the loop still closes.
+``process_project.py`` queues ``(:MemoryExtractionPromptSuggestion
+{status: 'candidate'})`` nodes when completed work reveals a durable way to
+improve future memory extraction. This hook closes that loop on Stop, using the
+same rate-limited gate/claim/version pattern as ``apply_system_prompt.py``.
 """
 
 from __future__ import annotations
@@ -35,7 +23,13 @@ HOOK_DIR = Path(__file__).resolve().parent
 if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
-from inject_system_prompt import DEFAULT_PROMPT  # noqa: E402
+from process_project import (  # noqa: E402
+    DEFAULT_MEMORY_EXTRACTION_PROMPT,
+    DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME,
+    MEMORY_EXTRACTION_PROMPT_NAME_ENV,
+    MEMORY_EXTRACTION_PROMPT_TOKENS,
+    memory_extraction_prompt_is_valid,
+)
 from project_common import (  # noqa: E402
     ensure_project_schema,
     load_dotenv,
@@ -43,7 +37,7 @@ from project_common import (  # noqa: E402
     truncate,
 )
 
-LEARNED_NOTES_HEADER = "## Learned operating notes"
+LEARNED_EXTRACTION_NOTES_HEADER = "## Learned extraction notes"
 CLAIM_TIMEOUT_MINUTES = 15
 SUGGESTION_BATCH_LIMIT = 8
 
@@ -71,28 +65,23 @@ def claim_rebuild(
     claim_cutoff: str,
     now: str,
 ) -> dict[str, Any] | None:
-    """Atomically check both gates and claim the rebuild.
-
-    Returns the current prompt content plus the pending suggestion batch, or
-    None when a gate failed (not enough suggestions, rebuilt too recently, or
-    another process holds a fresh claim). The prompt node is seeded from the
-    default content if it does not exist yet, so the loop works on an empty
-    graph without a manual seeding step.
-    """
+    """Atomically check both gates and claim the extraction prompt rebuild."""
     record = tx.run(
         """
-        MATCH (s:SystemPromptSuggestion {prompt_name: $name, status: 'candidate'})
+        MATCH (s:MemoryExtractionPromptSuggestion {prompt_name: $name, status: 'candidate'})
         WITH s ORDER BY coalesce(s.confidence, 0.0) DESC, s.updated_at
         WITH collect(s) AS pending
         WHERE size(pending) >= $min_suggestions
-        MERGE (p:SystemPrompt {name: $name})
+        MERGE (p:MemoryExtractionPrompt {name: $name})
         ON CREATE SET p.content = $default_content,
                       p.created_at = datetime($now),
                       p.version = 1
         WITH p, pending
         WHERE (p.last_rebuilt_at IS NULL OR p.last_rebuilt_at <= datetime($rebuild_cutoff))
           AND (p.rebuild_claimed_at IS NULL OR p.rebuild_claimed_at <= datetime($claim_cutoff))
-        SET p.rebuild_claimed_at = datetime($now)
+        SET p.rebuild_claimed_at = datetime($now),
+            p.content = coalesce(p.content, $default_content),
+            p.version = coalesce(p.version, 1)
         RETURN p.content AS content,
                [s IN pending[..$batch_limit] | {
                    id: s.id,
@@ -129,10 +118,11 @@ def build_rebuild_prompt(
             f"rationale={truncate(str(item.get('rationale') or ''), 400)}"
         )
     pending = "\n".join(lines) if lines else "- none"
-    return f"""You maintain the persisted system prompt for an agent. Fold the
-suggestions worth keeping into the prompt and reject the rest.
+    required_tokens = ", ".join(MEMORY_EXTRACTION_PROMPT_TOKENS)
+    return f"""You maintain the persisted memory extraction prompt template for
+an agent. Fold the suggestions worth keeping into the prompt and reject the rest.
 
-Current system prompt:
+Current memory extraction prompt template:
 ---
 {current}
 ---
@@ -141,15 +131,21 @@ Pending suggestions:
 {pending}
 
 Rules:
-- Preserve the prompt's identity, intent, and overall structure.
+- Preserve every required runtime token exactly: {required_tokens}.
+- Preserve the prompt's core job: review completed work, compare similar
+  existing memory, and return strict JSON actions.
+- Preserve output fields for learnings, decisions, system_prompt_updates, and
+  memory_extraction_prompt_updates unless a suggestion explicitly and safely
+  changes the schema.
 - Integrate accepted instructions where they belong instead of appending blindly,
-  and consolidate any existing learned notes that say the same thing.
+  and consolidate any existing learned extraction notes that say the same thing.
 - Reject suggestions that duplicate guidance already in the prompt, are
-  project-specific trivia, are transient, or contradict the prompt.
+  project-specific trivia, are transient, store user/project facts, or would
+  weaken sensitivity filtering.
 - Keep the full prompt under {max_chars} characters.
 
 Return JSON only with this shape:
-{{"content": "the complete rewritten prompt", "applied_ids": ["..."], "rejected": [{{"id": "...", "reason": "..."}}]}}
+{{"content": "the complete rewritten prompt template", "applied_ids": ["..."], "rejected": [{{"id": "...", "reason": "..."}}]}}
 """
 
 
@@ -172,7 +168,8 @@ def ask_llm_for_rewrite(prompt: str) -> dict[str, Any]:
     from openai import OpenAI
 
     model = (
-        os.environ.get("MKG_PROMPT_REBUILD_MODEL")
+        os.environ.get("MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MODEL")
+        or os.environ.get("MKG_PROMPT_REBUILD_MODEL")
         or os.environ.get("MKG_LEARNING_MODEL")
         or os.environ.get("LLM_MODEL", "gpt-5.4-mini")
     )
@@ -182,7 +179,10 @@ def ask_llm_for_rewrite(prompt: str) -> dict[str, Any]:
         messages=[
             {
                 "role": "system",
-                "content": "You maintain an agent's persisted system prompt. Return strict JSON only.",
+                "content": (
+                    "You maintain an agent's persisted memory extraction prompt. "
+                    "Return strict JSON only."
+                ),
             },
             {"role": "user", "content": prompt},
         ],
@@ -197,7 +197,12 @@ def validate_llm_rewrite(
     max_chars: int,
 ) -> tuple[str, list[str], list[dict[str, Any]]] | None:
     content = parsed.get("content")
-    if not isinstance(content, str) or not content.strip() or len(content) > max_chars:
+    if (
+        not isinstance(content, str)
+        or not content.strip()
+        or len(content) > max_chars
+        or not memory_extraction_prompt_is_valid(content)
+    ):
         return None
     applied = [
         sid
@@ -222,12 +227,7 @@ def fallback_rewrite(
     suggestions: list[dict[str, Any]],
     max_chars: int,
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
-    """Deterministic rewrite used when no LLM is available.
-
-    Appends instructions under a learned-notes section, treats instructions
-    already present verbatim as applied, and leaves anything over the length
-    budget as a candidate for a future rebuild.
-    """
+    """Deterministic rewrite used when no LLM is available."""
     content = current.rstrip("\n")
     applied: list[str] = []
     for item in suggestions:
@@ -239,8 +239,8 @@ def fallback_rewrite(
             applied.append(sid)
             continue
         addition = f"- {instruction}"
-        if LEARNED_NOTES_HEADER not in content:
-            addition = f"\n{LEARNED_NOTES_HEADER}\n{addition}"
+        if LEARNED_EXTRACTION_NOTES_HEADER not in content:
+            addition = f"\n{LEARNED_EXTRACTION_NOTES_HEADER}\n{addition}"
         if len(content) + len(addition) + 2 > max_chars:
             continue
         content = f"{content}\n{addition}"
@@ -253,6 +253,7 @@ def rewrite_prompt(
     suggestions: list[dict[str, Any]],
     max_chars: int,
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
+    current = current if memory_extraction_prompt_is_valid(current) else DEFAULT_MEMORY_EXTRACTION_PROMPT
     pending_ids = {str(item.get("id")) for item in suggestions if item.get("id")}
     if os.environ.get("OPENAI_API_KEY"):
         try:
@@ -261,12 +262,14 @@ def rewrite_prompt(
             if validated:
                 return validated
             print(
-                "[apply_system_prompt] LLM rewrite invalid, falling back to verbatim append",
+                "[apply_memory_extraction_prompt] LLM rewrite invalid, "
+                "falling back to verbatim append",
                 file=sys.stderr,
             )
         except Exception as exc:
             print(
-                f"[apply_system_prompt] LLM rewrite failed, falling back to verbatim append: {exc}",
+                "[apply_memory_extraction_prompt] LLM rewrite failed, "
+                f"falling back to verbatim append: {exc}",
                 file=sys.stderr,
             )
     return fallback_rewrite(current, suggestions, max_chars)
@@ -274,25 +277,26 @@ def rewrite_prompt(
 
 def version_node_id(name: str, version: int, content: str) -> str:
     digest = sha1(content.encode("utf-8")).hexdigest()[:12]
-    return f"promptversion:{name}:v{version}:{digest}"
+    return f"memoryextractionpromptversion:{name}:v{version}:{digest}"
 
 
-def upsert_prompt(tx, name: str, content: str, source: str, now: str) -> dict[str, Any]:
-    """Create or replace a ``(:SystemPrompt)`` with rebuild-identical versioning.
-
-    Replaced content is snapshotted as a ``(:SystemPromptVersion)`` and the
-    version counter bumped, so manual seeds and Stop-event rebuilds share one
-    history chain. Unchanged content is a no-op. Returns the action taken.
-    """
+def upsert_memory_extraction_prompt(
+    tx,
+    name: str,
+    content: str,
+    source: str,
+    now: str,
+) -> dict[str, Any]:
+    """Create or replace a ``(:MemoryExtractionPrompt)`` with versioning."""
     record = tx.run(
-        "MATCH (p:SystemPrompt {name: $name}) "
+        "MATCH (p:MemoryExtractionPrompt {name: $name}) "
         "RETURN p.content AS content, coalesce(p.version, 1) AS version",
         name=name,
     ).single()
     if record is None:
         tx.run(
             """
-            MERGE (p:SystemPrompt {name: $name})
+            MERGE (p:MemoryExtractionPrompt {name: $name})
             SET p.content = $content,
                 p.version = 1,
                 p.created_at = datetime($now),
@@ -311,8 +315,8 @@ def upsert_prompt(tx, name: str, content: str, source: str, now: str) -> dict[st
 
     tx.run(
         """
-        MATCH (p:SystemPrompt {name: $name})
-        MERGE (v:SystemPromptVersion {id: $version_id})
+        MATCH (p:MemoryExtractionPrompt {name: $name})
+        MERGE (v:MemoryExtractionPromptVersion {id: $version_id})
         ON CREATE SET v.created_at = datetime($now)
         SET v.prompt_name = $name,
             v.version = $old_version,
@@ -342,10 +346,16 @@ def write_rebuild(
     rejected_rows: list[dict[str, Any]],
     now: str,
 ) -> None:
-    upsert_prompt(tx, name=name, content=content, source="stop_rebuild", now=now)
+    upsert_memory_extraction_prompt(
+        tx,
+        name=name,
+        content=content,
+        source="stop_rebuild",
+        now=now,
+    )
     tx.run(
         """
-        MATCH (p:SystemPrompt {name: $name})
+        MATCH (p:MemoryExtractionPrompt {name: $name})
         SET p.last_rebuilt_at = datetime($now),
             p.rebuild_claimed_at = null
         """,
@@ -355,9 +365,9 @@ def write_rebuild(
     if applied_ids:
         tx.run(
             """
-            MATCH (p:SystemPrompt {name: $name})
+            MATCH (p:MemoryExtractionPrompt {name: $name})
             UNWIND $ids AS sid
-            MATCH (s:SystemPromptSuggestion {id: sid})
+            MATCH (s:MemoryExtractionPromptSuggestion {id: sid})
             SET s.status = 'applied',
                 s.applied_at = datetime($now),
                 s.applied_version = p.version
@@ -371,7 +381,7 @@ def write_rebuild(
         tx.run(
             """
             UNWIND $rows AS row
-            MATCH (s:SystemPromptSuggestion {id: row.id})
+            MATCH (s:MemoryExtractionPromptSuggestion {id: row.id})
             SET s.status = 'rejected',
                 s.rejected_at = datetime($now),
                 s.rejected_reason = row.reason
@@ -381,14 +391,27 @@ def write_rebuild(
         )
 
 
-def apply_system_prompt(prompt_name: str | None = None) -> None:
+def apply_memory_extraction_prompt(prompt_name: str | None = None) -> None:
     project_root = Path(__file__).resolve().parents[1]
     load_dotenv(project_root / ".env")
 
-    name = prompt_name or os.getenv("MKG_PROMPT_NAME", "default")
-    min_hours = _float_env("MKG_PROMPT_REBUILD_MIN_HOURS", 8.0)
-    min_suggestions = _int_env("MKG_PROMPT_REBUILD_MIN_SUGGESTIONS", 2)
-    max_chars = _int_env("MKG_PROMPT_MAX_CHARS", 12000)
+    name = (
+        prompt_name
+        or os.getenv(MEMORY_EXTRACTION_PROMPT_NAME_ENV)
+        or DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
+    )
+    min_hours = _float_env(
+        "MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MIN_HOURS",
+        _float_env("MKG_PROMPT_REBUILD_MIN_HOURS", 8.0),
+    )
+    min_suggestions = _int_env(
+        "MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MIN_SUGGESTIONS",
+        _int_env("MKG_PROMPT_REBUILD_MIN_SUGGESTIONS", 2),
+    )
+    max_chars = _int_env(
+        "MKG_MEMORY_EXTRACTION_PROMPT_MAX_CHARS",
+        _int_env("MKG_PROMPT_MAX_CHARS", 12000),
+    )
 
     from neo4j import GraphDatabase
 
@@ -403,7 +426,7 @@ def apply_system_prompt(prompt_name: str | None = None) -> None:
             claim = session.execute_write(
                 claim_rebuild,
                 name=name,
-                default_content=DEFAULT_PROMPT,
+                default_content=DEFAULT_MEMORY_EXTRACTION_PROMPT,
                 min_suggestions=min_suggestions,
                 rebuild_cutoff=rebuild_cutoff,
                 claim_cutoff=claim_cutoff,
@@ -430,7 +453,8 @@ def apply_system_prompt(prompt_name: str | None = None) -> None:
             except Exception:
                 try:
                     session.run(
-                        "MATCH (p:SystemPrompt {name: $name}) SET p.rebuild_claimed_at = null",
+                        "MATCH (p:MemoryExtractionPrompt {name: $name}) "
+                        "SET p.rebuild_claimed_at = null",
                         name=name,
                     )
                 except Exception:
@@ -462,7 +486,7 @@ def main() -> int:
     parser.add_argument(
         "--background",
         action="store_true",
-        help="Spawn the rebuild in the background and return immediately.",
+        help="Spawn the memory extraction prompt rebuild in the background and return immediately.",
     )
     args = parser.parse_args()
 
@@ -471,9 +495,9 @@ def main() -> int:
         return 0
 
     try:
-        apply_system_prompt(args.prompt_name)
+        apply_memory_extraction_prompt(args.prompt_name)
     except Exception as exc:  # pragma: no cover - hook must never crash the session
-        print(f"[apply_system_prompt] error: {exc}", file=sys.stderr)
+        print(f"[apply_memory_extraction_prompt] error: {exc}", file=sys.stderr)
     return 0
 
 

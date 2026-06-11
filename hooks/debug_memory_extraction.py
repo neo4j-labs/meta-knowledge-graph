@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""One-shot diagnostic: rebuild and inspect a process_project LLM call.
+"""One-shot diagnostic: rebuild and inspect a process_project extraction call.
 
-Usage: python hooks/debug_adjudicator.py --mode session --session-id <id>
+Usage: python hooks/debug_memory_extraction.py --mode session --session-id <id>
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 HOOK_DIR = Path(__file__).resolve().parent
@@ -16,9 +17,14 @@ if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
 from process_project import (  # noqa: E402
+    DEFAULT_MEMORY_EXTRACTION_PROMPT,
+    DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME,
+    MEMORY_EXTRACTION_PROMPT_NAME_ENV,
     _event_corpus,
     _search_query,
-    build_memory_adjudication_prompt,
+    build_memory_extraction_prompt,
+    load_or_seed_memory_extraction_prompt,
+    memory_extraction_prompt_is_valid,
 )
 from project_common import (  # noqa: E402
     ProjectRef,
@@ -70,6 +76,10 @@ def main() -> int:
 
     project = ProjectRef(id=args.project_id, name="Meta Knowledge Graph")
     uri, user, password, database = neo4j_config()
+    prompt_name = (
+        os.getenv(MEMORY_EXTRACTION_PROMPT_NAME_ENV)
+        or DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
+    )
 
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         with driver.session(database=database) as sess:
@@ -88,16 +98,34 @@ def main() -> int:
             similar_decisions = fetch_project_decisions(
                 sess, project_id=project.id, query=search_query, limit=8,
             )
+            prompt_record = sess.execute_write(
+                load_or_seed_memory_extraction_prompt,
+                name=prompt_name,
+                default_content=DEFAULT_MEMORY_EXTRACTION_PROMPT,
+                now=datetime.now(timezone.utc).isoformat(),
+            )
+            prompt_template = str(prompt_record.get("content") or DEFAULT_MEMORY_EXTRACTION_PROMPT)
+            if not memory_extraction_prompt_is_valid(prompt_template):
+                prompt_template = DEFAULT_MEMORY_EXTRACTION_PROMPT
             print(f"[debug] similar_learnings: {len(similar_learnings)}", file=sys.stderr)
             print(f"[debug] similar_decisions: {len(similar_decisions)}", file=sys.stderr)
+            print(
+                f"[debug] prompt node: {prompt_name} v{prompt_record.get('version')}",
+                file=sys.stderr,
+            )
 
-    prompt = build_memory_adjudication_prompt(
-        project, args.mode, events, similar_learnings, similar_decisions,
+    prompt = build_memory_extraction_prompt(
+        project,
+        args.mode,
+        events,
+        similar_learnings,
+        similar_decisions,
+        template=prompt_template,
     )
 
     out_dir = Path("/tmp/mkg-debug")
     out_dir.mkdir(exist_ok=True)
-    prompt_path = out_dir / f"prompt_{args.mode}.txt"
+    prompt_path = out_dir / f"memory_extraction_prompt_{args.mode}.txt"
     prompt_path.write_text(prompt)
     print(f"[debug] prompt saved: {prompt_path} ({len(prompt)} chars)", file=sys.stderr)
 
@@ -117,7 +145,7 @@ def main() -> int:
         messages=[
             {
                 "role": "system",
-                "content": "You curate project memory for an agent. Return strict JSON only.",
+                "content": "You extract durable project memory for an agent. Return strict JSON only.",
             },
             {"role": "user", "content": prompt},
         ],
@@ -126,7 +154,7 @@ def main() -> int:
     finish = response.choices[0].finish_reason
     usage = response.usage
 
-    response_path = out_dir / f"response_{args.mode}.txt"
+    response_path = out_dir / f"memory_extraction_response_{args.mode}.txt"
     response_path.write_text(content)
     print(f"[debug] response saved: {response_path} ({len(content)} chars)", file=sys.stderr)
     print(f"[debug] finish_reason: {finish}", file=sys.stderr)

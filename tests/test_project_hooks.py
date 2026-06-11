@@ -49,7 +49,7 @@ class ProjectHookTests(unittest.TestCase):
         ]
         project = project_common.ProjectRef(id="mkg", name="MKG")
 
-        prompt = process_project.build_memory_adjudication_prompt(
+        prompt = process_project.build_memory_extraction_prompt(
             project,
             "turn",
             events,
@@ -77,11 +77,27 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("decision:mkg:existing", prompt)
         self.assertIn('"action": "create|update|ignore"', prompt)
         self.assertIn("system_prompt_updates", prompt)
+        self.assertIn("memory_extraction_prompt_updates", prompt)
         self.assertIn("rate-limited rebuild", prompt)
+        self.assertIn("MemoryExtractionPrompt", prompt)
         self.assertIn("high-level stable information about the user", prompt)
         self.assertIn("broad interests", prompt)
         self.assertIn("communication/workflow preferences", prompt)
         self.assertIn("sensitive personal data", prompt)
+
+    def test_memory_prompt_falls_back_when_template_lacks_required_tokens(self) -> None:
+        prompt = process_project.build_memory_extraction_prompt(
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "turn",
+            [{"event_name": "UserPromptSubmit", "prompt": "remember duplicate handling"}],
+            [],
+            [],
+            template="Missing the dynamic placeholders.",
+        )
+
+        self.assertIn("Project: MKG (mkg)", prompt)
+        self.assertIn("remember duplicate handling", prompt)
+        self.assertIn("Existing similar learnings", prompt)
 
     def test_llm_action_rows_skip_ignored_memory(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
@@ -99,9 +115,9 @@ class ProjectHookTests(unittest.TestCase):
             "decisions": [
                 {
                     "action": "create",
-                    "text": "Ask the LLM to adjudicate memory writes.",
+                    "text": "Ask the LLM to extract memory writes.",
                     "rationale": "It can compare against similar existing memory.",
-                    "task_pattern": "project memory llm adjudication",
+                    "task_pattern": "project memory llm extraction",
                     "confidence": 0.9,
                 }
             ],
@@ -118,13 +134,24 @@ class ProjectHookTests(unittest.TestCase):
                 },
                 {"action": "ignore", "reason": "Too specific."},
             ],
+            "memory_extraction_prompt_updates": [
+                {
+                    "action": "suggest",
+                    "prompt_name": "default",
+                    "instruction": "Prefer update over create when similar memory already exists.",
+                    "rationale": "This improves future duplicate handling.",
+                    "confidence": 0.8,
+                },
+                {"action": "ignore", "reason": "Already covered."},
+            ],
         }
 
-        learning_rows, decision_rows, system_prompt_rows = process_project._memory_rows_from_actions(
-            project,
-            "turn",
-            actions,
-        )
+        (
+            learning_rows,
+            decision_rows,
+            system_prompt_rows,
+            extraction_prompt_rows,
+        ) = process_project._memory_rows_from_actions(project, "turn", actions)
 
         self.assertEqual(len(learning_rows), 1)
         self.assertEqual(learning_rows[0]["id"], "learning:mkg:existing")
@@ -134,6 +161,9 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(len(system_prompt_rows), 1)
         self.assertEqual(system_prompt_rows[0]["prompt_name"], "default")
         self.assertIn("project goals", system_prompt_rows[0]["instruction"])
+        self.assertEqual(len(extraction_prompt_rows), 1)
+        self.assertEqual(extraction_prompt_rows[0]["prompt_name"], "default")
+        self.assertIn("Prefer update", extraction_prompt_rows[0]["instruction"])
 
     def test_learning_context_marks_candidates_as_hints(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
@@ -182,10 +212,14 @@ class ProjectHookTests(unittest.TestCase):
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
         stop_hooks = config["hooks"]["Stop"][0]["hooks"]
 
-        self.assertEqual(len(stop_hooks), 3)
+        self.assertEqual(len(stop_hooks), 4)
         self.assertIn("hooks/log_event.py --client codex", stop_hooks[0]["command"])
         self.assertIn("hooks/process_project.py --mode turn --background", stop_hooks[1]["command"])
         self.assertIn("hooks/apply_system_prompt.py --background", stop_hooks[2]["command"])
+        self.assertIn(
+            "hooks/apply_memory_extraction_prompt.py --background",
+            stop_hooks[3]["command"],
+        )
 
 
 if __name__ == "__main__":

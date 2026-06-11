@@ -31,11 +31,100 @@ from project_common import (  # noqa: E402
     learning_id,
     load_dotenv,
     merge_project_and_session,
+    memory_extraction_prompt_suggestion_id,
     neo4j_config,
     resolve_project,
     system_prompt_suggestion_id,
     truncate,
 )
+
+
+DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME = "default"
+MEMORY_EXTRACTION_PROMPT_NAME_ENV = "MKG_MEMORY_EXTRACTION_PROMPT_NAME"
+MEMORY_EXTRACTION_PROMPT_TOKENS = (
+    "[[PROJECT_NAME]]",
+    "[[PROJECT_ID]]",
+    "[[MODE]]",
+    "[[CORPUS]]",
+    "[[EXISTING_MEMORY]]",
+)
+
+DEFAULT_MEMORY_EXTRACTION_PROMPT = """Project: [[PROJECT_NAME]] ([[PROJECT_ID]])
+Processing scope: [[MODE]]
+
+Current completed work:
+[[CORPUS]]
+
+[[EXISTING_MEMORY]]
+
+Decide whether this completed work contains durable project memory worth storing.
+Prefer updating existing memory when it is materially the same idea. Create a new
+item only for a distinct reusable learning or major decision. Return ignore when
+the work is routine, transient, or already covered without needing reinforcement.
+
+If the work reveals that the persistent system prompt itself should change, propose
+a system_prompt_update. These should be rare. They may be general operating-principle
+changes, or high-level stable information about the user this prompt serves, such as
+broad interests, communication/workflow preferences, or durable domain priorities.
+Only suggest user-specific prompt changes when the signal is explicit or repeatedly
+reinforced. Do not suggest project-specific facts, transient details, secrets,
+sensitive personal data, or one-off task context. Suggestions queue as candidates;
+a rate-limited rebuild folds them into the live SystemPrompt once enough accumulate.
+
+If this memory extraction prompt itself should change, propose a
+memory_extraction_prompt_update. These should be rare, targeted instructions that
+would improve future extraction quality, duplicate handling, sensitivity filtering,
+or output validation. Do not use this field to store project facts, user facts,
+or task context; those belong in learnings, decisions, or system prompt updates.
+Suggestions queue as candidates; a rate-limited rebuild folds them into the live
+MemoryExtractionPrompt once enough accumulate.
+
+Return JSON only with this shape:
+{
+  "learnings": [
+    {
+      "action": "create|update|ignore",
+      "existing_id": "learning id when action is update, otherwise null",
+      "text": "concise durable learning, or null",
+      "task_pattern": "short reusable task pattern, or null",
+      "confidence": 0.0,
+      "reason": "why this action"
+    }
+  ],
+  "decisions": [
+    {
+      "action": "create|update|ignore",
+      "existing_id": "decision id when action is update, otherwise null",
+      "text": "concise major decision, or null",
+      "rationale": "why the decision matters, or null",
+      "task_pattern": "short reusable task pattern, or null",
+      "related_learning_id": "optional related learning id, or null",
+      "confidence": 0.0,
+      "reason": "why this action"
+    }
+  ],
+  "system_prompt_updates": [
+    {
+      "action": "suggest|ignore",
+      "prompt_name": "default",
+      "instruction": "specific instruction to add or modify, or null",
+      "rationale": "why this belongs in the persistent system prompt, or null",
+      "confidence": 0.0,
+      "reason": "why this action"
+    }
+  ],
+  "memory_extraction_prompt_updates": [
+    {
+      "action": "suggest|ignore",
+      "prompt_name": "default",
+      "instruction": "specific instruction to add or modify in the memory extraction prompt, or null",
+      "rationale": "why this improves future memory extraction, or null",
+      "confidence": 0.0,
+      "reason": "why this action"
+    }
+  ]
+}
+"""
 
 
 def _search_query(*values: object) -> str:
@@ -120,7 +209,12 @@ def _format_existing_memory(
     return "\n".join(lines)
 
 
-def build_memory_adjudication_prompt(
+def memory_extraction_prompt_is_valid(content: str) -> bool:
+    return all(token in content for token in MEMORY_EXTRACTION_PROMPT_TOKENS)
+
+
+def render_memory_extraction_prompt(
+    template: str,
     project: ProjectRef,
     mode: str,
     events: list[dict[str, Any]],
@@ -129,63 +223,65 @@ def build_memory_adjudication_prompt(
 ) -> str:
     corpus = _event_corpus(events)
     existing = _format_existing_memory(similar_learnings, similar_decisions)
-    return f"""Project: {project.name} ({project.id})
-Processing scope: {mode}
+    replacements = {
+        "[[PROJECT_NAME]]": project.name,
+        "[[PROJECT_ID]]": project.id,
+        "[[MODE]]": mode,
+        "[[CORPUS]]": corpus,
+        "[[EXISTING_MEMORY]]": existing,
+    }
+    rendered = template
+    for token, value in replacements.items():
+        rendered = rendered.replace(token, value)
+    return rendered
 
-Current completed work:
-{corpus}
 
-{existing}
+def load_or_seed_memory_extraction_prompt(
+    tx,
+    name: str,
+    default_content: str,
+    now: str,
+) -> dict[str, Any]:
+    record = tx.run(
+        """
+        MERGE (p:MemoryExtractionPrompt {name: $name})
+        ON CREATE SET p.content = $default_content,
+                      p.version = 1,
+                      p.created_at = datetime($now),
+                      p.updated_at = datetime($now)
+        SET p.content = coalesce(p.content, $default_content),
+            p.version = coalesce(p.version, 1)
+        RETURN p.content AS content,
+               coalesce(p.version, 1) AS version
+        """,
+        name=name,
+        default_content=default_content,
+        now=now,
+    ).single()
+    if not record:
+        return {"content": default_content, "version": 1}
+    return {"content": str(record["content"] or default_content), "version": int(record["version"])}
 
-Decide whether this completed work contains durable project memory worth storing.
-Prefer updating existing memory when it is materially the same idea. Create a new
-item only for a distinct reusable learning or major decision. Return ignore when
-the work is routine, transient, or already covered without needing reinforcement.
-If the work reveals that the persistent system prompt itself should change, propose
-a system_prompt_update. These should be rare. They may be general operating-principle
-changes, or high-level stable information about the user this prompt serves, such as
-broad interests, communication/workflow preferences, or durable domain priorities.
-Only suggest user-specific prompt changes when the signal is explicit or repeatedly
-reinforced. Do not suggest project-specific facts, transient details, secrets,
-sensitive personal data, or one-off task context. Suggestions queue as candidates;
-a rate-limited rebuild folds them into the live SystemPrompt once enough accumulate.
 
-Return JSON only with this shape:
-{{
-  "learnings": [
-    {{
-      "action": "create|update|ignore",
-      "existing_id": "learning id when action is update, otherwise null",
-      "text": "concise durable learning, or null",
-      "task_pattern": "short reusable task pattern, or null",
-      "confidence": 0.0,
-      "reason": "why this action"
-    }}
-  ],
-  "decisions": [
-    {{
-      "action": "create|update|ignore",
-      "existing_id": "decision id when action is update, otherwise null",
-      "text": "concise major decision, or null",
-      "rationale": "why the decision matters, or null",
-      "task_pattern": "short reusable task pattern, or null",
-      "related_learning_id": "optional related learning id, or null",
-      "confidence": 0.0,
-      "reason": "why this action"
-    }}
-  ],
-  "system_prompt_updates": [
-    {{
-      "action": "suggest|ignore",
-      "prompt_name": "default",
-      "instruction": "specific instruction to add or modify, or null",
-      "rationale": "why this belongs in the persistent system prompt, or null",
-      "confidence": 0.0,
-      "reason": "why this action"
-    }}
-  ]
-}}
-"""
+def build_memory_extraction_prompt(
+    project: ProjectRef,
+    mode: str,
+    events: list[dict[str, Any]],
+    similar_learnings: list[dict[str, Any]],
+    similar_decisions: list[dict[str, Any]],
+    template: str | None = None,
+) -> str:
+    active_template = template or DEFAULT_MEMORY_EXTRACTION_PROMPT
+    if not memory_extraction_prompt_is_valid(active_template):
+        active_template = DEFAULT_MEMORY_EXTRACTION_PROMPT
+    return render_memory_extraction_prompt(
+        active_template,
+        project,
+        mode,
+        events,
+        similar_learnings,
+        similar_decisions,
+    )
 
 
 def _json_from_llm_text(text: str) -> dict[str, Any]:
@@ -221,7 +317,7 @@ def ask_llm_for_memory_actions(prompt: str) -> dict[str, Any]:
         messages=[
             {
                 "role": "system",
-                "content": "You curate project memory for an agent. Return strict JSON only.",
+                "content": "You extract durable project memory for an agent. Return strict JSON only.",
             },
             {"role": "user", "content": prompt},
         ],
@@ -242,7 +338,12 @@ def _memory_rows_from_actions(
     project: ProjectRef,
     mode: str,
     actions: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     learning_rows: list[dict[str, Any]] = []
     for item in actions.get("learnings") or []:
         if not isinstance(item, dict):
@@ -324,7 +425,34 @@ def _memory_rows_from_actions(
                 "reason": item.get("reason"),
             }
         )
-    return learning_rows[:3], decision_rows[:5], system_prompt_rows[:3]
+    extraction_prompt_rows: list[dict[str, Any]] = []
+    for item in actions.get("memory_extraction_prompt_updates") or []:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action") or "").lower()
+        if action != "suggest":
+            continue
+        instruction = truncate(str(item.get("instruction") or "").strip(), 700)
+        if not instruction:
+            continue
+        prompt_name = (
+            str(item.get("prompt_name") or DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME).strip()
+            or DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
+        )
+        extraction_prompt_rows.append(
+            {
+                "id": memory_extraction_prompt_suggestion_id(project.id, instruction),
+                "action": action,
+                "prompt_name": prompt_name,
+                "instruction": instruction,
+                "rationale": truncate(str(item.get("rationale") or ""), 700) or None,
+                "confidence": _confidence(item.get("confidence")),
+                "status": "candidate",
+                "source": f"project_{mode}_llm",
+                "reason": item.get("reason"),
+            }
+        )
+    return learning_rows[:3], decision_rows[:5], system_prompt_rows[:3], extraction_prompt_rows[:3]
 
 
 def _fetch_unprocessed_events(
@@ -362,6 +490,9 @@ def _write_processing(
     learning_rows: list[dict[str, Any]],
     decision_rows: list[dict[str, Any]],
     system_prompt_rows: list[dict[str, Any]],
+    extraction_prompt_rows: list[dict[str, Any]],
+    memory_extraction_prompt_name: str,
+    memory_extraction_prompt_version: int,
     timestamp: str,
 ) -> None:
     event_ids = [event["event_id"] for event in events if event.get("event_id")]
@@ -370,7 +501,8 @@ def _write_processing(
     summary = (
         f"Processed {len(event_ids)} {mode} events and produced "
         f"{len(learning_rows)} learning actions, {len(decision_rows)} decision actions, "
-        f"and {len(system_prompt_rows)} system prompt suggestions."
+        f"{len(system_prompt_rows)} system prompt suggestions, and "
+        f"{len(extraction_prompt_rows)} memory extraction prompt suggestions."
     )
 
     tx.run(
@@ -393,6 +525,9 @@ def _write_processing(
             pp.learning_count = $learning_count,
             pp.decision_count = $decision_count,
             pp.system_prompt_suggestion_count = $system_prompt_suggestion_count,
+            pp.memory_extraction_prompt_suggestion_count = $memory_extraction_prompt_suggestion_count,
+            pp.memory_extraction_prompt_name = $memory_extraction_prompt_name,
+            pp.memory_extraction_prompt_version = $memory_extraction_prompt_version,
             pp.summary = $summary,
             pp.updated_at = $timestamp
         MERGE (p)-[:HAS_PROCESSING]->(pp)
@@ -410,6 +545,9 @@ def _write_processing(
         learning_count=len(learning_rows),
         decision_count=len(decision_rows),
         system_prompt_suggestion_count=len(system_prompt_rows),
+        memory_extraction_prompt_suggestion_count=len(extraction_prompt_rows),
+        memory_extraction_prompt_name=memory_extraction_prompt_name,
+        memory_extraction_prompt_version=memory_extraction_prompt_version,
         summary=summary,
         event_ids=event_ids,
         timestamp=timestamp,
@@ -617,6 +755,41 @@ def _write_processing(
             timestamp=timestamp,
         )
 
+    if extraction_prompt_rows:
+        tx.run(
+            """
+            MATCH (p:Project {id: $project_id})
+            MATCH (s:Session {session_id: $session_id})
+            MATCH (pp:ProjectProcessing {id: $processing_id})
+            UNWIND $suggestions AS row
+            MERGE (suggestion:MemoryExtractionPromptSuggestion {id: row.id})
+            ON CREATE SET suggestion.created_at = $timestamp,
+                          suggestion.status = row.status,
+                          suggestion.support_count = 0
+            SET suggestion.prompt_name = row.prompt_name,
+                suggestion.instruction = row.instruction,
+                suggestion.rationale = row.rationale,
+                suggestion.source = row.source,
+                suggestion.project_id = $project_id,
+                suggestion.source_session_id = $session_id,
+                suggestion.last_reason = row.reason,
+                suggestion.updated_at = $timestamp,
+                suggestion.support_count = coalesce(suggestion.support_count, 0) + 1,
+                suggestion.confidence = CASE
+                    WHEN coalesce(suggestion.confidence, 0.0) < row.confidence THEN row.confidence
+                    ELSE suggestion.confidence
+                END
+            MERGE (p)-[:HAS_MEMORY_EXTRACTION_PROMPT_SUGGESTION]->(suggestion)
+            MERGE (suggestion)-[:FROM_SESSION]->(s)
+            MERGE (pp)-[:PROPOSED_MEMORY_EXTRACTION_PROMPT_UPDATE]->(suggestion)
+            """,
+            project_id=project.id,
+            session_id=session_id,
+            processing_id=processing_id,
+            suggestions=extraction_prompt_rows,
+            timestamp=timestamp,
+        )
+
 
 def _write_processing_error(
     tx,
@@ -638,7 +811,7 @@ def _write_processing_error(
     digest = sha1(seed.encode("utf-8")).hexdigest()[:16]
     processing_id = f"processing:{project.id}:{session_id}:{mode}:error:{digest}"
     summary = (
-        f"Adjudication failed for {len(event_ids)} {mode} events "
+        f"Memory extraction failed for {len(event_ids)} {mode} events "
         f"({truncate(error_text, 200)}); events left unprocessed for backfill."
     )
 
@@ -663,6 +836,7 @@ def _write_processing_error(
             pp.learning_count = 0,
             pp.decision_count = 0,
             pp.system_prompt_suggestion_count = 0,
+            pp.memory_extraction_prompt_suggestion_count = 0,
             pp.error = $error_text,
             pp.summary = $summary,
             pp.attempt_count = coalesce(pp.attempt_count, 0) + 1,
@@ -711,6 +885,25 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
             if not events:
                 return
             try:
+                prompt_name = (
+                    os.getenv(MEMORY_EXTRACTION_PROMPT_NAME_ENV)
+                    or DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
+                )
+                prompt_record = session.execute_write(
+                    load_or_seed_memory_extraction_prompt,
+                    name=prompt_name,
+                    default_content=DEFAULT_MEMORY_EXTRACTION_PROMPT,
+                    now=timestamp,
+                )
+                prompt_template = str(prompt_record.get("content") or DEFAULT_MEMORY_EXTRACTION_PROMPT)
+                prompt_version = int(prompt_record.get("version") or 1)
+                if not memory_extraction_prompt_is_valid(prompt_template):
+                    print(
+                        "[process_project] stored memory extraction prompt is missing "
+                        "required tokens; using default template for this run",
+                        file=sys.stderr,
+                    )
+                    prompt_template = DEFAULT_MEMORY_EXTRACTION_PROMPT
                 corpus = _event_corpus(events)
                 search_query = _search_query(corpus)
                 similar_learnings = fetch_project_learnings(
@@ -726,15 +919,21 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     query=search_query,
                     limit=8,
                 )
-                prompt = build_memory_adjudication_prompt(
+                prompt = build_memory_extraction_prompt(
                     project,
                     mode,
                     events,
                     similar_learnings,
                     similar_decisions,
+                    template=prompt_template,
                 )
                 actions = ask_llm_for_memory_actions(prompt)
-                learning_rows, decision_rows, system_prompt_rows = _memory_rows_from_actions(
+                (
+                    learning_rows,
+                    decision_rows,
+                    system_prompt_rows,
+                    extraction_prompt_rows,
+                ) = _memory_rows_from_actions(
                     project,
                     mode,
                     actions,
@@ -748,12 +947,15 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     learning_rows,
                     decision_rows,
                     system_prompt_rows,
+                    extraction_prompt_rows,
+                    prompt_name,
+                    prompt_version,
                     timestamp,
                 )
             except Exception as exc:
                 error_text = f"{type(exc).__name__}: {exc}"
                 print(
-                    f"[process_project] adjudication failed; recording error node: {error_text}",
+                    f"[process_project] memory extraction failed; recording error node: {error_text}",
                     file=sys.stderr,
                 )
                 error_timestamp = datetime.now(timezone.utc).isoformat()
