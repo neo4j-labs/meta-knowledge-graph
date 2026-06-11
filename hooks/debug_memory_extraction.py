@@ -19,7 +19,6 @@ if str(HOOK_DIR) not in sys.path:
 from process_project import (  # noqa: E402
     DEFAULT_MEMORY_EXTRACTION_PROMPT,
     DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME,
-    MEMORY_EXTRACTION_PROMPT_NAME_ENV,
     _event_corpus,
     _search_query,
     build_memory_extraction_prompt,
@@ -30,6 +29,7 @@ from project_common import (  # noqa: E402
     ProjectRef,
     fetch_project_decisions,
     fetch_project_learnings,
+    llm_model,
     load_dotenv,
     neo4j_config,
 )
@@ -76,10 +76,7 @@ def main() -> int:
 
     project = ProjectRef(id=args.project_id, name="Meta Knowledge Graph")
     uri, user, password, database = neo4j_config()
-    prompt_name = (
-        os.getenv(MEMORY_EXTRACTION_PROMPT_NAME_ENV)
-        or DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
-    )
+    prompt_name = DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
 
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         with driver.session(database=database) as sess:
@@ -135,9 +132,7 @@ def main() -> int:
 
     from openai import OpenAI
 
-    model = os.environ.get("MKG_LEARNING_MODEL") or os.environ.get(
-        "LLM_MODEL", "gpt-5.4-mini",
-    )
+    model = llm_model()
     print(f"[debug] calling model: {model}", file=sys.stderr)
     client = OpenAI()
     response = client.chat.completions.create(

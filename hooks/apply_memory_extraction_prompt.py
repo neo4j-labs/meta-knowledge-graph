@@ -26,12 +26,12 @@ if str(HOOK_DIR) not in sys.path:
 from process_project import (  # noqa: E402
     DEFAULT_MEMORY_EXTRACTION_PROMPT,
     DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME,
-    MEMORY_EXTRACTION_PROMPT_NAME_ENV,
     MEMORY_EXTRACTION_PROMPT_TOKENS,
     memory_extraction_prompt_is_valid,
 )
 from project_common import (  # noqa: E402
     ensure_project_schema,
+    llm_model,
     load_dotenv,
     neo4j_config,
     truncate,
@@ -167,15 +167,9 @@ def _json_from_llm_text(text: str) -> dict[str, Any]:
 def ask_llm_for_rewrite(prompt: str) -> dict[str, Any]:
     from openai import OpenAI
 
-    model = (
-        os.environ.get("MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MODEL")
-        or os.environ.get("MKG_PROMPT_REBUILD_MODEL")
-        or os.environ.get("MKG_LEARNING_MODEL")
-        or os.environ.get("LLM_MODEL", "gpt-5.4-mini")
-    )
     client = OpenAI()
     response = client.chat.completions.create(
-        model=model,
+        model=llm_model(),
         messages=[
             {
                 "role": "system",
@@ -395,23 +389,10 @@ def apply_memory_extraction_prompt(prompt_name: str | None = None) -> None:
     project_root = Path(__file__).resolve().parents[1]
     load_dotenv(project_root / ".env")
 
-    name = (
-        prompt_name
-        or os.getenv(MEMORY_EXTRACTION_PROMPT_NAME_ENV)
-        or DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
-    )
-    min_hours = _float_env(
-        "MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MIN_HOURS",
-        _float_env("MKG_PROMPT_REBUILD_MIN_HOURS", 8.0),
-    )
-    min_suggestions = _int_env(
-        "MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MIN_SUGGESTIONS",
-        _int_env("MKG_PROMPT_REBUILD_MIN_SUGGESTIONS", 2),
-    )
-    max_chars = _int_env(
-        "MKG_MEMORY_EXTRACTION_PROMPT_MAX_CHARS",
-        _int_env("MKG_PROMPT_MAX_CHARS", 12000),
-    )
+    name = prompt_name or DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
+    min_hours = _float_env("MKG_PROMPT_REBUILD_MIN_HOURS", 8.0)
+    min_suggestions = _int_env("MKG_PROMPT_REBUILD_MIN_SUGGESTIONS", 2)
+    max_chars = _int_env("MKG_PROMPT_MAX_CHARS", 12000)
 
     from neo4j import GraphDatabase
 

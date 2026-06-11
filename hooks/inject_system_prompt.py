@@ -5,9 +5,8 @@ Injects a system prompt fetched from a Neo4j ``(:SystemPrompt {name})`` node int
 the agent session as additional context. Falls back to a bootstrap prompt
 if Neo4j is unreachable or the requested prompt does not exist.
 
-Customize the active prompt by either:
-  * editing the node in Neo4j (``MATCH (p:SystemPrompt {name: 'default'}) SET p.content = ...``)
-  * adding a new node and exporting ``MKG_PROMPT_NAME=<name>`` before launching Claude Code.
+Customize the active prompt by editing the node in Neo4j
+(``MATCH (p:SystemPrompt {name: 'default'}) SET p.content = ...``).
 """
 
 from __future__ import annotations
@@ -93,7 +92,7 @@ def load_dotenv(env_path: Path) -> None:
 
 def _neo4j_config() -> tuple[str, str, str, str]:
     uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    user = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER", "neo4j")
+    user = os.getenv("NEO4J_USERNAME", "neo4j")
     password = os.getenv("NEO4J_PASSWORD", "password")
     database = os.getenv("NEO4J_DATABASE", "neo4j")
     return uri, user, password, database
@@ -207,7 +206,7 @@ def main() -> int:
     session_id = payload.get("session_id", "unknown")
     hook_event = payload.get("hook_event_name", "SessionStart")
 
-    prompt_name = os.getenv("MKG_PROMPT_NAME", "default")
+    prompt_name = "default"
     fetched = fetch_prompt_from_neo4j(prompt_name)
     prompt = fetched or FALLBACK_BOOTSTRAP_PROMPT
     source = "neo4j" if fetched else "default"

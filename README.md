@@ -1,92 +1,69 @@
-# Meta Knowledge Graph: Self-Learning System for AI Agents
+# Meta Knowledge Graph: Self-Learning Memory for AI Agents
 
-This repository contains the reference implementation for the **Meta Knowledge Graph** (MKG), an **Intelligence Layer for Enterprise AI Agents**.
+The **Meta Knowledge Graph** (MKG) is a self-improving, graph-structured memory
+layer for AI agents, backed by Neo4j. It is **harness-agnostic**: the Neo4j
+store and the MCP server plug into any MCP-capable harness, and the
+capture/injection scripts ride on whatever lifecycle hooks the harness exposes.
+This repo ships ready-made wiring for **Claude Code**
+([`.claude/settings.json`](.claude/settings.json)) and **Codex**
+([`.codex/config.toml`](.codex/config.toml)); plugging a custom harness in
+means pointing its lifecycle events at the same scripts.
 
-The MKG is a self-improving, graph-structured metadata layer designed to enhance the reasoning capabilities of AI agents by providing rich enterprise context.
-
-### Key Differentiator: Generating Intelligence
-
-The MKG's core innovation is that it does not just *store* intelligence—it **generates** it through the **Graph Intelligence Engine**.
-
-This engine uses algorithms from the Graph Data Science (GDS) library to:
-
-  * **Discover Implicit Relationships:** Find relationships not explicitly created by humans or agents (using node similarity on bipartite graphs).
-  * **Learn Agent Patterns:** Identify critical decision points (using betweenness centrality) and cluster agent behaviors into reusable patterns (using community detection).
-
-Every agent run strengthens patterns, and GDS discovers new ones from the accumulated decision traces, creating a **compounding intelligence effect**.
-
-### Four Metadata Categories Captured
-
-The system harvests and captures decision traces and four categories of metadata from enterprise data platforms and agent interactions:
-
-  * **Technical:** Schemas, column definitions, data types, and lineage.
-  * **Operational:** Job execution stats, quality/trust scores, freshness, and pipeline success/failure.
-  * **Business:** Glossary terms, KPI definitions, ontologies, and semantic mapping (e.g., table-to-domain).
-  * **Agentic:** Decision traces with causal chains (`CAUSED`, `INFLUENCED`, `PRECEDENT_FOR`), policy application, user corrections with rationale, and accumulated patterns.
-
-### Core Architecture
-
-  * **Meta Knowledge Graph (Neo4j):** The central graph store, extending the Context Graph Demo model with nodes like `AgentRun`, `Correction`, `OrgKnowledge`, and `Schema`.
-  * **GDS Intelligence Engine:** Runs analytical workflows to discover implicit relationships and learn patterns from accumulated decision traces.
-  * **Hybrid Retrieval Agent:** Combines **semantic search** (text embeddings on decision reasoning) with **structural search** (enriched e.g. with graph embeddings) to retrieve precedents that are both semantically and structurally similar.
-  * **External Metadata Connector:** Gather catalog metadata (schema, columns, types) from sources like Snowflake or Databricks.
-  * **Approval Process:** Knowledge derived from user interactions (chat) requires explicit approval to become permanent rules, and patterns carry time-decaying confidence scores that trigger re-validation.
-
-# Meta Knowledge Graph
-
-A reference implementation of the architecture above for Claude Code agents,
-backed by Neo4j. It ships as two halves that form a closed capture-and-recall
-loop:
+It ships as two halves that form a closed capture-and-recall loop:
 
 - **MCP server (`meta-knowledge-graph`)** — surfaces project memory, the underlying
   graph, the persisted system prompt, and (optionally) a data catalog and
   warehouse to the agent as tools.
-- **Claude Code hooks** — log every session event, inject scoped project
-  context on prompt submit, and run an LLM memory extraction processor at Stop / SessionEnd
+- **Lifecycle hooks** — plain Python scripts that log every session event,
+  inject scoped project context on prompt submit, and run an LLM memory extraction processor at Stop / SessionEnd
   that distills durable `:Learning` / `:Decision` / `:SystemPromptSuggestion` /
   `:MemoryExtractionPromptSuggestion`
   candidates from what just happened.
 
 The hooks write to the same graph the MCP tools read from, so each new session
-starts with the most relevant prior learnings already injected.
+starts with the most relevant prior learnings already injected. Two
+self-improvement loops run on top: candidate suggestions are periodically folded
+into the live persisted **system prompt** and into the live **memory extraction
+prompt**, both versioned in the graph with rollback snapshots.
+
+A complete end-to-end demo — a B2B sales / customer-success assistant for an
+enterprise car-rental provider — ships in the repo; see
+[Sales agent use case](#sales-agent-use-case) for setup.
 
 ## Architecture
 
 ### MCP server
 
-Mounted under the `meta-knowledge-graph` prefix. Tool availability varies by
-environment — the data-catalog and warehouse tools are only mounted when the
-required env vars are present.
+Mounted under the `meta-knowledge-graph` prefix, in four groups:
 
-| Tool | Purpose |
-|---|---|
-| `project_get_context` | Fetch approved + candidate `:Learning` and `:Decision` nodes for the current project, optionally fulltext-ranked by a query. |
-| `project_add_learning` | Idempotent direct write of one durable learning. Use for user-asserted constraints the auto-capture would miss; routine work should be left to the memory extraction processor. |
-| `neo4j_get_schema` / `neo4j_read_cypher` | Read access to the graph (proxied from the official neo4j-mcp-server). |
-| `import_text_to_kg` | Extract entities and relationships from raw text via an LLM and persist them. |
-| `search_news` | Search Diffbot Knowledge Graph Article/news data with a DQL string and a small `max_results` count. Returns concise fields for sales research. Optional; mounted only when `DIFFBOT_TOKEN` or `DIFFBOT_API_TOKEN` is set. |
-| `enhance_entity` | Enrich a Diffbot `Organization` or `Person` from sales-friendly identifiers such as name, URL, email, phone, title, employer, or location. Returns concise sales-relevant fields. Optional; mounted only when `DIFFBOT_TOKEN` or `DIFFBOT_API_TOKEN` is set. |
-| `bigquery_execute_query` | Read-only SQL against the configured BigQuery project. Optional. |
-| `neocarta_*` | Data-catalog navigation plus hybrid vector + fulltext search over schemas, tables, and columns. Optional; requires `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID`, and `OPENAI_API_KEY`. |
-
-Example `search_news` DQL for recent articles:
-
-- Company news from the last 3 days: `type:Article tags.label:"Acme Corp" date<3d language:"en" sortBy:date`
-- Topic news from the last 3 days: `type:Article tags.label:"supply chain disruption" date<3d language:"en" sortBy:date`
+| Group | Tools | Mounted when |
+|---|---|---|
+| Project memory & graph | `project_get_context`, `project_add_learning`, `neo4j_get_schema`, `neo4j_read_cypher` | Always. |
+| Diffbot research | `search_news`, `enhance_entity` | `DIFFBOT_TOKEN` is set. |
+| BigQuery warehouse | `bigquery_execute_query` | `BIGQUERY_MCP_URL` is set. |
+| Neocarta data catalog | `neocarta_*` | `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID`, and `OPENAI_API_KEY` are set. |
 
 ### Hooks
 
-Wire these into `.claude/settings.json` under the corresponding events. All
-hooks swallow their own exceptions so a Neo4j outage never blocks the session.
+The hook scripts are harness-agnostic: each reads the lifecycle event's JSON
+payload from stdin, and `log_event.py` tags events with `--client <name>`
+(default `claude_code`), so sessions record which harness produced them. Any
+harness that exposes lifecycle hooks — Claude Code, Codex, Cursor, or a custom
+loop — can drive the same scripts. The table below shows the Claude Code
+wiring from this repo's own `.claude/settings.json`. All hooks swallow their
+own exceptions so a Neo4j outage never blocks the session. A few scripts
+(`inject_system_prompt.py`, `log_event.py`, `seed_system_prompt.py`) are
+mirrored as identical copies under `.claude/hooks/`; the canonical versions
+live in `hooks/`.
 
 | Hook event | Script | Behavior |
 |---|---|---|
-| `SessionStart` | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: $MKG_PROMPT_NAME})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and persist a refined system prompt back to Neo4j so the next session skips the fallback. |
-| `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits scoped to the current project. Marks served learnings as used. |
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd` | `hooks/log_event.py` | Persists each event as an `:Event` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the memory extraction processor later reads. |
-| `Stop`, `SessionEnd` | `hooks/process_project.py` | Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: $MKG_MEMORY_EXTRACTION_PROMPT_NAME})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions per category. System-prompt suggestions are reserved for rare operating-principle changes or explicit/reinforced high-level user preferences and interests; memory-extraction-prompt suggestions are reserved for improving future extraction quality. Writes new `:Learning` / `:Decision` / `:SystemPromptSuggestion` / `:MemoryExtractionPromptSuggestion` nodes with status `candidate`. |
+| `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and persist a refined system prompt back to Neo4j so the next session skips the fallback. |
+| `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits scoped to the current project. Marks served learnings as used. |
+| `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | `hooks/log_event.py` | Persists each event as an `:Event` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the memory extraction processor later reads. |
+| `Stop` (`--mode turn`), `SessionEnd` (`--mode session`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions per category. System-prompt suggestions are reserved for rare operating-principle changes or explicit/reinforced high-level user preferences and interests; memory-extraction-prompt suggestions are reserved for improving future extraction quality. Writes new `:Learning` / `:Decision` / `:SystemPromptSuggestion` / `:MemoryExtractionPromptSuggestion` nodes with status `candidate`. |
 | `Stop` | `hooks/apply_system_prompt.py` | Rate-limited rebuild of the live `(:SystemPrompt)`. Runs in the background on every Stop but only acts when at least `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` candidate suggestions are pending **and** `MKG_PROMPT_REBUILD_MIN_HOURS` have passed since the last rebuild (gate + claim in one conditional write, so concurrent Stops can't double-rebuild). Seeds the prompt node from the default if it doesn't exist, snapshots the previous content as `(:SystemPromptVersion)`, folds suggestions in via LLM (verbatim append under a learned-notes section when `OPENAI_API_KEY` is absent), and marks each suggestion `applied` or `rejected`. |
-| `Stop` | `hooks/apply_memory_extraction_prompt.py` | Rate-limited rebuild of the live `(:MemoryExtractionPrompt)`. It mirrors `apply_system_prompt.py`: gates on pending `:MemoryExtractionPromptSuggestion` nodes, snapshots prior content as `(:MemoryExtractionPromptVersion)`, preserves required runtime tokens, and marks suggestions `applied` or `rejected`. |
+| `Stop` | `hooks/apply_memory_extraction_prompt.py` | Rate-limited rebuild of the live `(:MemoryExtractionPrompt)`. It mirrors `apply_system_prompt.py` and shares the same `MKG_PROMPT_REBUILD_*` / `MKG_PROMPT_MAX_CHARS` knobs: gates on pending `:MemoryExtractionPromptSuggestion` nodes, snapshots prior content as `(:MemoryExtractionPromptVersion)`, preserves required runtime tokens, and marks suggestions `applied` or `rejected`. |
 
 ### Graph model
 
@@ -105,10 +82,17 @@ hooks swallow their own exceptions so a Neo4j outage never blocks the session.
 
 (:SystemPrompt {name, version})─[:HAS_VERSION]→ (:SystemPromptVersion)
 (:MemoryExtractionPrompt {name, version})─[:HAS_VERSION]→ (:MemoryExtractionPromptVersion)
+
+# Produced by hooks/enrich_events.py (on demand):
+(:Session)─[:HAS_TURN]→ (:Turn)─[:ISSUED]→ (:ToolCall)─[:USES_TOOL]→ (:Tool)
+                                          ─[:RETURNED]→ (:ToolResult)
+                                          ─[:HAS_RATIONALE]→ (:ToolRationale)
+                                          ─[:TARGETS]→ (:Resource)
 ```
 
 Candidate learnings flow through retrieval but are review-gated — they stay
-`candidate` until promoted to `approved`. Fulltext indexes
+`candidate` until promoted to `approved` (currently a manual Cypher update; see
+TODOs). Fulltext indexes
 `project_learning_fulltext` and `project_decision_fulltext` back the retrieval
 path. System-prompt suggestions follow `candidate → applied | rejected`: the
 Stop-event rebuild consumes them in batches once the time and count gates pass,
@@ -119,7 +103,7 @@ preserving the runtime tokens used to render project/event context.
 
 ## Quick Start
 
-### Run locally during development
+### Claude Code / Claude Desktop
 
 Add to your Claude Desktop `claude_desktop_config.json` or `.claude/settings.json`:
 
@@ -142,15 +126,116 @@ Add to your Claude Desktop `claude_desktop_config.json` or `.claude/settings.jso
 ```
 
 Then register the hook scripts in `.claude/settings.json` under their
-corresponding `hooks.SessionStart` / `UserPromptSubmit` / `PreToolUse` /
-`PostToolUse` / `Stop` / `SessionEnd` entries.
+corresponding `hooks.*` events — this repo's own
+[`.claude/settings.json`](.claude/settings.json) shows the full wiring.
 
-To seed the extraction prompt template explicitly instead of waiting for the
-next `process_project.py` run:
+### Codex
+
+[`.codex/config.toml`](.codex/config.toml) wires the same MCP server into
+Codex, with approval gates on the query and write tools:
+
+```toml
+[mcp_servers.meta-knowledge-graph]
+command = "uv"
+args = ["run", "--no-sync", "meta-knowledge-graph"]
+
+[mcp_servers.meta-knowledge-graph.tools.bigquery_execute_query]
+approval_mode = "approve"
+
+[mcp_servers.meta-knowledge-graph.tools.project_add_learning]
+approval_mode = "approve"
+```
+
+The hook scripts work under any harness with lifecycle events; pass
+`--client codex` (or your harness's name) to `log_event.py` so captured
+sessions are tagged with their origin.
+
+### Other harnesses
+
+Point the harness at the same two surfaces: spawn `uv run meta-knowledge-graph`
+as an MCP server, and call the `hooks/` scripts from the harness's lifecycle
+events (JSON payload on stdin, `--client <name>` for attribution). The graph,
+memory extraction, and prompt rebuild loops are identical regardless of which
+harness produced the events.
+
+## Sales agent use case
+
+The repo ships a complete demo persona in [`import/sales_agent/`](import/sales_agent/):
+a sales / customer-success intelligence assistant working a book of ~48
+enterprise car-rental customer accounts for **RoadFlex** (a corporate mobility
+provider). It exercises every layer of the system: BigQuery as the system of
+record, Neo4j as the relationship graph, Diffbot for external signal, a
+persisted `(:SystemPrompt)` persona, and bootstrap learnings so the very first
+session starts with scoped project memory.
+
+### 1. Configure `.env`
+
+Create `.env` at the repo root (both the seeders and the hooks load it):
 
 ```bash
-uv run python hooks/seed_memory_extraction_prompt.py
+# Neo4j — required
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=<your-password>
+NEO4J_DATABASE=neo4j
+
+# LLM — required for memory extraction and prompt rebuilds
+OPENAI_API_KEY=<your-openai-api-key>
+
+# BigQuery warehouse + Neocarta catalog — required for the warehouse half
+GCP_PROJECT_ID=<your-gcp-project>
+BIGQUERY_DATASET_ID=acme_corp
+BIGQUERY_MCP_URL=https://bigquery.googleapis.com/mcp
+GOOGLE_APPLICATION_CREDENTIALS=<path-to-service-account.json>  # or GCP_SERVICE_ACCOUNT_JSON inline
+
+# Diffbot — required for live news / firmographic enrichment
+DIFFBOT_TOKEN=<your-diffbot-token>
 ```
+
+### 2. Seed everything
+
+```bash
+uv run python import/sales_agent/seed_all.py
+```
+
+This runs four seeders in order (each independently re-runnable; re-running is
+safe — BigQuery tables are dropped/recreated and Neo4j MERGEs on natural keys):
+
+| Seeder | What it loads |
+|---|---|
+| `seed_bigquery.py` | `accounts`, `products`, `account_product_usage` (monthly time series), `account_contacts`, `account_renewals` under `$GCP_PROJECT_ID.$BIGQUERY_DATASET_ID`. |
+| `seed_neo4j.py` | `:Account` / `:Product` / `:Contact` / `:CSM` nodes plus `USES_PRODUCT` (utilization, revenue), `HAS_CONTACT`, and `OWNS` relationships. |
+| `seed_learnings.py` | Bootstrap `:Learning` / `:Decision` nodes so the first session already has scoped project memory. |
+| `seed_system_prompt.py` | Persists `system_prompt.md` (the RoadFlex sales persona) as `(:SystemPrompt {name: 'default'})`. |
+
+To preview the generated dataset without touching any database:
+`uv run python import/sales_agent/seed_data.py`. Dataset design notes live in
+[`import/sales_agent/README.md`](import/sales_agent/README.md).
+
+### 3. Register the MCP server and hooks
+
+Follow the Quick Start above for your harness — Claude Code via
+[`.claude/settings.json`](.claude/settings.json), Codex via
+[`.codex/config.toml`](.codex/config.toml), or any custom harness that can
+spawn an MCP server and fire lifecycle hooks.
+With `GCP_PROJECT_ID` / `BIGQUERY_DATASET_ID` / `OPENAI_API_KEY` set the server
+mounts the `neocarta_*` catalog tools, with `BIGQUERY_MCP_URL` set it mounts
+`bigquery_execute_query`, and with `DIFFBOT_TOKEN` set it mounts `search_news`
+and `enhance_entity`.
+
+### 4. Start a session
+
+On SessionStart the hook injects the persisted RoadFlex persona, and prompt
+submits inject the most relevant seeded learnings. Try:
+
+- *"Which accounts renew in the next 90 days and which of them are at risk?"*
+- *"Where do we have expansion room — accounts running over contracted capacity?"*
+- *"Build me a brief on Accenture: footprint, contacts, and recent news."*
+- *"Roll up the book of business by CSM."*
+
+From there the loop takes over: every session's events are logged, memory
+extraction distills new learnings/decisions on Stop / SessionEnd, and the
+persona prompt keeps improving itself via `:SystemPromptSuggestion` rebuilds.
 
 ## Configuration
 
@@ -161,18 +246,25 @@ uv run python hooks/seed_memory_extraction_prompt.py
 | `NEO4J_PASSWORD` | `--password` | `password` | |
 | `NEO4J_DATABASE` | `--database` | `neo4j` | |
 | `NEO4J_TRANSPORT` | `--transport` | `stdio` | |
-| `OPENAI_API_KEY` | — | — | Required by `import_text_to_kg`, `process_project.py`, and Neocarta. |
-| `DIFFBOT_TOKEN` / `DIFFBOT_API_TOKEN` | — | — | Enables `search_news` and `enhance_entity` when set. |
-| `LLM_MODEL` | — | `gpt-5.4-mini` | Default model for LLM calls. |
-| `MKG_LEARNING_MODEL` | — | falls back to `LLM_MODEL` | Override just the memory extraction model. |
-| `MKG_PROMPT_NAME` | — | `default` | Which `(:SystemPrompt {name})` node to load on session start. |
-| `MKG_PROMPT_REBUILD_MIN_HOURS` | — | `8` | Minimum hours between system-prompt rebuilds on Stop. |
-| `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` | — | `2` | Pending candidate suggestions required before a rebuild runs. |
-| `MKG_PROMPT_MAX_CHARS` | — | `12000` | Length budget for the rebuilt system prompt. |
-| `MKG_PROMPT_REBUILD_MODEL` | — | falls back to `MKG_LEARNING_MODEL` | Override just the prompt-rebuild model. |
-| `MKG_MEMORY_EXTRACTION_PROMPT_NAME` | — | `default` | Which `(:MemoryExtractionPrompt {name})` template to render in `process_project.py`. |
-| `MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MIN_HOURS` | — | falls back to `MKG_PROMPT_REBUILD_MIN_HOURS` or `8` | Minimum hours between memory-extraction-prompt rebuilds on Stop. |
-| `MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MIN_SUGGESTIONS` | — | falls back to `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` or `2` | Pending candidate suggestions required before a memory-extraction-prompt rebuild runs. |
-| `MKG_MEMORY_EXTRACTION_PROMPT_MAX_CHARS` | — | falls back to `MKG_PROMPT_MAX_CHARS` or `12000` | Length budget for the rebuilt memory extraction prompt template. |
-| `MKG_MEMORY_EXTRACTION_PROMPT_REBUILD_MODEL` | — | falls back to `MKG_PROMPT_REBUILD_MODEL`, then `MKG_LEARNING_MODEL` | Override just the memory-extraction-prompt rebuild model. |
-| `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID` | — | — | Required to mount the Neocarta and BigQuery tools. |
+| `OPENAI_API_KEY` | — | — | Required by `process_project.py`, the prompt rebuild hooks, and Neocarta. |
+| `DIFFBOT_TOKEN` | — | — | Enables `search_news` and `enhance_entity` when set. |
+| `LLM_MODEL` | — | `gpt-5.4-mini` | The single model knob for every LLM call: memory extraction and both prompt rebuilds. |
+| `MKG_PROMPT_REBUILD_MIN_HOURS` | — | `8` | Minimum hours between prompt rebuilds on Stop (system prompt and memory extraction prompt alike). |
+| `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` | — | `2` | Pending candidate suggestions required before a rebuild runs (both rebuilds). |
+| `MKG_PROMPT_MAX_CHARS` | — | `12000` | Length budget for a rebuilt prompt (both rebuilds). |
+| `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID` | — | — | Required (with `OPENAI_API_KEY`) to mount the Neocarta catalog tools; `GCP_PROJECT_ID` is also the project queried by `bigquery_execute_query`. |
+| `BIGQUERY_MCP_URL` | — | — | Mounts `bigquery_execute_query` when set, e.g. `https://bigquery.googleapis.com/mcp`. For `googleapis.com` URLs a Google ADC bearer token is fetched automatically. |
+| `BIGQUERY_MCP_AUTH`, `BIGQUERY_MCP_HEADERS` | — | — | Optional explicit bearer token / JSON dict of extra headers for the BigQuery MCP endpoint. |
+| `BIGQUERY_REGION`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | — | — | Optional; forwarded to the Neocarta subprocess when set. `BIGQUERY_REGION` (default `US`) also sets the dataset location when seeding the sales-agent demo. |
+| `GCP_BILLING_PROJECT_ID` | — | falls back to `GCP_PROJECT_ID` | Optional billing project for the sales-agent BigQuery seeder. |
+| `GCP_SERVICE_ACCOUNT_JSON` / `GOOGLE_APPLICATION_CREDENTIALS` | — | — | Optional GCP auth for Neocarta: inline service-account JSON (written to a temp file) or a credentials file path. |
+
+## TODO / Roadmap
+
+- [ ] **Improving memory** — richer retrieval (semantic + structural search),
+      approval tooling for promoting candidate learnings, and time-decaying
+      confidence with re-validation.
+- [ ] **GDS intelligence engine** — generate intelligence from the accumulated
+      graph: implicit relationship discovery (node similarity), critical
+      decision points (betweenness centrality), and behavior clustering
+      (community detection).

@@ -54,12 +54,8 @@ class FakeAsyncClient:
 
 
 class DiffbotToolHelperTests(unittest.TestCase):
-    def test_diffbot_token_prefers_primary_env_var(self) -> None:
-        with patch.dict(
-            server.os.environ,
-            {"DIFFBOT_TOKEN": "primary", "DIFFBOT_API_TOKEN": "secondary"},
-            clear=True,
-        ):
+    def test_diffbot_token_is_read_and_stripped(self) -> None:
+        with patch.dict(server.os.environ, {"DIFFBOT_TOKEN": " primary "}, clear=True):
             self.assertEqual(server._diffbot_token(), "primary")
 
     def test_diffbot_tools_are_enabled_only_when_token_is_present(self) -> None:
@@ -69,10 +65,7 @@ class DiffbotToolHelperTests(unittest.TestCase):
         with patch.dict(server.os.environ, {"DIFFBOT_TOKEN": "   "}, clear=True):
             self.assertFalse(server._has_diffbot_token())
 
-        with patch.dict(server.os.environ, {"DIFFBOT_API_TOKEN": "secondary"}, clear=True):
-            self.assertTrue(server._has_diffbot_token())
-
-        with patch.dict(server.os.environ, {"DIFFBOT_API_KEY": "fallback"}, clear=True):
+        with patch.dict(server.os.environ, {"DIFFBOT_TOKEN": "token"}, clear=True):
             self.assertTrue(server._has_diffbot_token())
 
     def test_diffbot_response_filters_use_basic_field_mode(self) -> None:

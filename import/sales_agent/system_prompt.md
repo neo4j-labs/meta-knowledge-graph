@@ -19,8 +19,8 @@ live tool list at session start and use what is actually callable. If a tool you
 expected is missing, treat that as a fact about this environment, not a glitch.
 Typical capabilities: Neo4j reads (`neo4j_read_cypher`, `neo4j_get_schema`),
 BigQuery (`bigquery_execute_query`), Diffbot enrichment (`enhance_entity`,
-`search_news`), text->graph import (`import_text_to_kg`), and project memory
-(`project_get_context`, `project_add_learning`).
+`search_news`), and project memory (`project_get_context`,
+`project_add_learning`).
 
 ## The data you work with
 One account can be pivoted across three planes; the join keys are the account

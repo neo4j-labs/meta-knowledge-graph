@@ -9,6 +9,12 @@ from typing import Any
 
 
 MAX_LEARNING_TEXT = 500
+DEFAULT_LLM_MODEL = "gpt-5.4-mini"
+
+
+def llm_model() -> str:
+    """Single model knob for every LLM call made by the hooks."""
+    return os.environ.get("LLM_MODEL") or DEFAULT_LLM_MODEL
 
 
 @dataclass(frozen=True)
@@ -34,7 +40,7 @@ def load_dotenv(env_path: Path) -> None:
 
 def neo4j_config() -> tuple[str, str, str, str]:
     uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    user = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER", "neo4j")
+    user = os.getenv("NEO4J_USERNAME", "neo4j")
     password = os.getenv("NEO4J_PASSWORD", "password")
     database = os.getenv("NEO4J_DATABASE", "neo4j")
     return uri, user, password, database

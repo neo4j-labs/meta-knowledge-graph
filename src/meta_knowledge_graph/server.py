@@ -3,11 +3,9 @@ import logging
 import os
 import re
 import tempfile
-import time
-import uuid
 from hashlib import sha1
 from pathlib import Path
-from typing import Any, List, Literal, Optional, Union
+from typing import Any, List, Literal, Optional
 
 import httpx
 from fastmcp import Client, FastMCP
@@ -15,8 +13,6 @@ from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
 from neo4j import AsyncGraphDatabase, AsyncDriver
 from neo4j.exceptions import Neo4jError
 from pydantic import Field
-
-from meta_knowledge_graph.graph_import import add_graph_documents
 
 
 MAX_LEARNING_TEXT = 500
@@ -102,10 +98,9 @@ def _diffbot_filter_parse_failed(response: httpx.Response) -> bool:
 
 
 def _diffbot_token() -> Optional[str]:
-    for env_var in ("DIFFBOT_TOKEN", "DIFFBOT_API_TOKEN", "DIFFBOT_API_KEY"):
-        token = os.environ.get(env_var)
-        if token and token.strip():
-            return token.strip()
+    token = os.environ.get("DIFFBOT_TOKEN")
+    if token and token.strip():
+        return token.strip()
     return None
 
 
@@ -178,8 +173,7 @@ async def _diffbot_get_json(path: str, params: dict[str, Any]) -> str:
     token = _diffbot_token()
     if not token:
         return _json_error(
-            "Diffbot token is required. Set DIFFBOT_TOKEN, DIFFBOT_API_TOKEN, "
-            "or DIFFBOT_API_KEY."
+            "Diffbot token is required. Set DIFFBOT_TOKEN."
         )
 
     request_params = {"token": token, **_compact_params(params)}
@@ -503,120 +497,8 @@ def create_mcp_server(
         logger.info("Registered Diffbot search_news and enhance_entity tools")
     else:
         logger.info(
-            "Diffbot tools not registered (DIFFBOT_TOKEN / DIFFBOT_API_TOKEN unset)"
+            "Diffbot tools not registered (DIFFBOT_TOKEN unset)"
         )
-
-    @mcp.tool(name="import_text_to_kg")
-    async def import_text_to_kg(
-        text: str = Field(..., description="Text to extract entities and relationships from"),
-        model_name: Optional[str] = Field(None, description="LLM model to use for extraction (overrides LLM_MODEL env var, defaults to gpt-5.4-mini)"),
-        allowed_nodes: Optional[List[str]] = Field(None, description="Node labels to extract, e.g. ['Person', 'Organization']"),
-        allowed_relationships: Optional[List[Union[str, List[str]]]] = Field(
-            None,
-            description="Relationship constraints. Either simple strings like ['WORKS_AT'] "
-            "or 3-element lists like [['Person', 'WORKS_AT', 'Organization']]",
-        ),
-        document_id: Optional[str] = Field(None, description="Identifier for the source document"),
-        source_uri: Optional[str] = Field(None, description="Source URI of the text (file path, URL, etc.)"),
-        chunk_index: Optional[int] = Field(None, description="Index of this chunk if text was split"),
-        total_chunks: Optional[int] = Field(None, description="Total number of chunks if text was split"),
-        chunk_of: Optional[str] = Field(None, description="Document ID of the parent document if this is a chunk"),
-    ) -> str:
-        """Extract entities and relationships from text using an LLM and import them as a knowledge graph into Neo4j."""
-        from hashlib import md5
-
-        from langchain_core.documents import Document
-        from langchain_experimental.graph_transformers import LLMGraphTransformer
-        from langchain_openai import ChatOpenAI
-
-        import_id = str(uuid.uuid4())
-        
-        # Use the provided model, fallback to env var, fallback to default
-        model = model_name or os.environ.get("LLM_MODEL", "gpt-5.4-mini")
-        llm = ChatOpenAI(model=model)
-
-        # Convert 3-element lists to tuples for LLMGraphTransformer
-        parsed_rels = None
-        if allowed_relationships:
-            parsed_rels = []
-            for r in allowed_relationships:
-                if isinstance(r, list) and len(r) == 3:
-                    parsed_rels.append(tuple(r))
-                else:
-                    parsed_rels.append(r)
-
-        transformer = LLMGraphTransformer(
-            llm=llm,
-            allowed_nodes=allowed_nodes or [],
-            allowed_relationships=parsed_rels or [],
-            node_properties=True,
-        )
-
-        # Build document metadata
-        content_hash = md5(text.encode("utf-8")).hexdigest()
-        doc_metadata = {"content_hash": content_hash}
-        if document_id:
-            doc_metadata["id"] = document_id
-        if source_uri:
-            doc_metadata["source_uri"] = source_uri
-        if chunk_of:
-            doc_metadata["chunk_of"] = chunk_of
-        if chunk_index is not None:
-            doc_metadata["chunk_index"] = chunk_index
-        if total_chunks is not None:
-            doc_metadata["total_chunks"] = total_chunks
-        docs = [Document(page_content=text, metadata=doc_metadata)]
-
-        status = "success"
-        error_message = None
-        total_nodes = 0
-        total_rels = 0
-        node_types = set()
-        rel_types = set()
-
-        start_time = time.time()
-        try:
-            graph_docs = await transformer.aconvert_to_graph_documents(docs)
-            duration_ms = int((time.time() - start_time) * 1000)
-
-            # Import into Neo4j (import_ids accumulated as list by the import queries)
-            await add_graph_documents(
-                driver=neo4j_driver,
-                graph_documents=graph_docs,
-                database=database,
-                include_source=True,
-                baseEntityLabel=True,
-                import_id=import_id,
-            )
-
-            # Build summary
-            total_nodes = sum(len(d.nodes) for d in graph_docs)
-            total_rels = sum(len(d.relationships) for d in graph_docs)
-            for d in graph_docs:
-                for n in d.nodes:
-                    node_types.add(n.type)
-                for r in d.relationships:
-                    rel_types.add(r.type)
-
-        except Exception as e:
-            duration_ms = int((time.time() - start_time) * 1000)
-            status = "failed"
-            error_message = str(e)
-            logger.error(f"Import failed: {e}")
-
-        result = {
-            "import_id": import_id,
-            "status": status,
-            "nodes_created": total_nodes,
-            "relationships_created": total_rels,
-            "node_types": sorted(node_types),
-            "relationship_types": sorted(rel_types),
-            "duration_ms": duration_ms,
-        }
-        if error_message:
-            result["error_message"] = error_message
-
-        return json.dumps(result, default=str)
 
     @mcp.tool(name="project_get_context")
     async def project_get_context(

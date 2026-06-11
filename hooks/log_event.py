@@ -39,7 +39,7 @@ MAX_RESPONSE_CHARS = 4000
 
 def _neo4j_config() -> tuple[str, str, str, str]:
     uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    user = os.getenv("NEO4J_USERNAME") or os.getenv("NEO4J_USER", "neo4j")
+    user = os.getenv("NEO4J_USERNAME", "neo4j")
     password = os.getenv("NEO4J_PASSWORD", "password")
     database = os.getenv("NEO4J_DATABASE", "neo4j")
     return uri, user, password, database

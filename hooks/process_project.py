@@ -29,6 +29,7 @@ from project_common import (  # noqa: E402
     fetch_project_decisions,
     fetch_project_learnings,
     learning_id,
+    llm_model,
     load_dotenv,
     merge_project_and_session,
     memory_extraction_prompt_suggestion_id,
@@ -40,7 +41,6 @@ from project_common import (  # noqa: E402
 
 
 DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME = "default"
-MEMORY_EXTRACTION_PROMPT_NAME_ENV = "MKG_MEMORY_EXTRACTION_PROMPT_NAME"
 MEMORY_EXTRACTION_PROMPT_TOKENS = (
     "[[PROJECT_NAME]]",
     "[[PROJECT_ID]]",
@@ -307,13 +307,9 @@ def ask_llm_for_memory_actions(prompt: str) -> dict[str, Any]:
 
     from openai import OpenAI
 
-    model = os.environ.get("MKG_LEARNING_MODEL") or os.environ.get(
-        "LLM_MODEL",
-        "gpt-5.4-mini",
-    )
     client = OpenAI()
     response = client.chat.completions.create(
-        model=model,
+        model=llm_model(),
         messages=[
             {
                 "role": "system",
@@ -885,10 +881,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
             if not events:
                 return
             try:
-                prompt_name = (
-                    os.getenv(MEMORY_EXTRACTION_PROMPT_NAME_ENV)
-                    or DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
-                )
+                prompt_name = DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
                 prompt_record = session.execute_write(
                     load_or_seed_memory_extraction_prompt,
                     name=prompt_name,

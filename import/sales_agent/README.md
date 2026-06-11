@@ -60,18 +60,8 @@ uv run python import/sales_agent/seed_data.py
 
 ## System prompt
 
-`inject_system_prompt` loads `(:SystemPrompt {name: $MKG_PROMPT_NAME})` (default
-name `default`) and, only if that node is missing, falls back to a generic
-tool-agnostic bootstrap prompt baked into the hook. So:
-
-- The generic fallback stays in the hook for unseeded environments.
-- `seed_system_prompt.py` writes the sales persona under `default`, making it
-  active with no env change.
-- To run several personas, seed each under its own name and switch with
-  `MKG_PROMPT_NAME`; for this seeder, pass `--name <prompt_name>`.
-
-## Adding another dataset / persona
-
-Create a sibling folder under `import/` (e.g. `import/support_agent/`) with the
-same files. Keep each dataset self-contained; if shared helpers accumulate,
-factor them into a small common module then.
+`inject_system_prompt` loads `(:SystemPrompt {name: 'default'})` and, only if
+that node is missing, falls back to a generic tool-agnostic bootstrap prompt
+baked into the hook. `seed_system_prompt.py` writes the sales persona under
+`default`, making it active immediately; the generic fallback stays in the
+hook for unseeded environments.
