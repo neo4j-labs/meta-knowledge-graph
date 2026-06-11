@@ -62,22 +62,43 @@ Prefer updating existing memory when it is materially the same idea. Create a ne
 item only for a distinct reusable learning or major decision. Return ignore when
 the work is routine, transient, or already covered without needing reinforcement.
 
+Classify each candidate into the most specific applicable bucket. Do not record
+the same signal in multiple buckets. Use this routing precedence:
+1. memory_extraction_prompt_updates: feedback about this extraction prompt,
+   extraction quality, duplicate handling, sensitivity filtering, output
+   validation, or misclassification. Do not also create a learning for the same
+   signal.
+2. system_prompt_updates: explicit or repeatedly reinforced durable preferences
+   about assistant behavior, communication style, workflow defaults, or broad
+   operating principles for future sessions. Do not also create a learning for
+   the same signal.
+3. decisions: explicit decisions ("Decision:", "we decided", "going forward
+   must/should") or stable project policy choices with implementation impact.
+   Do not also create a learning for the same signal.
+4. learnings: reusable project facts, environment quirks, domain observations,
+   or task patterns that are not better represented as prompt updates or
+   decisions.
+
 If the work reveals that the persistent system prompt itself should change, propose
-a system_prompt_update. These should be rare. They may be general operating-principle
-changes, or high-level stable information about the user this prompt serves, such as
-broad interests, communication/workflow preferences, or durable domain priorities.
-Only suggest user-specific prompt changes when the signal is explicit or repeatedly
-reinforced. Do not suggest project-specific facts, transient details, secrets,
-sensitive personal data, or one-off task context. Suggestions queue as candidates;
-a rate-limited rebuild folds them into the live SystemPrompt once enough accumulate.
+a system_prompt_update. These should be uncommon, but use them instead of
+learnings when the signal belongs in the persistent system prompt. They may be
+general operating-principle changes, or high-level stable information about the
+user this prompt serves, such as broad interests, communication/workflow
+preferences, or durable domain priorities. Only suggest user-specific prompt
+changes when the signal is explicit or repeatedly reinforced. Do not suggest
+project-specific facts, transient details, secrets, sensitive personal data, or
+one-off task context. Suggestions queue as candidates; a rate-limited rebuild
+folds them into the live SystemPrompt once enough accumulate.
 
 If this memory extraction prompt itself should change, propose a
-memory_extraction_prompt_update. These should be rare, targeted instructions that
-would improve future extraction quality, duplicate handling, sensitivity filtering,
-or output validation. Do not use this field to store project facts, user facts,
-or task context; those belong in learnings, decisions, or system prompt updates.
-Suggestions queue as candidates; a rate-limited rebuild folds them into the live
-MemoryExtractionPrompt once enough accumulate.
+memory_extraction_prompt_update. These should be uncommon, but use them instead
+of learnings when the signal is about how extraction should behave. They should
+be targeted instructions that would improve future extraction quality, duplicate
+handling, sensitivity filtering, routing precedence, or output validation. Do not
+use this field to store project facts, user facts, or task context; those belong
+in learnings, decisions, or system prompt updates. Suggestions queue as candidates;
+a rate-limited rebuild folds them into the live MemoryExtractionPrompt once enough
+accumulate.
 
 Return JSON only with this shape:
 {

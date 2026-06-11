@@ -101,11 +101,16 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn('"action": "create|update|ignore"', prompt)
         self.assertIn("system_prompt_updates", prompt)
         self.assertIn("memory_extraction_prompt_updates", prompt)
+        self.assertIn("routing precedence", prompt)
+        self.assertIn("Do not record", prompt)
+        self.assertIn("Do not also create a learning", prompt)
+        self.assertIn("we decided", prompt)
+        self.assertIn("misclassification", prompt)
         self.assertIn("rate-limited rebuild", prompt)
         self.assertIn("MemoryExtractionPrompt", prompt)
-        self.assertIn("high-level stable information about the user", prompt)
+        self.assertIn("high-level stable information", prompt)
         self.assertIn("broad interests", prompt)
-        self.assertIn("communication/workflow preferences", prompt)
+        self.assertIn("communication/workflow", prompt)
         self.assertIn("sensitive personal data", prompt)
 
     def test_memory_prompt_falls_back_when_template_lacks_required_tokens(self) -> None:
