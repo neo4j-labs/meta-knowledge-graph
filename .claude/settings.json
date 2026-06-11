@@ -55,6 +55,15 @@
             "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/.claude/hooks/log_event.py --client claude_code"
           }
         ]
+      },
+      {
+        "matcher": "mcp__.*__(enhance_entity|search_news)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/ingest_diffbot.py"
+          }
+        ]
       }
     ],
     "Notification": [

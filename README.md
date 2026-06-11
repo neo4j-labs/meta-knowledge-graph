@@ -66,6 +66,7 @@ live in `hooks/`.
 | `Stop` (`--mode turn`), `SessionEnd` (`--mode session`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions per category. System-prompt suggestions are reserved for rare operating-principle changes or explicit/reinforced high-level user preferences and interests; memory-extraction-prompt suggestions are reserved for improving future extraction quality. Writes new `:Learning` / `:Decision` / `:SystemPromptSuggestion` / `:MemoryExtractionPromptSuggestion` nodes with status `candidate`. |
 | `Stop` | `hooks/apply_system_prompt.py` | Rate-limited rebuild of the live `(:SystemPrompt)`. Runs in the background on every Stop but only acts when at least `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` candidate suggestions are pending **and** `MKG_PROMPT_REBUILD_MIN_HOURS` have passed since the last rebuild (gate + claim in one conditional write, so concurrent Stops can't double-rebuild). Seeds the prompt node from the default if it doesn't exist, snapshots the previous content as `(:SystemPromptVersion)`, folds suggestions in via LLM (verbatim append under a learned-notes section when `OPENAI_API_KEY` is absent), and marks each suggestion `applied` or `rejected`. |
 | `Stop` | `hooks/apply_memory_extraction_prompt.py` | Rate-limited rebuild of the live `(:MemoryExtractionPrompt)`. It mirrors `apply_system_prompt.py` and shares the same `MKG_PROMPT_REBUILD_*` / `MKG_PROMPT_MAX_CHARS` knobs: gates on pending `:MemoryExtractionPromptSuggestion` nodes, snapshots prior content as `(:MemoryExtractionPromptVersion)`, preserves required runtime tokens, and marks suggestions `applied` or `rejected`. |
+| `PostToolUse` (matcher on the Diffbot tools `enhance_entity` / `search_news`) | `hooks/ingest_diffbot.py` | Builds Diffbot tool results back into the graph instead of letting them evaporate with the conversation. `enhance_entity` firmographics become `(:Account)-[:HAS_ENRICHMENT]→(:DiffbotEntity)` (matched on domain, then name/`allNames`); `search_news` articles become `(:NewsArticle)-[:MENTIONS]→(:Account)` plus `[:TAGGED]→(:NewsTag)` (matched on tag labels and quoted DQL terms). Both link `[:CAPTURED_IN]→(:Session)` for provenance. Handles the harness's response wrappers, including oversized results that arrive as a saved-to-file notice. |
 
 ### Graph model
 
@@ -90,6 +91,12 @@ live in `hooks/`.
                                           ─[:RETURNED]→ (:ToolResult)
                                           ─[:HAS_RATIONALE]→ (:ToolRationale)
                                           ─[:TARGETS]→ (:Resource)
+
+# Produced by hooks/ingest_diffbot.py (PostToolUse on the Diffbot tools):
+(:Account)─[:HAS_ENRICHMENT]→ (:DiffbotEntity)─[:CAPTURED_IN]→ (:Session)
+(:NewsArticle)─[:MENTIONS]→ (:Account)
+(:NewsArticle)─[:TAGGED]→ (:NewsTag)
+(:NewsArticle)─[:CAPTURED_IN]→ (:Session)
 ```
 
 Candidate learnings flow through retrieval but are review-gated — they stay

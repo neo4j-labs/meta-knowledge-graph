@@ -61,6 +61,15 @@
             "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
           }
         ]
+      },
+      {
+        "matcher": ".*(enhance_entity|search_news)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/ingest_diffbot.py\""
+          }
+        ]
       }
     ],
     "PreCompact": [
