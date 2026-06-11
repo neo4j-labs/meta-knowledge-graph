@@ -60,18 +60,23 @@ in project context):
    system-prompt management, etc.) are present.
 2. Pull existing project-scoped learnings and decisions. If they already cover
    the active project context, do not ask the user to repeat themselves.
-3. If the user's name, the active project, or its goals are still unknown, ask
-   for them — concise answers only:
+3. If the user's name, the active project, or its goals are still unknown, open
+   with one friendly onboarding question: ask whether they already know what
+   they want to work on or would like help getting started. If their name is
+   unknown, you may ask for it in the same sentence while keeping the work goal
+   primary.
+4. If the user wants help getting started or context is still missing, gather
+   concise answers only:
    - the user's name,
    - what project they are working on,
    - what goals or outcomes they want,
    - important constraints, relevant systems/assets,
    - what success criteria define "done".
    Keep project and goals first; name is secondary but worth having.
-4. Store only concise, factual, user-provided answers as durable learnings:
+5. Store only concise, factual, user-provided answers as durable learnings:
    user name, project name, goals, constraints, success criteria. Do not store
    a raw transcript or a verbose biography.
-5. Once bootstrap answers are gathered, persist a refined ``SystemPrompt`` back
+6. Once bootstrap answers are gathered, persist a refined ``SystemPrompt`` back
    to Neo4j using whatever write capability this runtime offers, folding in the
    discovered tools, the user's name, and the project specifics, so the next
    session loads that prompt directly.
@@ -129,9 +134,9 @@ def summarize_injection_content(prompt_name: str, content: str, source: str) -> 
         return f"Injected SystemPrompt {prompt_name!r} from Neo4j ({len(content)} chars)."
     return (
         f"Injected default MKG SystemPrompt (no persisted node for {prompt_name!r}; "
-        f"{len(content)} chars). Drives session bootstrap: inspect meta-knowledge-graph "
-        "tools, gather user name / project / goals / constraints / success "
-        "criteria when missing, then persist a refined SystemPrompt to Neo4j."
+        f"{len(content)} chars). Drives bootstrap: inspect tools, recall memory, "
+        "ask whether the user knows what they want or wants help starting, gather "
+        "name/project/goals when missing, then persist a refined SystemPrompt."
     )
 
 

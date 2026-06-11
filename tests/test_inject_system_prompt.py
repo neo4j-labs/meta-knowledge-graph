@@ -22,6 +22,8 @@ class InjectSystemPromptTests(unittest.TestCase):
         self.assertIn("Session bootstrap", prompt)
         self.assertIn("Inspect the available ``meta-knowledge-graph`` MCP tools", prompt)
         self.assertIn("ask", prompt)
+        self.assertIn("already know what", prompt)
+        self.assertIn("help getting started", prompt)
         self.assertIn("the user's name", prompt)
         self.assertIn("what project they are working on", prompt)
         self.assertIn("what goals or", prompt)
@@ -37,6 +39,7 @@ class InjectSystemPromptTests(unittest.TestCase):
 
         self.assertLess(len(summary), 300)
         self.assertIn("default MKG SystemPrompt", summary)
+        self.assertIn("help starting", summary)
         self.assertIn("project", summary)
         self.assertIn("goals", summary)
         self.assertNotIn("You are the Intelligence Agent", summary)
