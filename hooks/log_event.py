@@ -3,12 +3,12 @@
 
 Wired in .claude/settings.json for SessionStart, UserPromptSubmit, PreToolUse,
 PostToolUse, Notification, Stop, SubagentStop, PreCompact, and SessionEnd.
-Reads the hook payload from stdin and appends an Event to the per-session chain.
+Reads the hook payload from stdin and appends a SessionEvent to the per-session chain.
 
 Graph shape::
 
-    (Session)-[:FIRST_EVENT]->(Event)-[:NEXT]->(Event)->...
-    (Session)-[:LATEST_EVENT]->(latest Event)
+    (Session)-[:FIRST_EVENT]->(SessionEvent)-[:NEXT]->(SessionEvent)->...
+    (Session)-[:LATEST_EVENT]->(latest SessionEvent)
 
 Adapted from https://github.com/tomasonjo/agent-memory-hooks-neo4j to reuse this
 project's existing NEO4J_* env vars (loaded from .env) instead of HOOKS_NEO4J_*.
@@ -64,7 +64,7 @@ def _read_transcript(path: str | None) -> str | None:
 
 def _ensure_constraints(tx) -> None:
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.session_id IS UNIQUE")
-    tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (e:Event) REQUIRE e.event_id IS UNIQUE")
+    tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (e:SessionEvent) REQUIRE e.event_id IS UNIQUE")
     tx.run(
         "CREATE FULLTEXT INDEX memory_fulltext IF NOT EXISTS "
         "FOR (m:Memory) ON EACH [m.content, m.path]"
@@ -79,10 +79,10 @@ def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
         ON CREATE SET s.created_at = $timestamp, s.client = $client
         SET s.client = coalesce(s.client, $client)
         WITH s
-        CREATE (e:Event $event_props)
+        CREATE (e:SessionEvent $event_props)
         CREATE (s)-[:HAS_EVENT]->(e)
         WITH s, e
-        OPTIONAL MATCH (s)-[old_latest:LATEST_EVENT]->(prev:Event)
+        OPTIONAL MATCH (s)-[old_latest:LATEST_EVENT]->(prev:SessionEvent)
         DELETE old_latest
         WITH s, e, prev
         FOREACH (_ IN CASE WHEN prev IS NOT NULL THEN [1] ELSE [] END |

@@ -460,7 +460,7 @@ def _fetch_unprocessed_events(
 ) -> list[dict[str, Any]]:
     records = session.run(
         """
-        MATCH (s:Session {session_id: $session_id})-[:HAS_EVENT]->(e:Event)
+        MATCH (s:Session {session_id: $session_id})-[:HAS_EVENT]->(e:SessionEvent)
         WHERE NOT EXISTS {
             MATCH (:ProjectProcessing {project_id: $project_id, mode: $mode})
                   -[:PROCESSED_EVENT]->(e)
@@ -530,7 +530,7 @@ def _write_processing(
         MERGE (s)-[:HAS_PROCESSING]->(pp)
         WITH pp
         UNWIND $event_ids AS event_id
-        MATCH (e:Event {event_id: event_id})
+        MATCH (e:SessionEvent {event_id: event_id})
         MERGE (pp)-[:PROCESSED_EVENT]->(e)
         """,
         project_id=project.id,

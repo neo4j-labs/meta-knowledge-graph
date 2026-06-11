@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Project hook: derive a typed tool-call graph from raw session events.
 
-The raw ``:Event`` stream remains append-only provenance. This processor reads
+The raw ``:SessionEvent`` stream remains append-only provenance. This processor reads
 hook-captured ``PreToolUse`` / ``PostToolUse`` pairs and writes a deterministic
 projection that is easier to query:
 
@@ -537,7 +537,7 @@ def _fetch_unprocessed_events(
 ) -> list[dict[str, Any]]:
     records = session.run(
         """
-        MATCH (s:Session {session_id: $session_id})-[:HAS_EVENT]->(e:Event)
+        MATCH (s:Session {session_id: $session_id})-[:HAS_EVENT]->(e:SessionEvent)
         WHERE NOT EXISTS {
             MATCH (:EventEnrichment {project_id: $project_id, mode: $mode})
                   -[:PROCESSED_EVENT]->(e)
@@ -587,7 +587,7 @@ def _write_event_enrichment(
         MERGE (s)-[:HAS_EVENT_ENRICHMENT]->(ee)
         WITH ee
         UNWIND $event_ids AS event_id
-        MATCH (e:Event {event_id: event_id})
+        MATCH (e:SessionEvent {event_id: event_id})
         MERGE (ee)-[:PROCESSED_EVENT]->(e)
         """,
         project_id=project.id,
@@ -617,7 +617,7 @@ def _write_event_enrichment(
                 t.updated_at = $timestamp
             MERGE (s)-[:HAS_TURN]->(t)
             WITH t, row
-            OPTIONAL MATCH (promptEvent:Event {event_id: row.prompt_event_id})
+            OPTIONAL MATCH (promptEvent:SessionEvent {event_id: row.prompt_event_id})
             FOREACH (_ IN CASE WHEN promptEvent IS NULL THEN [] ELSE [1] END |
                 MERGE (t)-[:PROMPT_EVENT]->(promptEvent)
             )
@@ -633,8 +633,8 @@ def _write_event_enrichment(
             MATCH (ee:EventEnrichment {id: $enrichment_id})
             UNWIND $tool_calls AS row
             MATCH (t:Turn {id: row.turn_node_id})
-            MATCH (preEvent:Event {event_id: row.pre_event_id})
-            OPTIONAL MATCH (postEvent:Event {event_id: row.post_event_id})
+            MATCH (preEvent:SessionEvent {event_id: row.pre_event_id})
+            OPTIONAL MATCH (postEvent:SessionEvent {event_id: row.post_event_id})
             MERGE (tool:Tool {id: row.tool_id})
             ON CREATE SET tool.created_at = $timestamp
             SET tool.name = row.tool_name,
@@ -677,7 +677,7 @@ def _write_event_enrichment(
             """
             UNWIND $results AS row
             MATCH (call:ToolCall {id: row.call_id})
-            MATCH (postEvent:Event {event_id: row.post_event_id})
+            MATCH (postEvent:SessionEvent {event_id: row.post_event_id})
             MERGE (result:ToolResult {id: row.id})
             ON CREATE SET result.created_at = $timestamp
             SET result.summary = row.summary,

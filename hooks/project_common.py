@@ -152,7 +152,7 @@ def link_event_to_project(
     event_id: str,
     timestamp: str,
 ) -> None:
-    del event_id  # Events are reachable via Project-[:HAS_SESSION]->Session-[:HAS_EVENT]->Event
+    del event_id  # Events are reachable via Project-[:HAS_SESSION]->Session-[:HAS_EVENT]->SessionEvent
     tx.run(
         """
         MERGE (p:Project {id: $project_id})

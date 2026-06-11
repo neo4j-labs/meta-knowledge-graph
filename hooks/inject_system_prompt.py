@@ -149,8 +149,9 @@ def record_injection(
 ) -> bool:
     """Record the injection in the graph and report whether to inject.
 
-    The prompt text is not copied onto the ``:Injection`` node; the node keeps a
-    content hash plus summary, and links to the ``(:SystemPrompt)`` it came from.
+    The prompt text is not copied onto the ``:SystemPromptInjection`` node; the
+    node keeps a content hash plus summary, and links to the ``(:SystemPrompt)``
+    it came from.
     Returns ``False`` when this exact prompt content was already injected into
     this session (the conversation already has it in context), ``True`` when the
     injection is new or dedup state is unavailable.
@@ -172,7 +173,7 @@ def record_injection(
                     """
                     MERGE (s:Session {session_id: $session_id})
                     ON CREATE SET s.created_at = $timestamp
-                    MERGE (s)-[:INJECTED]->(i:Injection {
+                    MERGE (s)-[:INJECTED]->(i:SystemPromptInjection {
                         prompt_name: $prompt_name,
                         content_sha: $content_sha,
                         target: $target

@@ -26,6 +26,7 @@ def load_hook_module(name: str):
 
 project_common = load_hook_module("project_common")
 process_project = load_hook_module("process_project")
+log_event = load_hook_module("log_event")
 
 
 class ProjectHookTests(unittest.TestCase):
@@ -36,6 +37,28 @@ class ProjectHookTests(unittest.TestCase):
         assert project is not None
         self.assertEqual(project.id, "meta-knowledge-graph")
         self.assertEqual(project.name, "Meta Knowledge Graph")
+
+    def test_event_hook_uses_session_event_label(self) -> None:
+        captured: list[str] = []
+
+        class FakeTx:
+            def run(self, query: str, **params):
+                del params
+                captured.append(query)
+
+        log_event._ensure_constraints(FakeTx())
+        log_event._append_event(
+            FakeTx(),
+            "session-1",
+            "codex",
+            {"event_id": "event-1", "timestamp": "2026-06-11T00:00:00+00:00"},
+        )
+
+        joined = "\n".join(captured)
+        self.assertIn("FOR (e:SessionEvent)", joined)
+        self.assertIn("CREATE (e:SessionEvent $event_props)", joined)
+        self.assertIn("prev:SessionEvent", joined)
+        self.assertNotIn(":Event", joined)
 
     def test_memory_prompt_includes_similar_existing_memory(self) -> None:
         events = [

@@ -38,7 +38,7 @@ from project_common import (  # noqa: E402
 def fetch_all_session_events(session, session_id: str):
     records = session.run(
         """
-        MATCH (s:Session {session_id: $session_id})-[:HAS_EVENT]->(e:Event)
+        MATCH (s:Session {session_id: $session_id})-[:HAS_EVENT]->(e:SessionEvent)
         RETURN properties(e) AS event
         ORDER BY e.timestamp
         """,
@@ -50,7 +50,7 @@ def fetch_all_session_events(session, session_id: str):
 def fetch_events_for_processing(session, processing_id: str):
     records = session.run(
         """
-        MATCH (:ProjectProcessing {id: $processing_id})-[:PROCESSED_EVENT]->(e:Event)
+        MATCH (:ProjectProcessing {id: $processing_id})-[:PROCESSED_EVENT]->(e:SessionEvent)
         RETURN properties(e) AS event
         ORDER BY e.timestamp
         """,

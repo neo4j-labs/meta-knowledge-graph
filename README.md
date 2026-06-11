@@ -60,9 +60,9 @@ live in `hooks/`.
 
 | Hook event | Script | Behavior |
 |---|---|---|
-| `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and persist a refined system prompt back to Neo4j so the next session skips the fallback. The injection log keeps only a content hash + summary on the `:Injection` node and links it to its source via `[:OF_PROMPT]→(:SystemPrompt)` instead of copying the prompt text. If the same prompt content was already injected into the same session, the hook skips the duplicate (unless the context was wiped by `clear`/`compact`). |
+| `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and persist a refined system prompt back to Neo4j so the next session skips the fallback. The injection log keeps only a content hash + summary on the `:SystemPromptInjection` node and links it to its source via `[:OF_PROMPT]→(:SystemPrompt)` instead of copying the prompt text. If the same prompt content was already injected into the same session, the hook skips the duplicate (unless the context was wiped by `clear`/`compact`). |
 | `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits scoped to the current project. Every injected item is linked to the session via `[:INJECTED_IN]`, and items already injected earlier in the same session are excluded from retrieval, so a conversation never receives the same learning or decision twice. Marks served learnings as used. |
-| `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | `hooks/log_event.py` | Persists each event as an `:Event` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the memory extraction processor later reads. |
+| `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | `hooks/log_event.py` | Persists each event as a `:SessionEvent` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the memory extraction processor later reads. |
 | `Stop` (`--mode turn`), `SessionEnd` (`--mode session`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions per category. System-prompt suggestions are reserved for rare operating-principle changes or explicit/reinforced high-level user preferences and interests; memory-extraction-prompt suggestions are reserved for improving future extraction quality. Writes new `:Learning` / `:Decision` / `:SystemPromptSuggestion` / `:MemoryExtractionPromptSuggestion` nodes with status `candidate`. |
 | `Stop` | `hooks/apply_system_prompt.py` | Rate-limited rebuild of the live `(:SystemPrompt)`. Runs in the background on every Stop but only acts when at least `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` candidate suggestions are pending **and** `MKG_PROMPT_REBUILD_MIN_HOURS` have passed since the last rebuild (gate + claim in one conditional write, so concurrent Stops can't double-rebuild). Seeds the prompt node from the default if it doesn't exist, snapshots the previous content as `(:SystemPromptVersion)`, folds suggestions in via LLM (verbatim append under a learned-notes section when `OPENAI_API_KEY` is absent), and marks each suggestion `applied` or `rejected`. |
 | `Stop` | `hooks/apply_memory_extraction_prompt.py` | Rate-limited rebuild of the live `(:MemoryExtractionPrompt)`. It mirrors `apply_system_prompt.py` and shares the same `MKG_PROMPT_REBUILD_*` / `MKG_PROMPT_MAX_CHARS` knobs: gates on pending `:MemoryExtractionPromptSuggestion` nodes, snapshots prior content as `(:MemoryExtractionPromptVersion)`, preserves required runtime tokens, and marks suggestions `applied` or `rejected`. |
@@ -71,13 +71,13 @@ live in `hooks/`.
 
 ```
 (:Project {id})
-   ├─[:HAS_SESSION]→ (:Session)─[:HAS_EVENT]→ (:Event)─[:NEXT]→ ...
-   │                            ─[:INJECTED]→ (:Injection {content_sha})─[:OF_PROMPT]→ (:SystemPrompt)
+   ├─[:HAS_SESSION]→ (:Session)─[:HAS_EVENT]→ (:SessionEvent)─[:NEXT]→ ...
+   │                            ─[:INJECTED]→ (:SystemPromptInjection {content_sha})─[:OF_PROMPT]→ (:SystemPrompt)
    ├─[:HAS_LEARNING]→ (:Learning {status: 'candidate'|'approved', confidence})─[:INJECTED_IN]→ (:Session)
    ├─[:HAS_DECISION]→ (:Decision)─[:INJECTED_IN]→ (:Session)
    ├─[:HAS_SYSTEM_PROMPT_SUGGESTION]→ (:SystemPromptSuggestion {status})─[:APPLIED_TO]→ (:SystemPrompt)
    ├─[:HAS_MEMORY_EXTRACTION_PROMPT_SUGGESTION]→ (:MemoryExtractionPromptSuggestion {status})─[:APPLIED_TO]→ (:MemoryExtractionPrompt)
-   └─[:HAS_PROCESSING]→ (:ProjectProcessing)─[:PROCESSED_EVENT]→ (:Event)
+   └─[:HAS_PROCESSING]→ (:ProjectProcessing)─[:PROCESSED_EVENT]→ (:SessionEvent)
                                             ─[:PRODUCED_LEARNING]→ (:Learning)
                                             ─[:UPDATED_LEARNING]→ (:Learning)
                                             ─[:PRODUCED_DECISION]→ (:Decision)

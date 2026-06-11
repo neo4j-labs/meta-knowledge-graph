@@ -112,6 +112,8 @@ class InjectSystemPromptTests(unittest.TestCase):
         self.assertEqual(params["summary_char_count"], len(params["content_summary"]))
         self.assertNotIn("content: $content", query)
         self.assertIn("content_sha: $content_sha", query)
+        self.assertIn("SystemPromptInjection", query)
+        self.assertNotIn(":Injection", query)
         self.assertIn("OF_PROMPT", query)
         self.assertIn("SystemPrompt {name: $prompt_name}", query)
 
