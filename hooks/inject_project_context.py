@@ -81,6 +81,8 @@ def main() -> int:
                     [learning["id"] for learning in learnings if learning.get("id")],
                     [decision["id"] for decision in decisions if decision.get("id")],
                     hook_event,
+                    source=payload.get("source"),
+                    prompt=payload.get("prompt"),
                 )
     except Exception as exc:  # pragma: no cover - hook must never crash the session
         print(f"[inject_project_context] error: {exc}", file=sys.stderr)

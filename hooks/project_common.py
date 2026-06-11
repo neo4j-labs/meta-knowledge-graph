@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from hashlib import sha1
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,16 @@ from typing import Any
 
 MAX_LEARNING_TEXT = 500
 DEFAULT_LLM_MODEL = "gpt-5.4-mini"
+# How far back an injection and its hook SessionEvent may be apart and still be
+# considered the same hook firing. Inject and log hooks run in parallel, so the
+# INJECTED_AT link is attempted from both sides within this window.
+INJECTION_EVENT_WINDOW_SECONDS = 120
+
+
+def injection_window_start() -> str:
+    return (
+        datetime.now(timezone.utc) - timedelta(seconds=INJECTION_EVENT_WINDOW_SECONDS)
+    ).isoformat()
 
 
 def llm_model() -> str:
@@ -327,9 +338,20 @@ def mark_injected_in_session(
     learning_ids: list[str],
     decision_ids: list[str],
     hook_event: str,
+    source: str | None = None,
+    prompt: str | None = None,
 ) -> None:
     """Link injected memory to the session so the same conversation never
-    receives the same learning/decision twice."""
+    receives the same learning/decision twice, and to the specific hook
+    ``SessionEvent`` that carried the injection.
+
+    ``(m)-[:INJECTED_IN]->(:Session)`` powers per-session deduplication.
+    ``(m)-[:INJECTED_AT]->(:SessionEvent)`` records *where* the memory entered
+    context: the SessionStart or UserPromptSubmit event of this hook firing.
+    The log_event hook runs in parallel and may not have written that event
+    yet, so the link is matched on event name plus the shared payload
+    discriminators (``source`` for SessionStart, ``prompt`` for
+    UserPromptSubmit); log_event back-fills the link when it runs second."""
     if not session_id or session_id == "unknown":
         return
     for label, ids in (("Learning", learning_ids), ("Decision", decision_ids)):
@@ -350,6 +372,28 @@ def mark_injected_in_session(
             session_id=session_id,
             ids=ids,
             hook_event=hook_event,
+        )
+        session.run(
+            f"""
+            MATCH (s:Session {{session_id: $session_id}})
+                  -[:HAS_EVENT]->(e:SessionEvent {{event_name: $hook_event}})
+            WHERE e.timestamp >= $since
+              AND ($prompt IS NULL OR e.prompt = $prompt)
+              AND ($source IS NULL OR e.source = $source)
+            WITH e
+            ORDER BY e.timestamp DESC
+            LIMIT 1
+            UNWIND $ids AS memory_id
+            MATCH (m:{label} {{id: memory_id}})
+            MERGE (m)-[r:INJECTED_AT]->(e)
+            ON CREATE SET r.injected_at = datetime()
+            """,
+            session_id=session_id,
+            ids=ids,
+            hook_event=hook_event,
+            since=injection_window_start(),
+            prompt=prompt,
+            source=source,
         )
 
 

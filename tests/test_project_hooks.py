@@ -265,16 +265,66 @@ class ProjectHookTests(unittest.TestCase):
             ["learning:mkg:a"],
             ["decision:mkg:b"],
             "UserPromptSubmit",
+            prompt="show renewal risk",
         )
 
-        self.assertEqual(len(captured), 2)
+        self.assertEqual(len(captured), 4)
         learning_query, learning_params = captured[0]
-        decision_query, decision_params = captured[1]
+        decision_query, decision_params = captured[2]
         self.assertIn("MATCH (m:Learning {id: memory_id})", learning_query)
         self.assertIn("MERGE (m)-[r:INJECTED_IN]->(s)", learning_query)
         self.assertEqual(learning_params["ids"], ["learning:mkg:a"])
         self.assertIn("MATCH (m:Decision {id: memory_id})", decision_query)
         self.assertEqual(decision_params["ids"], ["decision:mkg:b"])
+
+    def test_mark_injected_in_session_links_memory_to_hook_event(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeSession:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.mark_injected_in_session(
+            FakeSession(),
+            "session-1",
+            ["learning:mkg:a"],
+            [],
+            "SessionStart",
+            source="startup",
+        )
+
+        self.assertEqual(len(captured), 2)
+        event_query, event_params = captured[1]
+        self.assertIn("(e:SessionEvent {event_name: $hook_event})", event_query)
+        self.assertIn("MERGE (m)-[r:INJECTED_AT]->(e)", event_query)
+        self.assertIn("$prompt IS NULL OR e.prompt = $prompt", event_query)
+        self.assertIn("$source IS NULL OR e.source = $source", event_query)
+        self.assertEqual(event_params["hook_event"], "SessionStart")
+        self.assertEqual(event_params["source"], "startup")
+        self.assertIsNone(event_params["prompt"])
+        self.assertIn("since", event_params)
+
+    def test_log_event_backfills_injected_at_for_context_events(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeTx:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+
+        log_event._link_injected_memory(
+            FakeTx(), "session-1", "event-1", "UserPromptSubmit"
+        )
+
+        self.assertEqual(
+            log_event.INJECTION_CONTEXT_EVENTS, {"SessionStart", "UserPromptSubmit"}
+        )
+        query, params = captured[0]
+        self.assertIn("(m:Learning OR m:Decision)", query)
+        self.assertIn("inj.hook_event = $event_name", query)
+        self.assertIn("MERGE (m)-[r:INJECTED_AT]->(e)", query)
+        self.assertEqual(params["event_id"], "event-1")
+        self.assertEqual(params["event_name"], "UserPromptSubmit")
 
     def test_mark_injected_in_session_skips_unknown_session(self) -> None:
         class ExplodingSession:

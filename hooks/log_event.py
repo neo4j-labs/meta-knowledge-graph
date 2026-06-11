@@ -9,6 +9,9 @@ Graph shape::
 
     (Session)-[:FIRST_EVENT]->(SessionEvent)-[:NEXT]->(SessionEvent)->...
     (Session)-[:LATEST_EVENT]->(latest SessionEvent)
+    (Learning|Decision)-[:INJECTED_AT]->(SessionEvent)  # back-filled for
+        SessionStart / UserPromptSubmit events whose parallel inject hook
+        already marked memory as injected in this session.
 
 Adapted from https://github.com/tomasonjo/agent-memory-hooks-neo4j to reuse this
 project's existing NEO4J_* env vars (loaded from .env) instead of HOOKS_NEO4J_*.
@@ -29,12 +32,16 @@ if str(HOOK_DIR) not in sys.path:
 
 from project_common import (  # noqa: E402
     ensure_project_schema,
+    injection_window_start,
     link_event_to_project,
     load_dotenv,
     resolve_project,
 )
 
 MAX_RESPONSE_CHARS = 4000
+# Hook events that inject_project_context.py uses to inject memory; only these
+# events can be the target of an INJECTED_AT back-fill.
+INJECTION_CONTEXT_EVENTS = {"SessionStart", "UserPromptSubmit"}
 
 
 def _neo4j_config() -> tuple[str, str, str, str]:
@@ -100,6 +107,32 @@ def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
     )
 
 
+def _link_injected_memory(tx, session_id: str, event_id: str, event_name: str) -> None:
+    """Back-fill (memory)-[:INJECTED_AT]->(event) for injections the parallel
+    inject_project_context hook recorded before this event node existed."""
+    since = injection_window_start()
+    tx.run(
+        """
+        MATCH (s:Session {session_id: $session_id})
+              -[:HAS_EVENT]->(e:SessionEvent {event_id: $event_id})
+        MATCH (m)-[inj:INJECTED_IN]->(s)
+        WHERE (m:Learning OR m:Decision)
+          AND inj.hook_event = $event_name
+          AND inj.last_injected_at >= datetime($since)
+          AND NOT EXISTS {
+              MATCH (m)-[:INJECTED_AT]->(recent:SessionEvent)
+              WHERE recent.timestamp >= $since
+          }
+        MERGE (m)-[r:INJECTED_AT]->(e)
+        ON CREATE SET r.injected_at = datetime()
+        """,
+        session_id=session_id,
+        event_id=event_id,
+        event_name=event_name,
+        since=since,
+    )
+
+
 def log_event(data: dict, client: str) -> None:
     from neo4j import GraphDatabase
 
@@ -141,6 +174,10 @@ def log_event(data: dict, client: str) -> None:
         with driver.session(database=database) as session:
             session.execute_write(_ensure_constraints)
             session.execute_write(_append_event, session_id, client, event_props)
+            if event_name in INJECTION_CONTEXT_EVENTS and session_id != "unknown":
+                session.execute_write(
+                    _link_injected_memory, session_id, event_id, event_name
+                )
             if project:
                 session.execute_write(
                     link_event_to_project,
