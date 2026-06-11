@@ -41,8 +41,10 @@ class InjectSystemPromptTests(unittest.TestCase):
         self.assertIn("goals", summary)
         self.assertNotIn("You are the Intelligence Agent", summary)
 
-    def test_injection_log_stores_raw_content_and_separate_summary(self) -> None:
-        captured: dict[str, object] = {}
+    def _record_injection(self, *, created: bool, captured: dict) -> bool:
+        class FakeResult:
+            def single(self):
+                return {"created": created}
 
         class FakeSession:
             def __enter__(self):
@@ -54,6 +56,7 @@ class InjectSystemPromptTests(unittest.TestCase):
             def run(self, query: str, **params):
                 captured["query"] = query
                 captured["params"] = params
+                return FakeResult()
 
         class FakeDriver:
             def __enter__(self):
@@ -83,7 +86,7 @@ class InjectSystemPromptTests(unittest.TestCase):
                 "_neo4j_config",
                 return_value=("bolt://example", "neo4j", "password", "neo4j"),
             ):
-                inject_system_prompt.log_injection(
+                return inject_system_prompt.record_injection(
                     session_id="session-1",
                     hook_event="SessionStart",
                     target="additionalContext",
@@ -92,15 +95,31 @@ class InjectSystemPromptTests(unittest.TestCase):
                     source="neo4j",
                 )
 
+    def test_injection_links_prompt_instead_of_copying_content(self) -> None:
+        captured: dict[str, object] = {}
+        should_inject = self._record_injection(created=True, captured=captured)
+
+        self.assertTrue(should_inject)
         params = captured["params"]
-        self.assertEqual(params["content"], content)
+        query = captured["query"]
+        content = "You are the Intelligence Agent for the Meta Knowledge Graph."
+        self.assertNotIn("content", params)
+        self.assertEqual(
+            params["content_sha"], inject_system_prompt.content_sha(content)
+        )
         self.assertNotEqual(params["content_summary"], content)
         self.assertEqual(params["char_count"], len(content))
-        self.assertEqual(params["original_char_count"], len(content))
-        self.assertEqual(params["stored_char_count"], len(content))
         self.assertEqual(params["summary_char_count"], len(params["content_summary"]))
-        self.assertIn("content: $content", captured["query"])
-        self.assertIn("content_summary: $content_summary", captured["query"])
+        self.assertNotIn("content: $content", query)
+        self.assertIn("content_sha: $content_sha", query)
+        self.assertIn("OF_PROMPT", query)
+        self.assertIn("SystemPrompt {name: $prompt_name}", query)
+
+    def test_duplicate_injection_in_same_session_is_skipped(self) -> None:
+        captured: dict[str, object] = {}
+        should_inject = self._record_injection(created=False, captured=captured)
+
+        self.assertFalse(should_inject)
 
 
 if __name__ == "__main__":

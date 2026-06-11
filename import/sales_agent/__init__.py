@@ -6,6 +6,7 @@ following the same layout:
 
     seed_data.py          canonical, deterministic dataset
     seed_bigquery.py      load the warehouse tables
+    run_neocarta.py       build the Neocarta catalog from the warehouse
     seed_neo4j.py         load nodes + relationships (the graph layer)
     seed_system_prompt.py persist the persona's (:SystemPrompt) to Neo4j
     system_prompt.md       the persona prompt itself

@@ -17,6 +17,7 @@ from project_common import (  # noqa: E402
     fetch_project_learnings,
     format_learning_context,
     load_dotenv,
+    mark_injected_in_session,
     mark_learnings_used,
     neo4j_config,
     resolve_project,
@@ -37,6 +38,11 @@ def main() -> int:
 
     payload = _read_payload()
     hook_event = payload.get("hook_event_name", "UserPromptSubmit")
+    session_id = payload.get("session_id") or None
+    # On clear/compact the conversation context was wiped, so earlier
+    # injections in this session are gone and must not be deduplicated away.
+    context_wiped = payload.get("source") in {"clear", "compact"}
+    exclude_session_id = None if context_wiped else session_id
     project = resolve_project(payload, project_root)
     if not project:
         return 0
@@ -56,6 +62,7 @@ def main() -> int:
                     query=prompt,
                     statuses=["approved", "candidate"],
                     limit=5,
+                    exclude_session_id=exclude_session_id,
                 )
                 mark_learnings_used(
                     session,
@@ -66,6 +73,14 @@ def main() -> int:
                     project_id=project.id,
                     query=prompt,
                     limit=3,
+                    exclude_session_id=exclude_session_id,
+                )
+                mark_injected_in_session(
+                    session,
+                    session_id,
+                    [learning["id"] for learning in learnings if learning.get("id")],
+                    [decision["id"] for decision in decisions if decision.get("id")],
+                    hook_event,
                 )
     except Exception as exc:  # pragma: no cover - hook must never crash the session
         print(f"[inject_project_context] error: {exc}", file=sys.stderr)

@@ -198,6 +198,71 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("Relevant project decisions", context)
         self.assertIn("Use repo folder name", context)
 
+    def test_fetch_learnings_excludes_already_injected_in_session(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeSession:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.fetch_project_learnings(
+            FakeSession(),
+            project_id="mkg",
+            query=None,
+            exclude_session_id="session-1",
+        )
+        project_common.fetch_project_decisions(
+            FakeSession(),
+            project_id="mkg",
+            query=None,
+            exclude_session_id="session-1",
+        )
+
+        for query, params in captured:
+            self.assertIn("INJECTED_IN", query)
+            self.assertEqual(params["session_id"], "session-1")
+
+    def test_mark_injected_in_session_links_memory_to_session(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeSession:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.mark_injected_in_session(
+            FakeSession(),
+            "session-1",
+            ["learning:mkg:a"],
+            ["decision:mkg:b"],
+            "UserPromptSubmit",
+        )
+
+        self.assertEqual(len(captured), 2)
+        learning_query, learning_params = captured[0]
+        decision_query, decision_params = captured[1]
+        self.assertIn("MATCH (m:Learning {id: memory_id})", learning_query)
+        self.assertIn("MERGE (m)-[r:INJECTED_IN]->(s)", learning_query)
+        self.assertEqual(learning_params["ids"], ["learning:mkg:a"])
+        self.assertIn("MATCH (m:Decision {id: memory_id})", decision_query)
+        self.assertEqual(decision_params["ids"], ["decision:mkg:b"])
+
+    def test_mark_injected_in_session_skips_unknown_session(self) -> None:
+        class ExplodingSession:
+            def run(self, query: str, **params):
+                raise AssertionError("should not write for unknown session")
+
+        project_common.mark_injected_in_session(
+            ExplodingSession(), "unknown", ["learning:mkg:a"], [], "SessionStart"
+        )
+        project_common.mark_injected_in_session(
+            ExplodingSession(), None, ["learning:mkg:a"], [], "SessionStart"
+        )
+        project_common.mark_injected_in_session(
+            ExplodingSession(), "session-1", [], [], "SessionStart"
+        )
+
     def test_background_processor_is_fire_and_forget(self) -> None:
         with patch.object(process_project.subprocess, "Popen") as popen:
             process_project._spawn_background("turn", 200, "session-1")
@@ -213,13 +278,60 @@ class ProjectHookTests(unittest.TestCase):
         stop_hooks = config["hooks"]["Stop"][0]["hooks"]
 
         self.assertEqual(len(stop_hooks), 4)
-        self.assertIn("hooks/log_event.py --client codex", stop_hooks[0]["command"])
-        self.assertIn("hooks/process_project.py --mode turn --background", stop_hooks[1]["command"])
-        self.assertIn("hooks/apply_system_prompt.py --background", stop_hooks[2]["command"])
-        self.assertIn(
-            "hooks/apply_memory_extraction_prompt.py --background",
-            stop_hooks[3]["command"],
+        self.assertIn("hooks/log_event.py", stop_hooks[0]["command"])
+        self.assertIn("--client codex", stop_hooks[0]["command"])
+        self.assertIn("hooks/process_project.py", stop_hooks[1]["command"])
+        self.assertIn("--mode turn --background", stop_hooks[1]["command"])
+        self.assertIn("hooks/apply_system_prompt.py", stop_hooks[2]["command"])
+        self.assertIn("--background", stop_hooks[2]["command"])
+        self.assertIn("hooks/apply_memory_extraction_prompt.py", stop_hooks[3]["command"])
+        self.assertIn("--background", stop_hooks[3]["command"])
+
+    def test_codex_hooks_inject_project_context_for_supported_context_events(self) -> None:
+        config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
+
+        session_start_hooks = config["hooks"]["SessionStart"][0]["hooks"]
+        self.assertEqual(config["hooks"]["SessionStart"][0]["matcher"], "startup|resume|clear|compact")
+        self.assertTrue(
+            any("hooks/inject_system_prompt.py" in hook["command"] for hook in session_start_hooks)
         )
+        self.assertTrue(
+            any("hooks/inject_project_context.py" in hook["command"] for hook in session_start_hooks)
+        )
+
+        prompt_hooks = config["hooks"]["UserPromptSubmit"][0]["hooks"]
+        self.assertIn("hooks/inject_project_context.py", prompt_hooks[0]["command"])
+        self.assertIn("hooks/log_event.py", prompt_hooks[1]["command"])
+        self.assertIn("--client codex", prompt_hooks[1]["command"])
+
+    def test_codex_logs_documented_lifecycle_events_without_session_end(self) -> None:
+        config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
+        expected_logged_events = {
+            "SessionStart",
+            "SubagentStart",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "PreCompact",
+            "PostCompact",
+            "UserPromptSubmit",
+            "SubagentStop",
+            "Stop",
+        }
+
+        self.assertTrue(expected_logged_events.issubset(config["hooks"].keys()))
+        self.assertNotIn("SessionEnd", config["hooks"])
+
+        for event in expected_logged_events:
+            commands = [
+                hook["command"]
+                for group in config["hooks"][event]
+                for hook in group["hooks"]
+            ]
+            self.assertTrue(
+                any("hooks/log_event.py" in command and "--client codex" in command for command in commands),
+                event,
+            )
 
 
 if __name__ == "__main__":

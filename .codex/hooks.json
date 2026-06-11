@@ -1,11 +1,54 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/inject_system_prompt.py\""
+          },
+          {
+            "type": "command",
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/inject_project_context.py\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --no-sync python hooks/log_event.py --client codex"
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -15,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --no-sync python hooks/log_event.py --client codex"
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -25,26 +68,17 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --no-sync python hooks/log_event.py --client codex"
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
           }
         ]
       }
     ],
-    "SessionStart": [
-      {
-        "matcher": "startup|resume|clear",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run --no-sync python hooks/inject_system_prompt.py"
-          }
-        ]
-      },
+    "PostCompact": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --no-sync python hooks/log_event.py --client codex"
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -54,7 +88,21 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --no-sync python hooks/log_event.py --client codex"
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/inject_project_context.py\""
+          },
+          {
+            "type": "command",
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -64,19 +112,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --no-sync python hooks/log_event.py --client codex"
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
           },
           {
             "type": "command",
-            "command": "uv run --no-sync python hooks/process_project.py --mode turn --background"
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/process_project.py\" --mode turn --background"
           },
           {
             "type": "command",
-            "command": "uv run --no-sync python hooks/apply_system_prompt.py --background"
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/apply_system_prompt.py\" --background"
           },
           {
             "type": "command",
-            "command": "uv run --no-sync python hooks/apply_memory_extraction_prompt.py --background"
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/apply_memory_extraction_prompt.py\" --background"
           }
         ]
       }

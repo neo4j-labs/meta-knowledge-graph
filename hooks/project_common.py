@@ -203,6 +203,7 @@ def fetch_project_learnings(
     query: str | None,
     statuses: list[str] | None = None,
     limit: int = 5,
+    exclude_session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     statuses = statuses or ["approved", "candidate"]
     if query and query.strip():
@@ -213,6 +214,8 @@ def fetch_project_learnings(
                 YIELD node, score
                 MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)
                 WHERE node.status IN $statuses
+                  AND ($session_id IS NULL
+                       OR NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id}))
                 RETURN node.id AS id,
                        node.text AS text,
                        node.status AS status,
@@ -228,6 +231,7 @@ def fetch_project_learnings(
                 search_query=query,
                 statuses=statuses,
                 limit=limit,
+                session_id=exclude_session_id,
             )
             rows = [dict(record) for record in records]
             if rows:
@@ -239,6 +243,8 @@ def fetch_project_learnings(
         """
         MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
         WHERE l.status IN $statuses
+          AND ($session_id IS NULL
+               OR NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id}))
         RETURN l.id AS id,
                l.text AS text,
                l.status AS status,
@@ -252,6 +258,7 @@ def fetch_project_learnings(
         project_id=project_id,
         statuses=statuses,
         limit=limit,
+        session_id=exclude_session_id,
     )
     return [dict(record) for record in records]
 
@@ -261,6 +268,7 @@ def fetch_project_decisions(
     project_id: str,
     query: str | None,
     limit: int = 3,
+    exclude_session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if query and query.strip():
         try:
@@ -269,6 +277,8 @@ def fetch_project_decisions(
                 CALL db.index.fulltext.queryNodes('project_decision_fulltext', $search_query)
                 YIELD node, score
                 MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(node)
+                WHERE $session_id IS NULL
+                      OR NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                 RETURN node.id AS id,
                        node.text AS text,
                        node.rationale AS rationale,
@@ -282,6 +292,7 @@ def fetch_project_decisions(
                 project_id=project_id,
                 search_query=query,
                 limit=limit,
+                session_id=exclude_session_id,
             )
             rows = [dict(record) for record in records]
             if rows:
@@ -292,6 +303,8 @@ def fetch_project_decisions(
     records = session.run(
         """
         MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(d:Decision)
+        WHERE $session_id IS NULL
+              OR NOT (d)-[:INJECTED_IN]->(:Session {session_id: $session_id})
         RETURN d.id AS id,
                d.text AS text,
                d.rationale AS rationale,
@@ -303,8 +316,41 @@ def fetch_project_decisions(
         """,
         project_id=project_id,
         limit=limit,
+        session_id=exclude_session_id,
     )
     return [dict(record) for record in records]
+
+
+def mark_injected_in_session(
+    session,
+    session_id: str | None,
+    learning_ids: list[str],
+    decision_ids: list[str],
+    hook_event: str,
+) -> None:
+    """Link injected memory to the session so the same conversation never
+    receives the same learning/decision twice."""
+    if not session_id or session_id == "unknown":
+        return
+    for label, ids in (("Learning", learning_ids), ("Decision", decision_ids)):
+        if not ids:
+            continue
+        session.run(
+            f"""
+            MERGE (s:Session {{session_id: $session_id}})
+            ON CREATE SET s.created_at = datetime()
+            WITH s
+            UNWIND $ids AS memory_id
+            MATCH (m:{label} {{id: memory_id}})
+            MERGE (m)-[r:INJECTED_IN]->(s)
+            ON CREATE SET r.first_injected_at = datetime(),
+                          r.hook_event = $hook_event
+            SET r.last_injected_at = datetime()
+            """,
+            session_id=session_id,
+            ids=ids,
+            hook_event=hook_event,
+        )
 
 
 def mark_learnings_used(session, learning_ids: list[str]) -> None:

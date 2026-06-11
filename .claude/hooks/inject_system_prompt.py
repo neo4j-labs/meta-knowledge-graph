@@ -15,6 +15,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from hashlib import sha1
 from pathlib import Path
 
 DEFAULT_PROMPT = """You are the Intelligence Agent for the Meta Knowledge Graph (MKG).
@@ -134,18 +135,30 @@ def summarize_injection_content(prompt_name: str, content: str, source: str) -> 
     )
 
 
-def log_injection(
+def content_sha(content: str) -> str:
+    return sha1(content.encode("utf-8")).hexdigest()[:16]
+
+
+def record_injection(
     session_id: str,
     hook_event: str,
     target: str,
     prompt_name: str,
     content: str,
     source: str,
-) -> None:
+) -> bool:
+    """Record the injection in the graph and report whether to inject.
+
+    The prompt text is not copied onto the ``:Injection`` node; the node keeps a
+    content hash plus summary, and links to the ``(:SystemPrompt)`` it came from.
+    Returns ``False`` when this exact prompt content was already injected into
+    this session (the conversation already has it in context), ``True`` when the
+    injection is new or dedup state is unavailable.
+    """
     try:
         from neo4j import GraphDatabase
     except ImportError:
-        return
+        return True
 
     uri, user, password, database = _neo4j_config()
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -155,25 +168,31 @@ def log_injection(
     try:
         with GraphDatabase.driver(uri, auth=(user, password)) as driver:
             with driver.session(database=database) as session:
-                session.run(
+                record = session.run(
                     """
                     MERGE (s:Session {session_id: $session_id})
                     ON CREATE SET s.created_at = $timestamp
-                    CREATE (i:Injection {
-                        injection_id: $injection_id,
-                        hook_event: $hook_event,
-                        target: $target,
+                    MERGE (s)-[:INJECTED]->(i:Injection {
                         prompt_name: $prompt_name,
-                        source: $source,
-                        content: $content,
-                        content_summary: $content_summary,
-                        char_count: $char_count,
-                        original_char_count: $original_char_count,
-                        stored_char_count: $stored_char_count,
-                        summary_char_count: $summary_char_count,
-                        timestamp: $timestamp
+                        content_sha: $content_sha,
+                        target: $target
                     })
-                    CREATE (s)-[:INJECTED]->(i)
+                    ON CREATE SET i.injection_id = $injection_id,
+                                  i.hook_event = $hook_event,
+                                  i.source = $source,
+                                  i.content_summary = $content_summary,
+                                  i.char_count = $char_count,
+                                  i.summary_char_count = $summary_char_count,
+                                  i.timestamp = $timestamp,
+                                  i.injection_count = 1
+                    ON MATCH SET i.last_seen_at = $timestamp,
+                                 i.injection_count = i.injection_count + 1
+                    WITH i, i.timestamp = $timestamp AS created
+                    FOREACH (_ IN CASE WHEN created AND $source = 'neo4j' THEN [1] ELSE [] END |
+                        MERGE (sp:SystemPrompt {name: $prompt_name})
+                        MERGE (i)-[:OF_PROMPT]->(sp)
+                    )
+                    RETURN created
                     """,
                     session_id=session_id,
                     injection_id=injection_id,
@@ -181,16 +200,18 @@ def log_injection(
                     target=target,
                     prompt_name=prompt_name,
                     source=source,
-                    content=content,
+                    content_sha=content_sha(content),
                     content_summary=content_summary,
                     char_count=len(content),
-                    original_char_count=len(content),
-                    stored_char_count=len(content),
                     summary_char_count=len(content_summary),
                     timestamp=timestamp,
                 )
+                row = record.single()
+        if row is not None:
+            return bool(row["created"])
     except Exception as exc:  # pragma: no cover - hook must never crash the session
         print(f"[inject_system_prompt] injection log failed: {exc}", file=sys.stderr)
+    return True
 
 
 def main() -> int:
@@ -205,13 +226,16 @@ def main() -> int:
 
     session_id = payload.get("session_id", "unknown")
     hook_event = payload.get("hook_event_name", "SessionStart")
+    # On clear/compact the conversation context was wiped, so an earlier
+    # injection in this session is gone and dedup must not suppress this one.
+    context_wiped = payload.get("source") in {"clear", "compact"}
 
     prompt_name = "default"
     fetched = fetch_prompt_from_neo4j(prompt_name)
     prompt = fetched or FALLBACK_BOOTSTRAP_PROMPT
     source = "neo4j" if fetched else "default"
 
-    log_injection(
+    is_new_injection = record_injection(
         session_id=session_id,
         hook_event=hook_event,
         target="additionalContext",
@@ -219,6 +243,14 @@ def main() -> int:
         content=prompt,
         source=source,
     )
+
+    if not is_new_injection and not context_wiped:
+        print(
+            f"[inject_system_prompt] SystemPrompt {prompt_name!r} already injected "
+            f"in session {session_id}; skipping duplicate.",
+            file=sys.stderr,
+        )
+        return 0
 
     output = {
         "hookSpecificOutput": {

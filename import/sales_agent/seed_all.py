@@ -1,9 +1,9 @@
-"""Seed the whole sales-agent demo: BigQuery, Neo4j, bootstrap memory, prompt.
+"""Seed the whole sales-agent demo: BigQuery, Neocarta, Neo4j, memory, prompt.
 
 Each underlying script stays independently runnable for partial refreshes.
 
 Run:
-    uv run python import/sales_agent/seed_all.py  # data + active default persona
+    uv run python import/sales_agent/seed_all.py  # data + catalog + active persona
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ def main(_argv: list[str]) -> int:
     here = Path(__file__).resolve().parent
     steps: list[tuple[str, list[str]]] = [
         ("seed_bigquery.py", []),
+        ("run_neocarta.py", []),
         ("seed_neo4j.py", []),
         ("seed_learnings.py", []),
         ("seed_system_prompt.py", []),

@@ -6,8 +6,9 @@ store and the MCP server plug into any MCP-capable harness, and the
 capture/injection scripts ride on whatever lifecycle hooks the harness exposes.
 This repo ships ready-made wiring for **Claude Code**
 ([`.claude/settings.json`](.claude/settings.json)) and **Codex**
-([`.codex/config.toml`](.codex/config.toml)); plugging a custom harness in
-means pointing its lifecycle events at the same scripts.
+([`.codex/config.toml`](.codex/config.toml) plus
+[`.codex/hooks.json`](.codex/hooks.json)); plugging a custom harness in means
+pointing its lifecycle events at the same scripts.
 
 It ships as two halves that form a closed capture-and-recall loop:
 
@@ -15,7 +16,8 @@ It ships as two halves that form a closed capture-and-recall loop:
   graph, the persisted system prompt, and (optionally) a data catalog and
   warehouse to the agent as tools.
 - **Lifecycle hooks** — plain Python scripts that log every session event,
-  inject scoped project context on prompt submit, and run an LLM memory extraction processor at Stop / SessionEnd
+  inject scoped project context on prompt submit, and run an LLM memory extraction processor at Stop
+  (and SessionEnd when the harness exposes it)
   that distills durable `:Learning` / `:Decision` / `:SystemPromptSuggestion` /
   `:MemoryExtractionPromptSuggestion`
   candidates from what just happened.
@@ -58,8 +60,8 @@ live in `hooks/`.
 
 | Hook event | Script | Behavior |
 |---|---|---|
-| `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and persist a refined system prompt back to Neo4j so the next session skips the fallback. |
-| `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits scoped to the current project. Marks served learnings as used. |
+| `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and persist a refined system prompt back to Neo4j so the next session skips the fallback. The injection log keeps only a content hash + summary on the `:Injection` node and links it to its source via `[:OF_PROMPT]→(:SystemPrompt)` instead of copying the prompt text. If the same prompt content was already injected into the same session, the hook skips the duplicate (unless the context was wiped by `clear`/`compact`). |
+| `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits scoped to the current project. Every injected item is linked to the session via `[:INJECTED_IN]`, and items already injected earlier in the same session are excluded from retrieval, so a conversation never receives the same learning or decision twice. Marks served learnings as used. |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | `hooks/log_event.py` | Persists each event as an `:Event` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the memory extraction processor later reads. |
 | `Stop` (`--mode turn`), `SessionEnd` (`--mode session`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions per category. System-prompt suggestions are reserved for rare operating-principle changes or explicit/reinforced high-level user preferences and interests; memory-extraction-prompt suggestions are reserved for improving future extraction quality. Writes new `:Learning` / `:Decision` / `:SystemPromptSuggestion` / `:MemoryExtractionPromptSuggestion` nodes with status `candidate`. |
 | `Stop` | `hooks/apply_system_prompt.py` | Rate-limited rebuild of the live `(:SystemPrompt)`. Runs in the background on every Stop but only acts when at least `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` candidate suggestions are pending **and** `MKG_PROMPT_REBUILD_MIN_HOURS` have passed since the last rebuild (gate + claim in one conditional write, so concurrent Stops can't double-rebuild). Seeds the prompt node from the default if it doesn't exist, snapshots the previous content as `(:SystemPromptVersion)`, folds suggestions in via LLM (verbatim append under a learned-notes section when `OPENAI_API_KEY` is absent), and marks each suggestion `applied` or `rejected`. |
@@ -70,9 +72,9 @@ live in `hooks/`.
 ```
 (:Project {id})
    ├─[:HAS_SESSION]→ (:Session)─[:HAS_EVENT]→ (:Event)─[:NEXT]→ ...
-   │                            ─[:INJECTED]→ (:Injection)
-   ├─[:HAS_LEARNING]→ (:Learning {status: 'candidate'|'approved', confidence})
-   ├─[:HAS_DECISION]→ (:Decision)
+   │                            ─[:INJECTED]→ (:Injection {content_sha})─[:OF_PROMPT]→ (:SystemPrompt)
+   ├─[:HAS_LEARNING]→ (:Learning {status: 'candidate'|'approved', confidence})─[:INJECTED_IN]→ (:Session)
+   ├─[:HAS_DECISION]→ (:Decision)─[:INJECTED_IN]→ (:Session)
    ├─[:HAS_SYSTEM_PROMPT_SUGGESTION]→ (:SystemPromptSuggestion {status})─[:APPLIED_TO]→ (:SystemPrompt)
    ├─[:HAS_MEMORY_EXTRACTION_PROMPT_SUGGESTION]→ (:MemoryExtractionPromptSuggestion {status})─[:APPLIED_TO]→ (:MemoryExtractionPrompt)
    └─[:HAS_PROCESSING]→ (:ProjectProcessing)─[:PROCESSED_EVENT]→ (:Event)
@@ -149,6 +151,10 @@ approval_mode = "approve"
 The hook scripts work under any harness with lifecycle events; pass
 `--client codex` (or your harness's name) to `log_event.py` so captured
 sessions are tagged with their origin.
+This repo's [`.codex/hooks.json`](.codex/hooks.json) wires the documented Codex
+events for recall, capture, Stop-time extraction, and prompt rebuilds. Codex
+does not currently document a `SessionEnd` hook, so that session-level processor
+is only configured for harnesses that expose it.
 
 ### Other harnesses
 
@@ -198,12 +204,13 @@ DIFFBOT_TOKEN=<your-diffbot-token>
 uv run python import/sales_agent/seed_all.py
 ```
 
-This runs four seeders in order (each independently re-runnable; re-running is
+This runs five seeders in order (each independently re-runnable; re-running is
 safe — BigQuery tables are dropped/recreated and Neo4j MERGEs on natural keys):
 
 | Seeder | What it loads |
 |---|---|
 | `seed_bigquery.py` | `accounts`, `products`, `account_product_usage` (monthly time series), `account_contacts`, `account_renewals` under `$GCP_PROJECT_ID.$BIGQUERY_DATASET_ID`. |
+| `run_neocarta.py` | Neocarta catalog metadata, query-log context, then LiteLLM-powered embeddings for the seeded BigQuery dataset. Run after `seed_bigquery.py` so the warehouse tables and descriptions exist. |
 | `seed_neo4j.py` | `:Account` / `:Product` / `:Contact` / `:CSM` nodes plus `USES_PRODUCT` (utilization, revenue), `HAS_CONTACT`, and `OWNS` relationships. |
 | `seed_learnings.py` | Bootstrap `:Learning` / `:Decision` nodes so the first session already has scoped project memory. |
 | `seed_system_prompt.py` | Persists `system_prompt.md` (the RoadFlex sales persona) as `(:SystemPrompt {name: 'default'})`. |
@@ -216,8 +223,9 @@ To preview the generated dataset without touching any database:
 
 Follow the Quick Start above for your harness — Claude Code via
 [`.claude/settings.json`](.claude/settings.json), Codex via
-[`.codex/config.toml`](.codex/config.toml), or any custom harness that can
-spawn an MCP server and fire lifecycle hooks.
+[`.codex/config.toml`](.codex/config.toml) and
+[`.codex/hooks.json`](.codex/hooks.json), or any custom harness that can spawn
+an MCP server and fire lifecycle hooks.
 With `GCP_PROJECT_ID` / `BIGQUERY_DATASET_ID` / `OPENAI_API_KEY` set the server
 mounts the `neocarta_*` catalog tools, with `BIGQUERY_MCP_URL` set it mounts
 `bigquery_execute_query`, and with `DIFFBOT_TOKEN` set it mounts `search_news`
@@ -234,7 +242,8 @@ submits inject the most relevant seeded learnings. Try:
 - *"Roll up the book of business by CSM."*
 
 From there the loop takes over: every session's events are logged, memory
-extraction distills new learnings/decisions on Stop / SessionEnd, and the
+extraction distills new learnings/decisions on Stop, plus SessionEnd for
+harnesses that emit it, and the
 persona prompt keeps improving itself via `:SystemPromptSuggestion` rebuilds.
 
 ## Configuration
