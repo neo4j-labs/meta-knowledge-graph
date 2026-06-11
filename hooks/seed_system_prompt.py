@@ -1,19 +1,30 @@
 #!/usr/bin/env python3
 """Seed or update a ``(:SystemPrompt {name})`` node in Neo4j.
 
+Replaced content is snapshotted as a ``(:SystemPromptVersion)`` and the version
+counter bumped — the same versioning the Stop-event rebuild uses — so manual
+seeds slot into one shared history chain. Re-seeding identical content is a
+no-op.
+
 Usage:
-    python .claude/hooks/seed_system_prompt.py            # seed 'default' from DEFAULT_PROMPT
-    python .claude/hooks/seed_system_prompt.py NAME       # seed NAME from DEFAULT_PROMPT
-    python .claude/hooks/seed_system_prompt.py NAME FILE  # seed NAME from FILE
+    python hooks/seed_system_prompt.py            # seed 'default' from DEFAULT_PROMPT
+    python hooks/seed_system_prompt.py NAME       # seed NAME from DEFAULT_PROMPT
+    python hooks/seed_system_prompt.py NAME FILE  # seed NAME from FILE
 """
 
 from __future__ import annotations
 
-import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-from inject_system_prompt import DEFAULT_PROMPT, load_dotenv
+HOOK_DIR = Path(__file__).resolve().parent
+if str(HOOK_DIR) not in sys.path:
+    sys.path.insert(0, str(HOOK_DIR))
+
+from apply_system_prompt import upsert_prompt  # noqa: E402
+from inject_system_prompt import DEFAULT_PROMPT, load_dotenv  # noqa: E402
+from project_common import ensure_project_schema, neo4j_config  # noqa: E402
 
 
 def main(argv: list[str]) -> int:
@@ -23,25 +34,28 @@ def main(argv: list[str]) -> int:
     else:
         content = DEFAULT_PROMPT
 
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = Path(__file__).resolve().parents[1]
     load_dotenv(project_root / ".env")
 
     from neo4j import GraphDatabase
 
-    uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    user = os.getenv("NEO4J_USERNAME", "neo4j")
-    password = os.getenv("NEO4J_PASSWORD", "password")
-    database = os.getenv("NEO4J_DATABASE", "neo4j")
+    uri, user, password, database = neo4j_config()
+    now = datetime.now(timezone.utc).isoformat()
 
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         with driver.session(database=database) as session:
-            session.run(
-                "MERGE (p:SystemPrompt {name: $name}) "
-                "SET p.content = $content, p.updated_at = datetime()",
+            session.execute_write(ensure_project_schema)
+            result = session.execute_write(
+                upsert_prompt,
                 name=name,
                 content=content,
+                source="seed",
+                now=now,
             )
-    print(f"Seeded (:SystemPrompt {{name: '{name}'}}) — {len(content)} chars")
+    print(
+        f"Seeded (:SystemPrompt {{name: '{name}'}}) — "
+        f"{result['action']}, v{result['version']}, {len(content)} chars"
+    )
     return 0
 
 

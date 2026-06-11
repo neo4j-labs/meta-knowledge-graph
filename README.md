@@ -83,7 +83,8 @@ hooks swallow their own exceptions so a Neo4j outage never blocks the session.
 | `SessionStart` | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: $MKG_PROMPT_NAME})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and persist a refined system prompt back to Neo4j so the next session skips the fallback. |
 | `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits scoped to the current project. Marks served learnings as used. |
 | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd` | `hooks/log_event.py` | Persists each event as an `:Event` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the adjudicator later reads. |
-| `Stop`, `SessionEnd` | `hooks/process_project.py` | Pulls the session's events that the current `(project, mode)` hasn't processed yet, builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions per category. Writes new `:Learning` / `:Decision` / `:SystemPromptSuggestion` nodes with status `candidate`. |
+| `Stop`, `SessionEnd` | `hooks/process_project.py` | Pulls the session's events that the current `(project, mode)` hasn't processed yet, builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions per category. System-prompt suggestions are reserved for rare operating-principle changes or explicit/reinforced high-level user preferences and interests, not transient facts, secrets, sensitive personal data, or one-off task context. Writes new `:Learning` / `:Decision` / `:SystemPromptSuggestion` nodes with status `candidate`. |
+| `Stop` | `hooks/apply_system_prompt.py` | Rate-limited rebuild of the live `(:SystemPrompt)`. Runs in the background on every Stop but only acts when at least `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` candidate suggestions are pending **and** `MKG_PROMPT_REBUILD_MIN_HOURS` have passed since the last rebuild (gate + claim in one conditional write, so concurrent Stops can't double-rebuild). Seeds the prompt node from the default if it doesn't exist, snapshots the previous content as `(:SystemPromptVersion)`, folds suggestions in via LLM (verbatim append under a learned-notes section when `OPENAI_API_KEY` is absent), and marks each suggestion `applied` or `rejected`. |
 
 ### Graph model
 
@@ -93,17 +94,22 @@ hooks swallow their own exceptions so a Neo4j outage never blocks the session.
    │                            ─[:INJECTED]→ (:Injection)
    ├─[:HAS_LEARNING]→ (:Learning {status: 'candidate'|'approved', confidence})
    ├─[:HAS_DECISION]→ (:Decision)
-   ├─[:HAS_SYSTEM_PROMPT_SUGGESTION]→ (:SystemPromptSuggestion)
+   ├─[:HAS_SYSTEM_PROMPT_SUGGESTION]→ (:SystemPromptSuggestion {status})─[:APPLIED_TO]→ (:SystemPrompt)
    └─[:HAS_PROCESSING]→ (:ProjectProcessing)─[:PROCESSED_EVENT]→ (:Event)
                                             ─[:PRODUCED_LEARNING]→ (:Learning)
                                             ─[:UPDATED_LEARNING]→ (:Learning)
                                             ─[:PRODUCED_DECISION]→ (:Decision)
+
+(:SystemPrompt {name, version})─[:HAS_VERSION]→ (:SystemPromptVersion)
 ```
 
 Candidate learnings flow through retrieval but are review-gated — they stay
 `candidate` until promoted to `approved`. Fulltext indexes
 `project_learning_fulltext` and `project_decision_fulltext` back the retrieval
-path.
+path. System-prompt suggestions follow `candidate → applied | rejected`: the
+Stop-event rebuild consumes them in batches once the time and count gates pass,
+and every rebuild snapshots the prior prompt as a `(:SystemPromptVersion)` for
+rollback.
 
 ## Quick Start
 
@@ -147,4 +153,8 @@ corresponding `hooks.SessionStart` / `UserPromptSubmit` / `PreToolUse` /
 | `LLM_MODEL` | — | `gpt-5.4-mini` | Default model for LLM calls. |
 | `MKG_LEARNING_MODEL` | — | falls back to `LLM_MODEL` | Override just the adjudicator model. |
 | `MKG_PROMPT_NAME` | — | `default` | Which `(:SystemPrompt {name})` node to load on session start. |
+| `MKG_PROMPT_REBUILD_MIN_HOURS` | — | `8` | Minimum hours between system-prompt rebuilds on Stop. |
+| `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` | — | `2` | Pending candidate suggestions required before a rebuild runs. |
+| `MKG_PROMPT_MAX_CHARS` | — | `12000` | Length budget for the rebuilt system prompt. |
+| `MKG_PROMPT_REBUILD_MODEL` | — | falls back to `MKG_LEARNING_MODEL` | Override just the prompt-rebuild model. |
 | `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID` | — | — | Required to mount the Neocarta and BigQuery tools. |

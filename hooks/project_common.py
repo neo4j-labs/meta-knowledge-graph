@@ -82,6 +82,14 @@ def ensure_project_schema(tx) -> None:
         "REQUIRE s.id IS UNIQUE"
     )
     tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (sp:SystemPrompt) "
+        "REQUIRE sp.name IS UNIQUE"
+    )
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (v:SystemPromptVersion) "
+        "REQUIRE v.id IS UNIQUE"
+    )
+    tx.run(
         "CREATE CONSTRAINT IF NOT EXISTS FOR (p:ProjectProcessing) "
         "REQUIRE p.id IS UNIQUE"
     )

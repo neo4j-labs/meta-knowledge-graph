@@ -77,6 +77,10 @@
           {
             "type": "command",
             "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/process_project.py --mode turn --background"
+          },
+          {
+            "type": "command",
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/apply_system_prompt.py --background"
           }
         ]
       }

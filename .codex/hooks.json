@@ -69,6 +69,10 @@
           {
             "type": "command",
             "command": "uv run --no-sync python hooks/process_project.py --mode turn --background"
+          },
+          {
+            "type": "command",
+            "command": "uv run --no-sync python hooks/apply_system_prompt.py --background"
           }
         ]
       }

@@ -13,6 +13,7 @@ rental-car provider). It seeds a BigQuery warehouse, a Neo4j relationship graph,
 | `seed_data.py` | Canonical, deterministic dataset (one source of truth for both stores). |
 | `seed_bigquery.py` | Loads `accounts`, `products`, `account_product_usage`, `account_contacts`, `account_renewals`. |
 | `seed_neo4j.py` | Loads `:Account` / `:Product` / `:Contact` / `:CSM` nodes **and the relationships** (`USES_PRODUCT`, `HAS_CONTACT`, `OWNS`). |
+| `seed_learnings.py` | Seeds bootstrap `:Learning` / `:Decision` nodes so the first session starts with scoped project memory. |
 | `seed_system_prompt.py` | Persists `system_prompt.md` to a `(:SystemPrompt)` node. |
 | `system_prompt.md` | The sales-assistant persona prompt. |
 | `seed_all.py` | Runs all of the above. |
@@ -22,16 +23,14 @@ rental-car provider). It seeds a BigQuery warehouse, a Neo4j relationship graph,
 Requires the repo `.env` (Neo4j + GCP credentials). From the repo root:
 
 ```bash
-# everything (data + persona under name 'sales_agent')
+# everything (data + active default persona)
 uv run python import/sales_agent/seed_all.py
-
-# everything, and make the persona the ACTIVE prompt (writes the 'default' node too)
-uv run python import/sales_agent/seed_all.py --default
 
 # or run pieces individually
 uv run python import/sales_agent/seed_bigquery.py
 uv run python import/sales_agent/seed_neo4j.py
-uv run python import/sales_agent/seed_system_prompt.py --default
+uv run python import/sales_agent/seed_learnings.py
+uv run python import/sales_agent/seed_system_prompt.py
 ```
 
 Re-running is safe: the data is generated from a fixed seed, BigQuery tables are
@@ -66,10 +65,10 @@ name `default`) and, only if that node is missing, falls back to a generic
 tool-agnostic bootstrap prompt baked into the hook. So:
 
 - The generic fallback stays in the hook for unseeded environments.
-- `seed_system_prompt.py` writes the sales persona under `sales_agent`; pass
-  `--default` to also write `default` and make it active with no env change.
+- `seed_system_prompt.py` writes the sales persona under `default`, making it
+  active with no env change.
 - To run several personas, seed each under its own name and switch with
-  `MKG_PROMPT_NAME`.
+  `MKG_PROMPT_NAME`; for this seeder, pass `--name <prompt_name>`.
 
 ## Adding another dataset / persona
 

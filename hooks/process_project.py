@@ -142,9 +142,13 @@ Prefer updating existing memory when it is materially the same idea. Create a ne
 item only for a distinct reusable learning or major decision. Return ignore when
 the work is routine, transient, or already covered without needing reinforcement.
 If the work reveals that the persistent system prompt itself should change, propose
-a system_prompt_update. These should be rare, general operating-principle changes,
-not project-specific facts. Suggestions are review-gated and do not rewrite the
-live SystemPrompt automatically.
+a system_prompt_update. These should be rare. They may be general operating-principle
+changes, or high-level stable information about the user this prompt serves, such as
+broad interests, communication/workflow preferences, or durable domain priorities.
+Only suggest user-specific prompt changes when the signal is explicit or repeatedly
+reinforced. Do not suggest project-specific facts, transient details, secrets,
+sensitive personal data, or one-off task context. Suggestions queue as candidates;
+a rate-limited rebuild folds them into the live SystemPrompt once enough accumulate.
 
 Return JSON only with this shape:
 {{

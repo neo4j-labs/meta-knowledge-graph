@@ -77,7 +77,11 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("decision:mkg:existing", prompt)
         self.assertIn('"action": "create|update|ignore"', prompt)
         self.assertIn("system_prompt_updates", prompt)
-        self.assertIn("review-gated", prompt)
+        self.assertIn("rate-limited rebuild", prompt)
+        self.assertIn("high-level stable information about the user", prompt)
+        self.assertIn("broad interests", prompt)
+        self.assertIn("communication/workflow preferences", prompt)
+        self.assertIn("sensitive personal data", prompt)
 
     def test_llm_action_rows_skip_ignored_memory(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
@@ -178,9 +182,10 @@ class ProjectHookTests(unittest.TestCase):
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
         stop_hooks = config["hooks"]["Stop"][0]["hooks"]
 
-        self.assertEqual(len(stop_hooks), 2)
+        self.assertEqual(len(stop_hooks), 3)
         self.assertIn("hooks/log_event.py --client codex", stop_hooks[0]["command"])
         self.assertIn("hooks/process_project.py --mode turn --background", stop_hooks[1]["command"])
+        self.assertIn("hooks/apply_system_prompt.py --background", stop_hooks[2]["command"])
 
 
 if __name__ == "__main__":
