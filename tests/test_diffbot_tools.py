@@ -114,6 +114,54 @@ class DiffbotToolHelperTests(unittest.TestCase):
         self.assertNotIn("filter", client.calls[1])
         self.assertEqual(client.calls[1]["query"], 'type:Article tags.label:"Neo4j"')
 
+    def test_diffbot_response_payload_limits_locations(self) -> None:
+        payload = server._diffbot_response_payload(
+            FakeDiffbotResponse(
+                200,
+                {
+                    "data": [
+                        {
+                            "entity": {
+                                "name": "Acme Corp",
+                                "locations": [
+                                    {"address": "one"},
+                                    {"address": "two"},
+                                    {"address": "three"},
+                                    {"address": "four"},
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        )
+
+        locations = payload["data"][0]["entity"]["locations"]
+        self.assertEqual(len(locations), server.MAX_DIFFBOT_LOCATIONS)
+        self.assertEqual([loc["address"] for loc in locations], ["one", "two", "three"])
+
+    def test_diffbot_error_payload_limits_locations(self) -> None:
+        payload = server._diffbot_response_payload(
+            FakeDiffbotResponse(
+                500,
+                {
+                    "message": "server error",
+                    "locations": [
+                        {"address": "one"},
+                        {"address": "two"},
+                        {"address": "three"},
+                        {"address": "four"},
+                    ],
+                },
+            )
+        )
+
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(
+            len(payload["response"]["locations"]),
+            server.MAX_DIFFBOT_LOCATIONS,
+        )
+
     def test_enhance_params_require_valid_entity_type(self) -> None:
         params, error = server._build_diffbot_enhance_params(
             "Company",

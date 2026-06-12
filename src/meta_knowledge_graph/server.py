@@ -18,6 +18,7 @@ from pydantic import Field
 MAX_LEARNING_TEXT = 500
 DIFFBOT_API_BASE_URL = "https://kg.diffbot.com/kg/v3"
 DIFFBOT_TIMEOUT_SECONDS = 30.0
+MAX_DIFFBOT_LOCATIONS = 3
 DIFFBOT_NEWS_FILTER = (
     "title pageUrl siteName date author sentiment tags.label publisherCountry"
 )
@@ -151,6 +152,24 @@ def _diffbot_enhance_filter(entity_type: str) -> str:
     return DIFFBOT_ORGANIZATION_ENHANCE_FILTER
 
 
+def _limit_diffbot_locations(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_limit_diffbot_locations(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    limited = {}
+    for key, child in value.items():
+        if key == "locations" and isinstance(child, list):
+            limited[key] = [
+                _limit_diffbot_locations(item)
+                for item in child[:MAX_DIFFBOT_LOCATIONS]
+            ]
+        else:
+            limited[key] = _limit_diffbot_locations(child)
+    return limited
+
+
 def _diffbot_response_payload(response: httpx.Response) -> dict[str, Any]:
     try:
         payload: Any = response.json()
@@ -163,10 +182,11 @@ def _diffbot_response_payload(response: httpx.Response) -> dict[str, Any]:
             "status": "error",
             "status_code": response.status_code,
             "error": message or response.reason_phrase,
-            "response": payload,
+            "response": _limit_diffbot_locations(payload),
         }
 
-    return payload if isinstance(payload, dict) else {"data": payload}
+    payload = payload if isinstance(payload, dict) else {"data": payload}
+    return _limit_diffbot_locations(payload)
 
 
 async def _diffbot_get_json(path: str, params: dict[str, Any]) -> str:

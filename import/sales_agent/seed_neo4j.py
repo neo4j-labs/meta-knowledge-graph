@@ -8,8 +8,9 @@ the graph useful to an enterprise mobility sales assistant:
     (:Account)-[:HAS_CONTACT]->(:Contact)
 
 Renewal/health fields are denormalized onto :Account for fast filtering. The
-:Product catalog and :Account roster mirror the BigQuery tables (same ids), so
-an account can be pivoted across Neo4j, BigQuery, and Diffbot on its slug/domain.
+:Product catalog and :Account roster mirror the BigQuery tables (same ids/slugs),
+so an account can be pivoted across Neo4j, BigQuery, and Diffbot on its
+slug/domain.
 
 Idempotent: MERGEs on natural keys, and refreshes seed-owned USES_PRODUCT /
 HAS_CONTACT edges so a re-run exactly reflects the current dataset.
@@ -35,6 +36,7 @@ load_dotenv()
 
 SCHEMA_STATEMENTS = [
     "CREATE CONSTRAINT account_id_unique  IF NOT EXISTS FOR (a:Account) REQUIRE a.id IS UNIQUE",
+    "CREATE CONSTRAINT account_slug_unique IF NOT EXISTS FOR (a:Account) REQUIRE a.slug IS UNIQUE",
     "CREATE CONSTRAINT product_sku_unique IF NOT EXISTS FOR (p:Product) REQUIRE p.sku IS UNIQUE",
     "CREATE CONSTRAINT contact_id_unique  IF NOT EXISTS FOR (c:Contact) REQUIRE c.contact_id IS UNIQUE",
     "CREATE CONSTRAINT csm_name_unique     IF NOT EXISTS FOR (c:CSM) REQUIRE c.name IS UNIQUE",
@@ -46,7 +48,8 @@ MERGE_ACCOUNTS = """
 UNWIND $accounts AS row
 MERGE (a:Account {id: row.account_id})
 ON CREATE SET a.created_at = datetime()
-SET a.name = row.name,
+SET a.slug = row.account_id,
+    a.name = row.name,
     a.domain = row.domain,
     a.industry = row.industry,
     a.region = row.region,
