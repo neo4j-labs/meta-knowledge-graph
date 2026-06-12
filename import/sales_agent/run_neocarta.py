@@ -19,7 +19,7 @@ from google.cloud import bigquery
 from neo4j import GraphDatabase
 
 from neocarta import NodeLabel as nl
-from neocarta.connectors.bigquery import BigQueryLogsConnector, BigQuerySchemaConnector
+from neocarta.connectors.bigquery import BigQuerySchemaConnector
 from neocarta.enrichment.embeddings import LiteLLMEmbeddingsConnector
 
 
@@ -67,18 +67,6 @@ def main() -> None:
             neo4j_driver=neo4j_driver,
             database_name=neo4j_db,
         ).run()
-
-        BigQueryLogsConnector(
-            client=bq_client,
-            project_id=bq_project_id,
-            neo4j_driver=neo4j_driver,
-            database_name=neo4j_db,
-        ).run(
-            dataset_id=dataset_id,
-            region="region-us",
-            limit=1000,
-            drop_failed_queries=True,
-        )
 
         print("populating Neocarta embeddings")
         asyncio.run(populate_embeddings(neo4j_db))

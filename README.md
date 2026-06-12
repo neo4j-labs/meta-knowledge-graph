@@ -224,7 +224,7 @@ safe — BigQuery tables are dropped/recreated and Neo4j MERGEs on natural keys)
 | Seeder | What it loads |
 |---|---|
 | `seed_bigquery.py` | `accounts`, `products`, `account_product_usage` (monthly time series), `account_contacts`, `account_renewals` under `$GCP_PROJECT_ID.$BIGQUERY_DATASET_ID`. |
-| `run_neocarta.py` | Neocarta catalog metadata, query-log context, then LiteLLM-powered embeddings for the seeded BigQuery dataset. Run after `seed_bigquery.py` so the warehouse tables and descriptions exist. |
+| `run_neocarta.py` | Neocarta catalog metadata, then LiteLLM-powered embeddings for the seeded BigQuery dataset. Run after `seed_bigquery.py` so the warehouse tables and descriptions exist. |
 | `seed_neo4j.py` | `:Account` / `:Product` / `:Contact` / `:CSM` nodes plus `USES_PRODUCT` (utilization, revenue), `HAS_CONTACT`, and `OWNS` relationships. |
 | `seed_learnings.py` | Bootstrap `:Learning` / `:Decision` nodes so the first session already has scoped project memory. |
 | `seed_system_prompt.py` | Persists `system_prompt.md` (the RoadFlex sales persona) as `(:SystemPrompt {name: 'default'})`. |
