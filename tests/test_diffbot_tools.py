@@ -162,6 +162,113 @@ class DiffbotToolHelperTests(unittest.TestCase):
             server.MAX_DIFFBOT_LOCATIONS,
         )
 
+    def test_diffbot_payload_compacts_entity_references(self) -> None:
+        payload = server._diffbot_response_payload(
+            FakeDiffbotResponse(
+                200,
+                {
+                    "data": [
+                        {
+                            "entity": {
+                                "name": "Acme Corp",
+                                "ceo": {
+                                    "name": "Jane Doe",
+                                    "diffbotUri": "http://diffbot.com/entity/E1",
+                                    "types": ["Person"],
+                                },
+                                "categories": [
+                                    {"name": f"Category {i}", "diffbotUri": "uri"}
+                                    for i in range(10)
+                                ],
+                                "allNames": [f"name-{i}" for i in range(10)],
+                                "locations": [
+                                    {
+                                        "address": "branch",
+                                        "city": {"name": "Berlin", "diffbotUri": "uri"},
+                                        "latitude": 52.5,
+                                        "metroArea": {"name": "Berlin metro"},
+                                    },
+                                    {
+                                        "address": "hq",
+                                        "city": {
+                                            "name": "New York City",
+                                            "diffbotUri": "uri",
+                                        },
+                                        "isPrimary": True,
+                                    },
+                                ],
+                            }
+                        }
+                    ]
+                },
+            )
+        )
+
+        entity = payload["data"][0]["entity"]
+        self.assertEqual(
+            entity["ceo"],
+            {"name": "Jane Doe", "diffbotUri": "http://diffbot.com/entity/E1"},
+        )
+        self.assertEqual(
+            entity["categories"],
+            [f"Category {i}" for i in range(server.MAX_DIFFBOT_LIST_ITEMS)],
+        )
+        self.assertEqual(len(entity["allNames"]), server.MAX_DIFFBOT_LIST_ITEMS)
+        self.assertEqual(
+            entity["locations"][0],
+            {"address": "hq", "city": "New York City", "isPrimary": True},
+        )
+        self.assertEqual(
+            entity["locations"][1],
+            {"address": "branch", "city": "Berlin"},
+        )
+
+    def test_bounded_diffbot_json_drops_heavy_fields_and_notes_truncation(self) -> None:
+        payload = {
+            "data": [
+                {
+                    "entity": {
+                        "name": "Acme Corp",
+                        "description": "x" * server.MAX_DIFFBOT_RESPONSE_CHARS,
+                        "revenue": {"value": 1},
+                    }
+                }
+            ]
+        }
+
+        text = server._bounded_diffbot_json(payload)
+
+        self.assertLessEqual(len(text), server.MAX_DIFFBOT_RESPONSE_CHARS)
+        result = json.loads(text)
+        entity = result["data"][0]["entity"]
+        self.assertNotIn("description", entity)
+        self.assertEqual(entity["revenue"], {"value": 1})
+        self.assertIn("description", result["truncated"])
+
+    def test_bounded_diffbot_json_keeps_first_match_as_last_resort(self) -> None:
+        payload = {
+            "data": [
+                {"entity": {"name": f"match-{i}", "blob": "x" * 9000}}
+                for i in range(5)
+            ]
+        }
+
+        text = server._bounded_diffbot_json(payload)
+
+        self.assertLessEqual(len(text), server.MAX_DIFFBOT_RESPONSE_CHARS)
+        result = json.loads(text)
+        self.assertEqual(len(result["data"]), 1)
+        self.assertEqual(result["data"][0]["entity"]["name"], "match-0")
+        self.assertIn("first match", result["truncated"])
+
+    def test_bounded_diffbot_json_leaves_small_payloads_untouched(self) -> None:
+        payload = {"data": [{"entity": {"name": "Acme Corp"}}]}
+
+        result = json.loads(server._bounded_diffbot_json(payload))
+
+        self.assertEqual(result, payload)
+        self.assertNotIn("truncated", result)
+
     def test_enhance_params_require_valid_entity_type(self) -> None:
         params, error = server._build_diffbot_enhance_params(
             "Company",
@@ -214,6 +321,8 @@ class DiffbotToolHelperTests(unittest.TestCase):
     def test_enhance_filter_is_sales_focused_by_entity_type(self) -> None:
         self.assertIn("homepageUri", server._diffbot_enhance_filter("Organization"))
         self.assertIn("employments", server._diffbot_enhance_filter("Person"))
+        self.assertIn("diffbotUri", server._diffbot_enhance_filter("Organization"))
+        self.assertIn("diffbotUri", server._diffbot_enhance_filter("Person"))
 
 
 if __name__ == "__main__":

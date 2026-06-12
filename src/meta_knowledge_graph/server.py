@@ -19,16 +19,31 @@ MAX_LEARNING_TEXT = 500
 DIFFBOT_API_BASE_URL = "https://kg.diffbot.com/kg/v3"
 DIFFBOT_TIMEOUT_SECONDS = 30.0
 MAX_DIFFBOT_LOCATIONS = 3
+MAX_DIFFBOT_LIST_ITEMS = 6
+MAX_DIFFBOT_RESPONSE_CHARS = 20_000
+# Nested Diffbot entity references carry diffbotUri/image/types baggage that
+# dominated oversized enhance responses. Place refs collapse to their name;
+# person/org refs keep name + Diffbot id so they can be written back to Neo4j.
+DIFFBOT_PLACE_REF_KEYS = {"city", "region", "country"}
+DIFFBOT_AGENT_REF_KEYS = {"ceo", "employer", "parentCompany"}
+# Dropped in order, payload-wide, while a response still exceeds the char budget.
+DIFFBOT_HEAVY_FIELD_DROP_ORDER = (
+    "locations",
+    "categories",
+    "allNames",
+    "description",
+    "summary",
+)
 DIFFBOT_NEWS_FILTER = (
     "title pageUrl siteName date author sentiment tags.label publisherCountry"
 )
 DIFFBOT_ORGANIZATION_ENHANCE_FILTER = (
-    "name allNames homepageUri linkedInUri twitterUri description summary "
-    "industries categories nbEmployees revenue locations ceo"
+    "name allNames diffbotUri homepageUri linkedInUri twitterUri description "
+    "summary industries categories nbEmployees revenue locations ceo"
 )
 DIFFBOT_PERSON_ENHANCE_FILTER = (
-    "name allNames linkedInUri twitterUri description summary location "
-    "employments skills"
+    "name allNames diffbotUri linkedInUri twitterUri description summary "
+    "location employments skills"
 )
 DIFFBOT_PERSON_ONLY_ENHANCE_FIELDS = {"email", "employer", "title"}
 DIFFBOT_ENHANCE_IDENTIFIER_FIELDS = {
@@ -152,22 +167,115 @@ def _diffbot_enhance_filter(entity_type: str) -> str:
     return DIFFBOT_ORGANIZATION_ENHANCE_FILTER
 
 
-def _limit_diffbot_locations(value: Any) -> Any:
+def _entity_ref_name(value: Any) -> Any:
+    if isinstance(value, dict):
+        return value.get("name", value)
+    return value
+
+
+def _compact_diffbot_ref(value: Any) -> Any:
+    """Keep name + Diffbot id for a person/organization reference."""
+    if not isinstance(value, dict):
+        return value
+    compact = {
+        "name": value.get("name"),
+        "diffbotUri": value.get("diffbotUri") or value.get("targetDiffbotId"),
+    }
+    compact = {key: child for key, child in compact.items() if child is not None}
+    return compact or value
+
+
+def _compact_diffbot_location(location: Any) -> Any:
+    if not isinstance(location, dict):
+        return location
+    compact = {
+        "address": location.get("address"),
+        "city": _entity_ref_name(location.get("city")),
+        "region": _entity_ref_name(location.get("region")),
+        "country": _entity_ref_name(location.get("country")),
+        "isPrimary": location.get("isPrimary"),
+    }
+    return {key: value for key, value in compact.items() if value is not None}
+
+
+def _compact_diffbot_payload(value: Any) -> Any:
+    """Slim nested entity references and cap list fields.
+
+    Applied to every response, so the no-filter retry path is covered too: a
+    single unfiltered Organization can blow the MCP output limit on its
+    locations alone.
+    """
     if isinstance(value, list):
-        return [_limit_diffbot_locations(item) for item in value]
+        return [_compact_diffbot_payload(item) for item in value]
     if not isinstance(value, dict):
         return value
 
-    limited = {}
+    compacted: dict[str, Any] = {}
     for key, child in value.items():
         if key == "locations" and isinstance(child, list):
-            limited[key] = [
-                _limit_diffbot_locations(item)
-                for item in child[:MAX_DIFFBOT_LOCATIONS]
+            primary_first = sorted(
+                child,
+                key=lambda loc: not (isinstance(loc, dict) and loc.get("isPrimary")),
+            )
+            compacted[key] = [
+                _compact_diffbot_location(item)
+                for item in primary_first[:MAX_DIFFBOT_LOCATIONS]
             ]
+        elif key == "location" and isinstance(child, dict):
+            compacted[key] = _compact_diffbot_location(child)
+        elif key == "categories" and isinstance(child, list):
+            compacted[key] = [
+                _entity_ref_name(item) for item in child[:MAX_DIFFBOT_LIST_ITEMS]
+            ]
+        elif key == "allNames" and isinstance(child, list):
+            compacted[key] = child[:MAX_DIFFBOT_LIST_ITEMS]
+        elif key in DIFFBOT_PLACE_REF_KEYS:
+            compacted[key] = _entity_ref_name(child)
+        elif key in DIFFBOT_AGENT_REF_KEYS:
+            compacted[key] = _compact_diffbot_ref(child)
         else:
-            limited[key] = _limit_diffbot_locations(child)
-    return limited
+            compacted[key] = _compact_diffbot_payload(child)
+    return compacted
+
+
+def _bounded_diffbot_json(payload: Any) -> str:
+    """Serialize a Diffbot payload, shedding heavy fields while over budget."""
+    text = json.dumps(payload, default=str)
+    if len(text) <= MAX_DIFFBOT_RESPONSE_CHARS or not isinstance(payload, dict):
+        return text
+
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return text
+
+    entities = [
+        item["entity"]
+        for item in data
+        if isinstance(item, dict) and isinstance(item.get("entity"), dict)
+    ]
+    dropped: list[str] = []
+    for field in DIFFBOT_HEAVY_FIELD_DROP_ORDER:
+        if not any(field in entity for entity in entities):
+            continue
+        for entity in entities:
+            entity.pop(field, None)
+        dropped.append(field)
+        payload["truncated"] = (
+            "dropped " + ", ".join(dropped) + " to fit the response budget"
+        )
+        text = json.dumps(payload, default=str)
+        if len(text) <= MAX_DIFFBOT_RESPONSE_CHARS:
+            return text
+
+    if len(data) > 1:
+        payload["data"] = data[:1]
+        payload["truncated"] = (
+            payload["truncated"] + "; kept only the first match"
+            if dropped
+            else "kept only the first match to fit the response budget"
+        )
+        text = json.dumps(payload, default=str)
+    return text
 
 
 def _diffbot_response_payload(response: httpx.Response) -> dict[str, Any]:
@@ -182,11 +290,11 @@ def _diffbot_response_payload(response: httpx.Response) -> dict[str, Any]:
             "status": "error",
             "status_code": response.status_code,
             "error": message or response.reason_phrase,
-            "response": _limit_diffbot_locations(payload),
+            "response": _compact_diffbot_payload(payload),
         }
 
     payload = payload if isinstance(payload, dict) else {"data": payload}
-    return _limit_diffbot_locations(payload)
+    return _compact_diffbot_payload(payload)
 
 
 async def _diffbot_get_json(path: str, params: dict[str, Any]) -> str:
@@ -218,7 +326,7 @@ async def _diffbot_get_json(path: str, params: dict[str, Any]) -> str:
     except httpx.HTTPError as e:
         return _json_error(f"Diffbot request failed: {e}")
 
-    return json.dumps(_diffbot_response_payload(response), default=str)
+    return _bounded_diffbot_json(_diffbot_response_payload(response))
 
 
 logger = logging.getLogger(__name__)

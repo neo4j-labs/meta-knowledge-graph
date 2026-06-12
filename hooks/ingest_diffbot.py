@@ -59,6 +59,29 @@ FOREACH (_ IN CASE WHEN row.entity_kind = 'person' THEN [1] ELSE [] END |
     REMOVE e:DiffbotOrganization
 )
 WITH e, row
+FOREACH (ceo IN CASE WHEN row.ceo IS NULL THEN [] ELSE [row.ceo] END |
+    MERGE (p:DiffbotEntity {id: ceo.id})
+    ON CREATE SET p.first_seen_at = $timestamp
+    SET p:DiffbotPerson,
+        p.entity_type = 'Person',
+        p.name = coalesce(ceo.name, p.name),
+        p.source = 'diffbot',
+        p.last_seen_at = $timestamp
+    MERGE (e)-[cr:HAS_CEO]->(p)
+    ON CREATE SET cr.created_at = $timestamp
+)
+FOREACH (employer IN row.employer_refs |
+    MERGE (o:DiffbotEntity {id: employer.id})
+    ON CREATE SET o.first_seen_at = $timestamp
+    SET o:DiffbotOrganization,
+        o.entity_type = 'Organization',
+        o.name = coalesce(employer.name, o.name),
+        o.source = 'diffbot',
+        o.last_seen_at = $timestamp
+    MERGE (e)-[er:EMPLOYED_BY]->(o)
+    ON CREATE SET er.created_at = $timestamp
+)
+WITH e, row
 CALL (e, row) {
     MATCH (a:Account)
     WHERE (row.domain IS NOT NULL AND a.domain = row.domain)
@@ -264,16 +287,37 @@ def _canonical_entity_type(kind: str | None) -> str | None:
     return None
 
 
-def _employment_names(value: Any) -> list[str]:
-    names: list[str] = []
+def _entity_ref(value: Any) -> dict[str, Any] | None:
+    """Normalize a compacted person/org reference (or plain name) to {id, name}."""
+    name = _label(value)
+    uri = value.get("diffbotUri") if isinstance(value, dict) else None
+    if not (isinstance(uri, str) and uri.strip()):
+        uri = None
+    if not name and not uri:
+        return None
+    ref_id = uri or "diffbot-ref:" + sha1(name.strip().lower().encode()).hexdigest()[:16]
+    return _compact({"id": ref_id, "name": name})
+
+
+def _employment_refs(value: Any) -> list[dict[str, Any]]:
+    """Unique employer references, preferring entries that carry a Diffbot id."""
+    refs: dict[str, dict[str, Any]] = {}
     for employment in value if isinstance(value, list) else []:
         if not isinstance(employment, dict):
             continue
-        employer = employment.get("employer")
-        label = _label(employer) or _label(employment.get("organization"))
-        if label:
-            names.append(label)
-    return names
+        ref = _entity_ref(employment.get("employer")) or _entity_ref(
+            employment.get("organization")
+        )
+        if not ref:
+            continue
+        key = (ref.get("name") or ref["id"]).strip().lower()
+        existing = refs.get(key)
+        if existing is None or (
+            existing["id"].startswith("diffbot-ref:")
+            and not ref["id"].startswith("diffbot-ref:")
+        ):
+            refs[key] = ref
+    return list(refs.values())
 
 
 def _news_companies(tags: Any) -> list[dict[str, Any]]:
@@ -314,9 +358,13 @@ def _location_summary(value: Any) -> str | None:
         if not isinstance(location, dict):
             continue
         parts = [
-            part["name"]
-            for part in (location.get("city"), location.get("region"), location.get("country"))
-            if isinstance(part, dict) and part.get("name")
+            label
+            for label in (
+                _label(location.get("city")),
+                _label(location.get("region")),
+                _label(location.get("country")),
+            )
+            if label
         ]
         if parts:
             return ", ".join(parts)
@@ -341,13 +389,21 @@ def _enhance_rows(payload: dict[str, Any], tool_input: dict[str, Any]) -> list[d
         if not entity_id:
             entity_id = "sha1:" + sha1(f"{name}|{domain}".encode()).hexdigest()[:16]
         revenue = entity.get("revenue") if isinstance(entity.get("revenue"), dict) else {}
-        ceo = entity.get("ceo") if isinstance(entity.get("ceo"), dict) else {}
+        ceo_ref = _entity_ref(entity.get("ceo"))
         kind = _entity_kind(entity.get("type"), tool_input.get("entity_type"))
         entity_type = _canonical_entity_type(kind) or entity.get("type") or tool_input.get("entity_type")
-        employer_names = _employment_names(entity.get("employments"))
+        employer_refs = _employment_refs(entity.get("employments"))
         employer_hint = tool_input.get("employer")
         if isinstance(employer_hint, str) and employer_hint.strip():
-            employer_names.append(employer_hint.strip())
+            hint_key = employer_hint.strip().lower()
+            if all(
+                (ref.get("name") or "").strip().lower() != hint_key
+                for ref in employer_refs
+            ):
+                hint_ref = _entity_ref(employer_hint.strip())
+                if hint_ref:
+                    employer_refs.append(hint_ref)
+        employer_names = [ref["name"] for ref in employer_refs if ref.get("name")]
         props = _compact(
             {
                 "name": name,
@@ -364,7 +420,7 @@ def _enhance_rows(payload: dict[str, Any], tool_input: dict[str, Any]) -> list[d
                 "nb_employees": entity.get("nbEmployees"),
                 "revenue_value": revenue.get("value"),
                 "revenue_currency": revenue.get("currency"),
-                "ceo": ceo.get("name"),
+                "ceo": (ceo_ref or {}).get("name"),
                 "industries": _labels(entity.get("industries")),
                 "categories": _labels(entity.get("categories")),
                 "location": _location_summary(entity.get("locations")),
@@ -387,6 +443,8 @@ def _enhance_rows(payload: dict[str, Any], tool_input: dict[str, Any]) -> list[d
                 "domain": domain,
                 "name_keys": sorted(name_keys),
                 "props": props,
+                "ceo": ceo_ref,
+                "employer_refs": employer_refs,
             }
         )
     return rows
