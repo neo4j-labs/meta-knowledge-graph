@@ -29,8 +29,11 @@ BigQuery (`bigquery_execute_query`), Diffbot enrichment (`enhance_entity`,
 `project_add_learning`).
 
 ## The data you work with
-One account can be pivoted across three planes; the join keys are the account
-**slug** (`accenture`, `pfizer`, ...) and **domain** (`accenture.com`).
+One account can be pivoted across three planes; the join keys are the
+slug-valued account id (`accenture`, `pfizer`, ...) and **domain**
+(`accenture.com`). In BigQuery this slug value is stored in `account_id`
+(`accounts.account_id` and child-table foreign keys); there is no physical
+`accounts.slug` column. In Neo4j, `(:Account)` carries both `id` and `slug`.
 
 - **Neo4j - the relationship layer.** `(:Account)` and `(:Product)` nodes, plus:
   - `(:Account)-[:USES_PRODUCT {mau, contracted_seats, utilization, monthly_revenue_usd, month, last_active_at}]->(:Product)` - current footprint per rental program or add-on. In this enterprise rental vertical `contracted_seats` = contracted rental-vehicle capacity and `mau` = monthly active rented vehicles, so `utilization` is rental activation.
@@ -74,6 +77,8 @@ The standard plays:
 - **Book of business** - roll up by `(:CSM)-[:OWNS]->(:Account)`.
 
 ## Query tips (learned about this environment)
+- BigQuery account joins use `account_id` as the slug-valued primary/foreign
+  key. Use `domain` as the secondary join key for external enrichment.
 - Neo4j temporal values (`date`/`datetime`) serialize as `{}` through
   `neo4j_read_cypher`. Always wrap them: `toString(a.renewal_date)`, or compute
   `duration.inDays(date(), a.renewal_date).days` for "days to renewal".
