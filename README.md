@@ -185,43 +185,72 @@ harness produced the events.
 The repo ships a complete demo persona in [`import/sales_agent/`](import/sales_agent/):
 a sales / customer-success intelligence assistant working a book of ~48
 enterprise car-rental customer accounts for **RoadFlex** (a corporate mobility
-provider). It exercises every layer of the system: BigQuery as the system of
-record, Neo4j as the relationship graph, Diffbot for external signal, a
-persisted `(:SystemPrompt)` persona, and bootstrap learnings so the very first
-session starts with scoped project memory.
+provider). The minimum setup needs only Neo4j plus OpenAI: seed a blank Neo4j
+database with the RoadFlex graph, persona, and bootstrap learnings, then start a
+session. BigQuery/Neocarta and Diffbot are optional add-ons for warehouse
+queries, catalog search, firmographics, and live news.
 
 ### 1. Configure `.env`
 
 Create `.env` at the repo root (both the seeders and the hooks load it):
 
 ```bash
-# Neo4j — required
+# Required: Neo4j graph
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=<your-password>
 NEO4J_DATABASE=neo4j
 
-# LLM — required for memory extraction and prompt rebuilds
+# Required: LLM calls for memory extraction and prompt rebuilds
 OPENAI_API_KEY=<your-openai-api-key>
 
-# BigQuery warehouse + Neocarta catalog — required for the warehouse half
+# Optional: Diffbot live news / firmographic enrichment
+DIFFBOT_TOKEN=<your-diffbot-token>
+
+# Optional: BigQuery warehouse + Neocarta catalog
 GCP_PROJECT_ID=<your-gcp-project>
 BIGQUERY_DATASET_ID=acme_corp
 BIGQUERY_MCP_URL=https://bigquery.googleapis.com/mcp
 GOOGLE_APPLICATION_CREDENTIALS=<path-to-service-account.json>  # or GCP_SERVICE_ACCOUNT_JSON inline
-
-# Diffbot — required for live news / firmographic enrichment
-DIFFBOT_TOKEN=<your-diffbot-token>
 ```
 
-### 2. Seed everything
+### 2. Seed the minimum graph
+
+You can start from a blank Neo4j database. This path does not require BigQuery
+or Diffbot:
+
+```bash
+uv run python import/sales_agent/seed_neo4j.py
+uv run python import/sales_agent/seed_learnings.py
+uv run python import/sales_agent/seed_system_prompt.py
+```
+
+Each seeder is independently re-runnable. Neo4j seeders MERGE on natural keys;
+seed-owned `USES_PRODUCT` and `HAS_CONTACT` relationships are refreshed so a
+re-run reflects the current deterministic dataset.
+
+Optional add-ons:
+
+- **Diffbot:** set `DIFFBOT_TOKEN` and restart the MCP server. No seeding step
+  is required; `search_news` and `enhance_entity` appear when the token is set.
+- **BigQuery + Neocarta:** authenticate to GCP, set `GCP_PROJECT_ID`,
+  `BIGQUERY_DATASET_ID`, and `BIGQUERY_MCP_URL`, then seed the warehouse and
+  catalog:
+
+```bash
+uv run python import/sales_agent/seed_bigquery.py
+uv run python import/sales_agent/run_neocarta.py
+```
+
+You can also use the orchestrator. It verifies the mandatory Neo4j connection,
+runs the minimum Neo4j-backed seeders, and runs the optional BigQuery/Neocarta
+seeders only when GCP env/auth is available:
 
 ```bash
 uv run python import/sales_agent/seed_all.py
 ```
 
-This runs five seeders in order (each independently re-runnable; re-running is
-safe — BigQuery tables are dropped/recreated and Neo4j MERGEs on natural keys):
+`seed_all.py` can run these seeders:
 
 | Seeder | What it loads |
 |---|---|
@@ -242,10 +271,11 @@ Follow the Quick Start above for your harness — Claude Code via
 [`.codex/config.toml`](.codex/config.toml) and
 [`.codex/hooks.json`](.codex/hooks.json), or any custom harness that can spawn
 an MCP server and fire lifecycle hooks.
-With `GCP_PROJECT_ID` / `BIGQUERY_DATASET_ID` / `OPENAI_API_KEY` set the server
-mounts the `neocarta_*` catalog tools, with `BIGQUERY_MCP_URL` set it mounts
-`bigquery_execute_query`, and with `DIFFBOT_TOKEN` set it mounts `search_news`
-and `enhance_entity`.
+The Neo4j-backed memory and graph tools mount in the minimum setup. With
+`DIFFBOT_TOKEN` set, the server mounts `search_news` and `enhance_entity`. With
+`BIGQUERY_MCP_URL` set and Google auth available, it mounts
+`bigquery_execute_query`; with `GCP_PROJECT_ID` / `BIGQUERY_DATASET_ID` /
+`OPENAI_API_KEY` set, it also mounts the `neocarta_*` catalog tools.
 
 ### 4. Start a session
 
@@ -271,18 +301,18 @@ persona prompt keeps improving itself via `:SystemPromptSuggestion` rebuilds.
 | `NEO4J_PASSWORD` | `--password` | `password` | |
 | `NEO4J_DATABASE` | `--database` | `neo4j` | |
 | `NEO4J_TRANSPORT` | `--transport` | `stdio` | |
-| `OPENAI_API_KEY` | — | — | Required by `process_project.py`, the prompt rebuild hooks, and Neocarta. |
+| `OPENAI_API_KEY` | — | — | Required by `process_project.py` and the prompt rebuild hooks; also used by Neocarta embeddings when that optional catalog is enabled. |
 | `DIFFBOT_TOKEN` | — | — | Enables `search_news` and `enhance_entity` when set. |
 | `LLM_MODEL` | — | `gpt-5.4-mini` | The single model knob for every LLM call: memory extraction and both prompt rebuilds. |
 | `MKG_PROMPT_REBUILD_MIN_HOURS` | — | `8` | Minimum hours between prompt rebuilds on Stop (system prompt and memory extraction prompt alike). |
 | `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` | — | `2` | Pending candidate suggestions required before a rebuild runs (both rebuilds). |
 | `MKG_PROMPT_MAX_CHARS` | — | `12000` | Length budget for a rebuilt prompt (both rebuilds). |
-| `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID` | — | — | Required (with `OPENAI_API_KEY`) to mount the Neocarta catalog tools; `GCP_PROJECT_ID` is also the project queried by `bigquery_execute_query`. |
-| `BIGQUERY_MCP_URL` | — | — | Mounts `bigquery_execute_query` when set, e.g. `https://bigquery.googleapis.com/mcp`. For `googleapis.com` URLs a Google ADC bearer token is fetched automatically. |
+| `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID` | — | — | Optional BigQuery/Neocarta settings. Required, with `OPENAI_API_KEY`, to mount the Neocarta catalog tools; `GCP_PROJECT_ID` is also the project queried by `bigquery_execute_query`. |
+| `BIGQUERY_MCP_URL` | — | — | Optional. Mounts `bigquery_execute_query` when set, e.g. `https://bigquery.googleapis.com/mcp`. For `googleapis.com` URLs a Google ADC bearer token is fetched automatically. |
 | `BIGQUERY_MCP_AUTH`, `BIGQUERY_MCP_HEADERS` | — | — | Optional explicit bearer token / JSON dict of extra headers for the BigQuery MCP endpoint. |
 | `BIGQUERY_REGION`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | — | — | Optional; forwarded to the Neocarta subprocess when set. `BIGQUERY_REGION` (default `US`) also sets the dataset location when seeding the sales-agent demo. |
 | `GCP_BILLING_PROJECT_ID` | — | falls back to `GCP_PROJECT_ID` | Optional billing project for the sales-agent BigQuery seeder. |
-| `GCP_SERVICE_ACCOUNT_JSON` / `GOOGLE_APPLICATION_CREDENTIALS` | — | — | Optional GCP auth for Neocarta: inline service-account JSON (written to a temp file) or a credentials file path. |
+| `GCP_SERVICE_ACCOUNT_JSON` / `GOOGLE_APPLICATION_CREDENTIALS` | — | — | GCP auth for optional BigQuery seeding and Neocarta when application-default credentials are not already available: inline service-account JSON (written to a temp file) or a credentials file path. |
 
 ## TODO / Roadmap
 

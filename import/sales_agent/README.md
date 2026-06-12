@@ -3,9 +3,10 @@
 A self-contained demo **dataset + persona** for the Meta Knowledge Graph: a
 sales / customer-success intelligence assistant working a book of ~48
 enterprise car-rental customer accounts for RoadFlex (a corporate mobility and
-rental-car provider). It seeds a BigQuery warehouse, a Neocarta catalog in
-Neo4j, a Neo4j relationship graph, and a `(:SystemPrompt)` persona that the
-SessionStart hook injects.
+rental-car provider). The minimum setup seeds a blank Neo4j database with the
+RoadFlex relationship graph, bootstrap project memory, and a `(:SystemPrompt)`
+persona that the SessionStart hook injects. BigQuery/Neocarta and Diffbot are
+optional add-ons.
 
 ## Layout
 
@@ -18,22 +19,55 @@ SessionStart hook injects.
 | `seed_learnings.py` | Seeds bootstrap `:Learning` / `:Decision` nodes so the first session starts with scoped project memory. |
 | `seed_system_prompt.py` | Persists `system_prompt.md` to a `(:SystemPrompt)` node. |
 | `system_prompt.md` | The sales-assistant persona prompt. |
-| `seed_all.py` | Runs all of the above, including Neocarta. |
+| `seed_all.py` | Runs the mandatory Neo4j-backed seeders, plus BigQuery/Neocarta when configured and reachable. |
 
 ## Seed it
 
-Requires the repo `.env` (Neo4j + GCP credentials). From the repo root:
+Requires the repo `.env`. Neo4j and OpenAI are the only mandatory settings for
+the sales-agent experience:
 
 ```bash
-# everything (data + catalog + active default persona)
-uv run python import/sales_agent/seed_all.py
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=<your-password>
+NEO4J_DATABASE=neo4j
+OPENAI_API_KEY=<your-openai-api-key>
+```
 
-# or run pieces individually
-uv run python import/sales_agent/seed_bigquery.py
-uv run python import/sales_agent/run_neocarta.py
+From the repo root, seed the minimum Neo4j-backed demo:
+
+```bash
 uv run python import/sales_agent/seed_neo4j.py
 uv run python import/sales_agent/seed_learnings.py
 uv run python import/sales_agent/seed_system_prompt.py
+```
+
+Diffbot needs only a token; set `DIFFBOT_TOKEN` and restart the MCP server to
+enable `enhance_entity` and `search_news`.
+
+BigQuery needs Google auth plus a warehouse seed. Configure application-default
+credentials, `GOOGLE_APPLICATION_CREDENTIALS`, or `GCP_SERVICE_ACCOUNT_JSON`,
+then set:
+
+```bash
+GCP_PROJECT_ID=<your-gcp-project>
+BIGQUERY_DATASET_ID=acme_corp
+BIGQUERY_MCP_URL=https://bigquery.googleapis.com/mcp
+```
+
+Then seed the warehouse and catalog:
+
+```bash
+uv run python import/sales_agent/seed_bigquery.py
+uv run python import/sales_agent/run_neocarta.py
+```
+
+This convenience command verifies the mandatory Neo4j connection, runs the
+minimum Neo4j-backed seeders, and runs the optional warehouse/catalog seeders
+only when GCP env/auth is available:
+
+```bash
+uv run python import/sales_agent/seed_all.py
 ```
 
 Re-running is safe: the data is generated from a fixed seed, BigQuery tables are
