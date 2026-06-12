@@ -67,6 +67,7 @@ live in `hooks/`.
 | `Stop` | `hooks/apply_system_prompt.py` | Rate-limited rebuild of the live `(:SystemPrompt)`. Runs in the background on every Stop but only acts when at least `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` candidate suggestions are pending **and** `MKG_PROMPT_REBUILD_MIN_HOURS` have passed since the last rebuild (gate + claim in one conditional write, so concurrent Stops can't double-rebuild). Seeds the prompt node from the default if it doesn't exist, snapshots the previous content as `(:SystemPromptVersion)`, folds suggestions in via LLM (verbatim append under a learned-notes section when `OPENAI_API_KEY` is absent), and marks each suggestion `applied` or `rejected`. |
 | `Stop` | `hooks/apply_memory_extraction_prompt.py` | Rate-limited rebuild of the live `(:MemoryExtractionPrompt)`. It mirrors `apply_system_prompt.py` and shares the same `MKG_PROMPT_REBUILD_*` / `MKG_PROMPT_MAX_CHARS` knobs: gates on pending `:MemoryExtractionPromptSuggestion` nodes, snapshots prior content as `(:MemoryExtractionPromptVersion)`, preserves required runtime tokens, and marks suggestions `applied` or `rejected`. |
 | `PostToolUse` (matcher on the Diffbot tools `enhance_entity` / `search_news`) | `hooks/ingest_diffbot.py` | Builds Diffbot tool results back into the graph instead of letting them evaporate with the conversation. `enhance_entity` firmographics become `(:Account)-[:HAS_ENRICHMENT]→(:DiffbotEntity:DiffbotOrganization)` or `(:DiffbotEntity:DiffbotPerson)` (matched on domain, name/`allNames`, and employer hints); `search_news` articles become `(:NewsArticle)-[:MENTIONS]→(:Account)` plus `[:MENTIONS]→(:DiffbotOrganization)` when organization tags or account matches identify companies, and `[:TAGGED]→(:NewsTag)`. Diffbot entities and articles link `[:CAPTURED_IN]→(:Session)` for provenance. Handles the harness's response wrappers, including oversized results that arrive as a saved-to-file notice. |
+| `PostToolUse` (matcher on the query tools `bigquery_execute_query` / `neo4j_read_cypher`) | `hooks/capture_query_failures.py` | Captures failed or suspicious query outputs as structured `(:QueryExecution)-[:HAS_ISSUE]→(:QueryIssue)` artifacts. The first pass records issues visible in PostToolUse payloads: empty result sets, parser/schema/permission/resource/capability errors, malformed outputs, and Neo4j serialization cases such as temporal values returned as `{}`. Clean successful query results are ignored. |
 
 ### Graph model
 
@@ -99,6 +100,10 @@ live in `hooks/`.
 (:NewsArticle)─[:MENTIONS]→ (:DiffbotOrganization)
 (:NewsArticle)─[:TAGGED]→ (:NewsTag)
 (:NewsArticle)─[:CAPTURED_IN]→ (:Session)
+
+# Produced by hooks/capture_query_failures.py (PostToolUse on query tools):
+(:Project)─[:HAS_QUERY_EXECUTION]→ (:QueryExecution) ←[:HAS_QUERY_EXECUTION]─(:Session)
+(:QueryExecution)─[:HAS_ISSUE]→ (:QueryIssue)
 ```
 
 Candidate learnings flow through retrieval but are review-gated — they stay

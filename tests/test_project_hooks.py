@@ -382,6 +382,38 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("hooks/log_event.py", prompt_hooks[1]["command"])
         self.assertIn("--client codex", prompt_hooks[1]["command"])
 
+    def test_codex_post_tool_use_captures_query_failures(self) -> None:
+        config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
+        post_tool_groups = config["hooks"]["PostToolUse"]
+        query_groups = [
+            group
+            for group in post_tool_groups
+            if "bigquery_execute_query" in group.get("matcher", "")
+            and "neo4j_read_cypher" in group.get("matcher", "")
+        ]
+
+        self.assertEqual(len(query_groups), 1)
+        commands = [hook["command"] for hook in query_groups[0]["hooks"]]
+        self.assertTrue(
+            any("hooks/capture_query_failures.py" in command for command in commands)
+        )
+
+    def test_claude_post_tool_use_captures_query_failures(self) -> None:
+        config = json.loads((ROOT / ".claude" / "settings.json").read_text())
+        post_tool_groups = config["hooks"]["PostToolUse"]
+        query_groups = [
+            group
+            for group in post_tool_groups
+            if "bigquery_execute_query" in group.get("matcher", "")
+            and "neo4j_read_cypher" in group.get("matcher", "")
+        ]
+
+        self.assertEqual(len(query_groups), 1)
+        commands = [hook["command"] for hook in query_groups[0]["hooks"]]
+        self.assertTrue(
+            any("hooks/capture_query_failures.py" in command for command in commands)
+        )
+
     def test_codex_logs_documented_lifecycle_events_without_session_end(self) -> None:
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
         expected_logged_events = {

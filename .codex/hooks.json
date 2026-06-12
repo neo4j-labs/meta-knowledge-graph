@@ -70,6 +70,15 @@
             "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/ingest_diffbot.py\""
           }
         ]
+      },
+      {
+        "matcher": ".*(bigquery_execute_query|neo4j_read_cypher)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/capture_query_failures.py\""
+          }
+        ]
       }
     ],
     "PreCompact": [
