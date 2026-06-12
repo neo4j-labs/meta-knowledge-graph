@@ -38,7 +38,7 @@ class DiffbotIngestTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["entity_kind"], "organization")
         self.assertEqual(rows[0]["domain"], "acme.com")
-        self.assertEqual(rows[0]["props"]["entity_type"], "Organization")
+        self.assertNotIn("entity_type", rows[0]["props"])
         self.assertEqual(rows[0]["props"]["ceo"], "Jane Doe")
         self.assertEqual(
             rows[0]["ceo"],
@@ -74,7 +74,6 @@ class DiffbotIngestTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["entity_kind"], "person")
-        self.assertEqual(rows[0]["props"]["entity_type"], "Person")
         self.assertEqual(rows[0]["props"]["employers"], ["Acme Corp"])
         self.assertIsNone(rows[0]["ceo"])
         self.assertEqual(
@@ -83,7 +82,7 @@ class DiffbotIngestTests(unittest.TestCase):
         )
         self.assertIn("acme corp", rows[0]["name_keys"])
 
-    def test_enhance_rows_id_employer_hint_without_duplicating_named_refs(self) -> None:
+    def test_enhance_rows_drop_refs_without_diffbot_id(self) -> None:
         rows = ingest_diffbot._enhance_rows(
             {
                 "data": [
@@ -93,7 +92,19 @@ class DiffbotIngestTests(unittest.TestCase):
                             "type": "Person",
                             "name": "Sam Seller",
                             "employments": [
-                                {"employer": {"name": "Acme Corp"}},
+                                {"employer": {"name": "and CEO of Acme"}},
+                                {
+                                    "employer": {
+                                        "name": "Acme Corp",
+                                        "diffbotUri": "https://diffbot.com/entity/EAcme",
+                                    }
+                                },
+                                {
+                                    "employer": {
+                                        "name": "Acme",
+                                        "diffbotUri": "http://diffbot.com/entity/EAcme",
+                                    }
+                                },
                             ],
                         }
                     }
@@ -102,11 +113,29 @@ class DiffbotIngestTests(unittest.TestCase):
             {"entity_type": "Person", "employer": "Globex"},
         )
 
-        refs = rows[0]["employer_refs"]
-        self.assertEqual([ref["name"] for ref in refs], ["Acme Corp", "Globex"])
-        for ref in refs:
-            self.assertTrue(ref["id"].startswith("diffbot-ref:"))
-        self.assertNotEqual(refs[0]["id"], refs[1]["id"])
+        # The malformed name-only employer produces no node ref, and the
+        # https/http URI variants converge on one canonical id.
+        self.assertEqual(
+            rows[0]["employer_refs"],
+            [{"id": "http://diffbot.com/entity/EAcme", "name": "Acme Corp"}],
+        )
+        self.assertEqual(rows[0]["props"]["employers"], ["Acme Corp"])
+        # The employer hint still participates in account matching without
+        # fabricating an organization node.
+        self.assertIn("globex", rows[0]["name_keys"])
+
+    def test_enhance_rows_skip_entities_without_id_or_kind(self) -> None:
+        rows = ingest_diffbot._enhance_rows(
+            {
+                "data": [
+                    {"entity": {"type": "Person", "name": "No Id Person"}},
+                    {"entity": {"id": "x-1", "name": "No Kind Entity"}},
+                ]
+            },
+            {},
+        )
+
+        self.assertEqual(rows, [])
 
     def test_news_rows_extract_organization_tags_as_companies(self) -> None:
         rows = ingest_diffbot._news_rows(
@@ -126,6 +155,10 @@ class DiffbotIngestTests(unittest.TestCase):
                                     "label": "Jane Buyer",
                                     "types": [{"name": "Person"}],
                                 },
+                                {
+                                    "label": "Untagged Org",
+                                    "types": [{"name": "Organization"}],
+                                },
                             ],
                         }
                     }
@@ -135,7 +168,10 @@ class DiffbotIngestTests(unittest.TestCase):
         )
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["account_keys"], ["acme corp", "jane buyer"])
+        self.assertEqual(
+            rows[0]["account_keys"], ["acme corp", "jane buyer", "untagged org"]
+        )
+        # Organization tags without any Diffbot id are dropped from companies.
         self.assertEqual(
             rows[0]["companies"],
             [
@@ -143,7 +179,6 @@ class DiffbotIngestTests(unittest.TestCase):
                     "id": "diffbot://org/acme",
                     "props": {
                         "name": "Acme Corp",
-                        "entity_type": "Organization",
                         "diffbot_uri": "diffbot://org/acme",
                     },
                 }

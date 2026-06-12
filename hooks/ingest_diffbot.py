@@ -9,12 +9,19 @@ internal account record instead of evaporating with the conversation.
 
 Graph shape::
 
-    (Account)-[:HAS_ENRICHMENT]->(DiffbotEntity:DiffbotOrganization)
-    (Account)-[:HAS_ENRICHMENT]->(DiffbotEntity:DiffbotPerson)
+    (Account)-[:HAS_ENRICHMENT]->(DiffbotOrganization)
+    (Account)-[:HAS_ENRICHMENT]->(DiffbotPerson)
+    (DiffbotOrganization)-[:HAS_CEO]->(DiffbotPerson)
+    (DiffbotPerson)-[:EMPLOYED_BY]->(DiffbotOrganization)
     (NewsArticle)-[:MENTIONS]->(Account)           # matched internal account
     (NewsArticle)-[:MENTIONS]->(DiffbotOrganization)
     (NewsArticle)-[:TAGGED]->(NewsTag)
-    (DiffbotEntity|NewsArticle)-[:CAPTURED_IN]->(Session)
+    (DiffbotPerson|DiffbotOrganization|NewsArticle)-[:CAPTURED_IN]->(Session)
+
+Only entities that arrive with a real Diffbot id are written back; references
+without one (malformed employer strings, unresolved news tags) are dropped
+rather than keyed on synthetic hashes. diffbot.com entity URIs are normalized
+to one scheme so the enhance and news paths converge on the same node.
 
 Accounts are matched on domain (enhance) and on lowercased account or employer
 name against article tag labels / quoted DQL terms (news); payloads that match
@@ -27,7 +34,6 @@ import json
 import re
 import sys
 from datetime import datetime, timezone
-from hashlib import sha1
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -43,39 +49,29 @@ NEWS_SUFFIX = "search_news"
 DQL_TERM_PATTERN = re.compile(r'(?:tags\.label|text):"([^"]+)"')
 SAVED_OUTPUT_PATTERN = re.compile(r"saved to (.+?\.txt)\.?(?:\n|$)", re.IGNORECASE)
 
-ENHANCE_CYPHER = """
+KIND_LABELS = {"organization": "DiffbotOrganization", "person": "DiffbotPerson"}
+
+ENHANCE_CYPHER_TEMPLATE = """
 UNWIND $rows AS row
-MERGE (e:DiffbotEntity {id: row.id})
+MERGE (e:__LABEL__ {id: row.id})
 ON CREATE SET e.first_seen_at = $timestamp
 SET e += row.props,
     e.source = 'diffbot',
     e.last_enriched_at = $timestamp
-FOREACH (_ IN CASE WHEN row.entity_kind = 'organization' THEN [1] ELSE [] END |
-    SET e:DiffbotOrganization
-    REMOVE e:DiffbotPerson
-)
-FOREACH (_ IN CASE WHEN row.entity_kind = 'person' THEN [1] ELSE [] END |
-    SET e:DiffbotPerson
-    REMOVE e:DiffbotOrganization
-)
 WITH e, row
 FOREACH (ceo IN CASE WHEN row.ceo IS NULL THEN [] ELSE [row.ceo] END |
-    MERGE (p:DiffbotEntity {id: ceo.id})
+    MERGE (p:DiffbotPerson {id: ceo.id})
     ON CREATE SET p.first_seen_at = $timestamp
-    SET p:DiffbotPerson,
-        p.entity_type = 'Person',
-        p.name = coalesce(ceo.name, p.name),
+    SET p.name = coalesce(ceo.name, p.name),
         p.source = 'diffbot',
         p.last_seen_at = $timestamp
     MERGE (e)-[cr:HAS_CEO]->(p)
     ON CREATE SET cr.created_at = $timestamp
 )
 FOREACH (employer IN row.employer_refs |
-    MERGE (o:DiffbotEntity {id: employer.id})
+    MERGE (o:DiffbotOrganization {id: employer.id})
     ON CREATE SET o.first_seen_at = $timestamp
-    SET o:DiffbotOrganization,
-        o.entity_type = 'Organization',
-        o.name = coalesce(employer.name, o.name),
+    SET o.name = coalesce(employer.name, o.name),
         o.source = 'diffbot',
         o.last_seen_at = $timestamp
     MERGE (e)-[er:EMPLOYED_BY]->(o)
@@ -93,6 +89,10 @@ CALL (e, row) {
 RETURN count(e) AS stored, sum(linked) AS links
 """
 
+
+def _enhance_cypher(kind: str) -> str:
+    return ENHANCE_CYPHER_TEMPLATE.replace("__LABEL__", KIND_LABELS[kind])
+
 NEWS_CYPHER = """
 UNWIND $rows AS row
 MERGE (n:NewsArticle {url: row.url})
@@ -107,10 +107,9 @@ FOREACH (label IN row.tags |
 )
 WITH n, row
 FOREACH (company IN row.companies |
-    MERGE (c:DiffbotEntity {id: company.id})
+    MERGE (c:DiffbotOrganization {id: company.id})
     ON CREATE SET c.first_seen_at = $timestamp
-    SET c:DiffbotOrganization,
-        c += company.props,
+    SET c += company.props,
         c.source = 'diffbot',
         c.last_seen_at = $timestamp
     MERGE (n)-[cr:MENTIONS]->(c)
@@ -128,23 +127,10 @@ CALL (n, row) {
     WHERE (a.domain IS NOT NULL AND existing.domain = a.domain)
        OR toLower(existing.name) = toLower(a.name)
     WITH n, a, collect(existing)[0] AS existing
-    WITH n, a, coalesce(
-        existing.id,
-        CASE
-            WHEN a.domain IS NOT NULL THEN 'account-domain:' + a.domain
-            ELSE 'account-name:' + toLower(a.name)
-        END
-    ) AS company_id
-    MERGE (c:DiffbotEntity {id: company_id})
-    ON CREATE SET c.first_seen_at = $timestamp
-    SET c:DiffbotOrganization,
-        c.entity_type = 'Organization',
-        c.name = a.name,
-        c.domain = a.domain,
-        c.source = 'diffbot',
-        c.last_seen_at = $timestamp
-    MERGE (n)-[cr:MENTIONS]->(c)
-    ON CREATE SET cr.created_at = $timestamp
+    FOREACH (c IN CASE WHEN existing IS NULL THEN [] ELSE [existing] END |
+        MERGE (n)-[cr:MENTIONS]->(c)
+        ON CREATE SET cr.created_at = $timestamp
+    )
     RETURN count(a) AS linked
 }
 RETURN count(n) AS stored, sum(linked + size(row.companies)) AS links
@@ -154,8 +140,8 @@ SESSION_LINK_ENHANCE = """
 MERGE (s:Session {session_id: $session_id})
 ON CREATE SET s.created_at = $timestamp
 WITH s
-MATCH (e:DiffbotEntity)
-WHERE e.id IN $keys
+MATCH (e)
+WHERE (e:DiffbotPerson OR e:DiffbotOrganization) AND e.id IN $keys
 MERGE (e)-[:CAPTURED_IN]->(s)
 """
 
@@ -167,7 +153,7 @@ MATCH (n:NewsArticle)
 WHERE n.url IN $keys
 MERGE (n)-[:CAPTURED_IN]->(s)
 WITH s
-MATCH (e:DiffbotEntity)
+MATCH (e:DiffbotOrganization)
 WHERE e.id IN $company_ids
 MERGE (e)-[:CAPTURED_IN]->(s)
 """
@@ -279,28 +265,32 @@ def _entity_kind(*values: Any) -> str | None:
     return None
 
 
-def _canonical_entity_type(kind: str | None) -> str | None:
-    if kind == "organization":
-        return "Organization"
-    if kind == "person":
-        return "Person"
+DIFFBOT_URI_PATTERN = re.compile(r"^https?://diffbot\.com/entity/([\w-]+)/?$")
+
+
+def _canonical_diffbot_id(*values: Any) -> str | None:
+    """First usable Diffbot id, with diffbot.com entity URIs normalized to one scheme."""
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        candidate = value.strip()
+        match = DIFFBOT_URI_PATTERN.match(candidate)
+        return f"http://diffbot.com/entity/{match.group(1)}" if match else candidate
     return None
 
 
 def _entity_ref(value: Any) -> dict[str, Any] | None:
-    """Normalize a compacted person/org reference (or plain name) to {id, name}."""
-    name = _label(value)
-    uri = value.get("diffbotUri") if isinstance(value, dict) else None
-    if not (isinstance(uri, str) and uri.strip()):
-        uri = None
-    if not name and not uri:
+    """Normalize a compacted person/org reference to {id, name}; no Diffbot id, no ref."""
+    if not isinstance(value, dict):
         return None
-    ref_id = uri or "diffbot-ref:" + sha1(name.strip().lower().encode()).hexdigest()[:16]
-    return _compact({"id": ref_id, "name": name})
+    ref_id = _canonical_diffbot_id(value.get("diffbotUri"))
+    if not ref_id:
+        return None
+    return _compact({"id": ref_id, "name": _label(value)})
 
 
 def _employment_refs(value: Any) -> list[dict[str, Any]]:
-    """Unique employer references, preferring entries that carry a Diffbot id."""
+    """Unique employer references; entries without a Diffbot id are dropped."""
     refs: dict[str, dict[str, Any]] = {}
     for employment in value if isinstance(value, list) else []:
         if not isinstance(employment, dict):
@@ -308,15 +298,8 @@ def _employment_refs(value: Any) -> list[dict[str, Any]]:
         ref = _entity_ref(employment.get("employer")) or _entity_ref(
             employment.get("organization")
         )
-        if not ref:
-            continue
-        key = (ref.get("name") or ref["id"]).strip().lower()
-        existing = refs.get(key)
-        if existing is None or (
-            existing["id"].startswith("diffbot-ref:")
-            and not ref["id"].startswith("diffbot-ref:")
-        ):
-            refs[key] = ref
+        if ref:
+            refs.setdefault(ref["id"], ref)
     return list(refs.values())
 
 
@@ -336,15 +319,14 @@ def _news_companies(tags: Any) -> list[dict[str, Any]]:
         name = _label(tag)
         if not name:
             continue
-        raw_id = tag.get("id") or tag.get("uri") or tag.get("diffbotUri")
-        if not isinstance(raw_id, str) or not raw_id.strip():
-            raw_id = "news-company:" + sha1(name.strip().lower().encode()).hexdigest()[:16]
+        raw_id = _canonical_diffbot_id(tag.get("id"), tag.get("uri"), tag.get("diffbotUri"))
+        if not raw_id:
+            continue
         company = {
-            "id": raw_id.strip(),
+            "id": raw_id,
             "props": _compact(
                 {
                     "name": name,
-                    "entity_type": "Organization",
                     "diffbot_uri": tag.get("uri") if isinstance(tag.get("uri"), str) else None,
                 }
             ),
@@ -385,29 +367,20 @@ def _enhance_rows(payload: dict[str, Any], tool_input: dict[str, Any]) -> list[d
             continue
         name = entity.get("name")
         domain = _domain(entity.get("homepageUri")) or input_domain
-        entity_id = entity.get("id") or entity.get("diffbotUri")
-        if not entity_id:
-            entity_id = "sha1:" + sha1(f"{name}|{domain}".encode()).hexdigest()[:16]
+        entity_id = _canonical_diffbot_id(entity.get("id"), entity.get("diffbotUri"))
+        kind = _entity_kind(entity.get("type"), tool_input.get("entity_type"))
+        if not entity_id or kind is None:
+            # Without a real Diffbot id there is nothing stable to key the node
+            # on, and without a kind we cannot label it person vs organization.
+            continue
         revenue = entity.get("revenue") if isinstance(entity.get("revenue"), dict) else {}
         ceo_ref = _entity_ref(entity.get("ceo"))
-        kind = _entity_kind(entity.get("type"), tool_input.get("entity_type"))
-        entity_type = _canonical_entity_type(kind) or entity.get("type") or tool_input.get("entity_type")
         employer_refs = _employment_refs(entity.get("employments"))
         employer_hint = tool_input.get("employer")
-        if isinstance(employer_hint, str) and employer_hint.strip():
-            hint_key = employer_hint.strip().lower()
-            if all(
-                (ref.get("name") or "").strip().lower() != hint_key
-                for ref in employer_refs
-            ):
-                hint_ref = _entity_ref(employer_hint.strip())
-                if hint_ref:
-                    employer_refs.append(hint_ref)
         employer_names = [ref["name"] for ref in employer_refs if ref.get("name")]
         props = _compact(
             {
                 "name": name,
-                "entity_type": entity_type,
                 "domain": domain,
                 "description": entity.get("description"),
                 "summary": entity.get("summary"),
@@ -420,7 +393,7 @@ def _enhance_rows(payload: dict[str, Any], tool_input: dict[str, Any]) -> list[d
                 "nb_employees": entity.get("nbEmployees"),
                 "revenue_value": revenue.get("value"),
                 "revenue_currency": revenue.get("currency"),
-                "ceo": (ceo_ref or {}).get("name"),
+                "ceo": _label(entity.get("ceo")),
                 "industries": _labels(entity.get("industries")),
                 "categories": _labels(entity.get("categories")),
                 "location": _location_summary(entity.get("locations")),
@@ -431,6 +404,7 @@ def _enhance_rows(payload: dict[str, Any], tool_input: dict[str, Any]) -> list[d
             for candidate in [
                 name,
                 input_name,
+                employer_hint,
                 *_labels(entity.get("allNames")),
                 *employer_names,
             ]
@@ -489,10 +463,6 @@ def _news_rows(payload: dict[str, Any], tool_input: dict[str, Any]) -> list[dict
 
 def _ensure_constraints(tx) -> None:
     tx.run(
-        "CREATE CONSTRAINT diffbot_entity_id_unique IF NOT EXISTS "
-        "FOR (e:DiffbotEntity) REQUIRE e.id IS UNIQUE"
-    )
-    tx.run(
         "CREATE CONSTRAINT diffbot_person_id_unique IF NOT EXISTS "
         "FOR (e:DiffbotPerson) REQUIRE e.id IS UNIQUE"
     )
@@ -530,20 +500,16 @@ def ingest(data: dict[str, Any]) -> None:
 
     if kind == "enhance":
         rows = _enhance_rows(payload, tool_input)
-        cypher, link_cypher, key_field, noun = (
-            ENHANCE_CYPHER,
-            SESSION_LINK_ENHANCE,
-            "id",
-            "entities",
-        )
+        statements = [
+            (_enhance_cypher(entity_kind), batch)
+            for entity_kind in KIND_LABELS
+            if (batch := [row for row in rows if row["entity_kind"] == entity_kind])
+        ]
+        link_cypher, key_field, noun = SESSION_LINK_ENHANCE, "id", "entities"
     else:
         rows = _news_rows(payload, tool_input)
-        cypher, link_cypher, key_field, noun = (
-            NEWS_CYPHER,
-            SESSION_LINK_NEWS,
-            "url",
-            "articles",
-        )
+        statements = [(NEWS_CYPHER, rows)]
+        link_cypher, key_field, noun = SESSION_LINK_NEWS, "url", "articles"
     if not rows:
         return
 
@@ -552,10 +518,15 @@ def ingest(data: dict[str, Any]) -> None:
     timestamp = datetime.now(timezone.utc).isoformat()
     session_id = data.get("session_id")
     uri, user, password, database = neo4j_config()
+    stored = links = 0
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         with driver.session(database=database) as db:
             db.execute_write(_ensure_constraints)
-            record = db.execute_write(_run_single, cypher, rows=rows, timestamp=timestamp)
+            for statement, batch in statements:
+                record = db.execute_write(_run_single, statement, rows=batch, timestamp=timestamp)
+                if record:
+                    stored += record["stored"] or 0
+                    links += record["links"] or 0
             if session_id and session_id != "unknown":
                 db.execute_write(
                     _run_single,
@@ -571,8 +542,6 @@ def ingest(data: dict[str, Any]) -> None:
                         }
                     ),
                 )
-    stored = record["stored"] if record else 0
-    links = record["links"] if record else 0
     print(f"[ingest_diffbot] stored {stored} {noun}, {links} account link(s)")
 
 
