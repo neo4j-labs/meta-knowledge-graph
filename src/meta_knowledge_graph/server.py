@@ -36,7 +36,8 @@ DIFFBOT_HEAVY_FIELD_DROP_ORDER = (
     "summary",
 )
 DIFFBOT_NEWS_FILTER = (
-    "title pageUrl siteName date author sentiment tags.label publisherCountry"
+    "title pageUrl siteName date author sentiment tags.label publisherCountry "
+    "summary text"
 )
 DIFFBOT_ORGANIZATION_ENHANCE_FILTER = (
     "name allNames diffbotUri homepageUri linkedInUri twitterUri description "

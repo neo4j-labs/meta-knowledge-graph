@@ -80,6 +80,8 @@ class DiffbotToolHelperTests(unittest.TestCase):
             self.assertNotIn("  ", response_filter)
 
         self.assertIn("tags.label", server.DIFFBOT_NEWS_FILTER.split())
+        self.assertIn("summary", server.DIFFBOT_NEWS_FILTER.split())
+        self.assertIn("text", server.DIFFBOT_NEWS_FILTER.split())
 
     def test_diffbot_request_retries_without_filter_when_filter_parse_fails(
         self,

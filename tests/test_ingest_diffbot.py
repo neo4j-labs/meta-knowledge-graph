@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from hashlib import sha256
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -183,6 +184,37 @@ class DiffbotIngestTests(unittest.TestCase):
                     },
                 }
             ],
+        )
+
+    def test_news_rows_include_article_text_metadata(self) -> None:
+        article_text = "Acme opened a new field-service hub for regional teams."
+        rows = ingest_diffbot._news_rows(
+            {
+                "data": [
+                    {
+                        "entity": {
+                            "pageUrl": "https://news.example/acme",
+                            "title": "Acme expands field operations",
+                            "summary": "Acme expands its field support footprint.",
+                            "text": article_text,
+                            "tags": [{"label": "Acme Corp"}],
+                        }
+                    }
+                ]
+            },
+            {"dql": 'type:Article tags.label:"Acme Corp"'},
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0]["props"],
+            {
+                "title": "Acme expands field operations",
+                "summary": "Acme expands its field support footprint.",
+                "text": article_text,
+                "text_chars": len(article_text),
+                "text_sha256": sha256(article_text.encode("utf-8")).hexdigest(),
+            },
         )
 
     def test_news_rows_do_not_treat_untyped_tags_as_companies(self) -> None:

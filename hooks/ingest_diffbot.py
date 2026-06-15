@@ -34,6 +34,7 @@ import json
 import re
 import sys
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -357,6 +358,24 @@ def _compact(props: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in props.items() if v not in (None, "", [])}
 
 
+def _text_prop(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _article_text_props(entity: dict[str, Any]) -> dict[str, Any]:
+    text = _text_prop(entity.get("text"))
+    if not text:
+        return {}
+    return {
+        "text": text,
+        "text_chars": len(text),
+        "text_sha256": sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
 def _enhance_rows(payload: dict[str, Any], tool_input: dict[str, Any]) -> list[dict[str, Any]]:
     input_name = tool_input.get("name")
     input_domain = _domain(tool_input.get("url"))
@@ -442,11 +461,13 @@ def _news_rows(payload: dict[str, Any], tool_input: dict[str, Any]) -> list[dict
         props = _compact(
             {
                 "title": entity.get("title"),
+                "summary": _text_prop(entity.get("summary")),
                 "site_name": entity.get("siteName"),
                 "author": entity.get("author"),
                 "date": _diffbot_date(entity.get("date")),
                 "sentiment": entity.get("sentiment"),
                 "publisher_country": entity.get("publisherCountry"),
+                **_article_text_props(entity),
             }
         )
         rows.append(
