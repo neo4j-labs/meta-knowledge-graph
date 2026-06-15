@@ -16,6 +16,7 @@ from pydantic import Field
 
 
 MAX_LEARNING_TEXT = 500
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 DIFFBOT_API_BASE_URL = "https://kg.diffbot.com/kg/v3"
 DIFFBOT_TIMEOUT_SECONDS = 30.0
 MAX_DIFFBOT_LOCATIONS = 3
@@ -122,6 +123,33 @@ def _diffbot_token() -> Optional[str]:
 
 def _has_diffbot_token() -> bool:
     return _diffbot_token() is not None
+
+
+def _llm_credentials_present(model: str) -> bool:
+    """True when the environment holds the credentials litellm needs for ``model``.
+
+    Lets credential gating follow the configured provider instead of assuming
+    OpenAI, mirroring how the memory hooks gate their LLM calls."""
+    # litellm auto-loads a .env on its first import in the default DEV mode,
+    # which would mask a deliberately unset key; pin PRODUCTION so the check
+    # reflects the process environment.
+    os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+    try:
+        import litellm
+    except Exception:
+        return False
+    # validate_environment checks key *presence*; a present-but-empty var means
+    # "no credentials", so hide blanks to match plain truthiness.
+    blanked = {k: v for k, v in os.environ.items() if not v.strip()}
+    for key in blanked:
+        del os.environ[key]
+    try:
+        result = litellm.validate_environment(model=model)
+    except Exception:
+        return False
+    finally:
+        os.environ.update(blanked)
+    return bool(result.get("keys_in_environment"))
 
 
 def _compact_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -384,9 +412,15 @@ def create_mcp_server(
     # else:
     #     logger.info("Neo4j Agent Memory MCP proxy not mounted (OPENAI_API_KEY unset)")
 
-    # Mount Neocarta MCP server when required env vars are present
-    neocarta_required = ("GCP_PROJECT_ID", "BIGQUERY_DATASET_ID", "OPENAI_API_KEY")
-    if all(os.environ.get(v) for v in neocarta_required):
+    # Mount Neocarta MCP server when the warehouse settings and the embedding
+    # model's credentials are present. EMBEDDING_MODEL is a litellm model string,
+    # so the provider — and thus the required key — follows the configured model
+    # rather than assuming OpenAI, the same way the memory hooks pick their LLM.
+    embedding_model = os.environ.get("EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
+    neocarta_required = ("GCP_PROJECT_ID", "BIGQUERY_DATASET_ID")
+    have_warehouse = all(os.environ.get(v) for v in neocarta_required)
+    have_embedding_creds = _llm_credentials_present(embedding_model)
+    if have_warehouse and have_embedding_creds:
         neocarta_env = {
             "NEO4J_URI": db_url,
             "NEO4J_USERNAME": username,
@@ -394,8 +428,12 @@ def create_mcp_server(
             "NEO4J_DATABASE": database,
             "GCP_PROJECT_ID": os.environ["GCP_PROJECT_ID"],
             "BIGQUERY_DATASET_ID": os.environ["BIGQUERY_DATASET_ID"],
-            "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"],
         }
+        # Forward whichever provider credentials are set so the embedding model
+        # can authenticate regardless of provider (OpenAI, Cohere, Bedrock, ...).
+        for key, value in os.environ.items():
+            if value and (key.endswith("_API_KEY") or key.endswith("_AUTH_TOKEN")):
+                neocarta_env[key] = value
         optional_vars = (
             "BIGQUERY_REGION",
             "EMBEDDING_MODEL",
@@ -440,7 +478,9 @@ def create_mcp_server(
         logger.info("Mounted Neocarta MCP proxy")
     else:
         missing = [v for v in neocarta_required if not os.environ.get(v)]
-        logger.info(f"Neocarta MCP proxy not mounted (missing env vars: {missing})")
+        if not have_embedding_creds:
+            missing.append(f"credentials for embedding model '{embedding_model}'")
+        logger.info(f"Neocarta MCP proxy not mounted (missing: {missing})")
 
     # Mount BigQuery remote MCP server when URL is configured.
     # BIGQUERY_MCP_URL: streamable-http endpoint, e.g. https://bigquery.googleapis.com/mcp

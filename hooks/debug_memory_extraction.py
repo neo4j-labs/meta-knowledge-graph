@@ -7,7 +7,6 @@ Usage: python hooks/debug_memory_extraction.py --mode session --session-id <id>
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +29,7 @@ from project_common import (  # noqa: E402
     fetch_project_decisions,
     fetch_project_learnings,
     llm_model,
+    llm_ready,
     load_dotenv,
     neo4j_config,
 )
@@ -126,16 +126,15 @@ def main() -> int:
     prompt_path.write_text(prompt)
     print(f"[debug] prompt saved: {prompt_path} ({len(prompt)} chars)", file=sys.stderr)
 
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("[debug] OPENAI_API_KEY unset; skipping LLM call", file=sys.stderr)
+    if not llm_ready():
+        print("[debug] LLM credentials unset; skipping LLM call", file=sys.stderr)
         return 0
 
-    from openai import OpenAI
+    import litellm
 
     model = llm_model()
     print(f"[debug] calling model: {model}", file=sys.stderr)
-    client = OpenAI()
-    response = client.chat.completions.create(
+    response = litellm.completion(
         model=model,
         messages=[
             {

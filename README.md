@@ -43,7 +43,7 @@ Mounted under the `meta-knowledge-graph` prefix, in four groups:
 | Project memory & graph | `project_get_context`, `project_add_learning`, `neo4j_get_schema`, `neo4j_read_cypher` | Always. |
 | Diffbot research | `search_news`, `enhance_entity` | `DIFFBOT_TOKEN` is set. |
 | BigQuery warehouse | `bigquery_execute_query` | `BIGQUERY_MCP_URL` is set. |
-| Neocarta data catalog | `neocarta_*` | `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID`, and `OPENAI_API_KEY` are set. |
+| Neocarta data catalog | `neocarta_*` | `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID`, and the `EMBEDDING_MODEL`'s provider key (OpenAI by default) are set. |
 
 ### Hooks
 
@@ -64,7 +64,7 @@ live in `hooks/`.
 | `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits scoped to the current project. Every injected item is linked to the session via `[:INJECTED_IN]`, and items already injected earlier in the same session are excluded from retrieval, so a conversation never receives the same learning or decision twice. Marks served learnings as used. |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | `hooks/log_event.py` | Persists each event as a `:SessionEvent` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the memory extraction processor later reads. |
 | `Stop` (`--mode turn`), `SessionEnd` (`--mode session`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions per category. System-prompt suggestions are reserved for rare operating-principle changes or explicit/reinforced high-level user preferences and interests; memory-extraction-prompt suggestions are reserved for improving future extraction quality. Writes new `:Learning` / `:Decision` / `:SystemPromptSuggestion` / `:MemoryExtractionPromptSuggestion` nodes with status `candidate`. |
-| `Stop` | `hooks/apply_system_prompt.py` | Rate-limited rebuild of the live `(:SystemPrompt)`. Runs in the background on every Stop but only acts when at least `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` candidate suggestions are pending **and** `MKG_PROMPT_REBUILD_MIN_HOURS` have passed since the last rebuild (gate + claim in one conditional write, so concurrent Stops can't double-rebuild). Seeds the prompt node from the default if it doesn't exist, snapshots the previous content as `(:SystemPromptVersion)`, folds suggestions in via LLM (verbatim append under a learned-notes section when `OPENAI_API_KEY` is absent), and marks each suggestion `applied` or `rejected`. |
+| `Stop` | `hooks/apply_system_prompt.py` | Rate-limited rebuild of the live `(:SystemPrompt)`. Runs in the background on every Stop but only acts when at least `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` candidate suggestions are pending **and** `MKG_PROMPT_REBUILD_MIN_HOURS` have passed since the last rebuild (gate + claim in one conditional write, so concurrent Stops can't double-rebuild). Seeds the prompt node from the default if it doesn't exist, snapshots the previous content as `(:SystemPromptVersion)`, folds suggestions in via LLM (verbatim append under a learned-notes section when no LLM credentials are configured), and marks each suggestion `applied` or `rejected`. |
 | `Stop` | `hooks/apply_memory_extraction_prompt.py` | Rate-limited rebuild of the live `(:MemoryExtractionPrompt)`. It mirrors `apply_system_prompt.py` and shares the same `MKG_PROMPT_REBUILD_*` / `MKG_PROMPT_MAX_CHARS` knobs: gates on pending `:MemoryExtractionPromptSuggestion` nodes, snapshots prior content as `(:MemoryExtractionPromptVersion)`, preserves required runtime tokens, and marks suggestions `applied` or `rejected`. |
 | `PostToolUse` (matcher on the Diffbot tools `enhance_entity` / `search_news`) | `hooks/ingest_diffbot.py` | Builds Diffbot tool results back into the graph instead of letting them evaporate with the conversation. `enhance_entity` firmographics become `(:Account)-[:HAS_ENRICHMENT]→(:DiffbotOrganization)` or `(:DiffbotPerson)` (matched on domain, name/`allNames`, and employer hints); `search_news` articles become `(:NewsArticle)-[:MENTIONS]→(:Account)` plus `[:MENTIONS]→(:DiffbotOrganization)` when organization tags or account matches identify companies, and `[:TAGGED]→(:NewsTag)`. Only entities carrying a real Diffbot id are stored — references without one are dropped instead of being keyed on synthetic hashes. Diffbot entities and articles link `[:CAPTURED_IN]→(:Session)` for provenance. Handles the harness's response wrappers, including oversized results that arrive as a saved-to-file notice. |
 | `PostToolUse` (matcher on the query tools `bigquery_execute_query` / `neo4j_read_cypher`) | `hooks/capture_query_failures.py` | Captures failed or suspicious query outputs as structured `(:QueryExecution)-[:HAS_ISSUE]→(:QueryIssue)` artifacts. The first pass records issues visible in PostToolUse payloads: empty result sets, parser/schema/permission/resource/capability errors, malformed outputs, and Neo4j serialization cases such as temporal values returned as `{}`. Clean successful query results are ignored. |
@@ -185,7 +185,8 @@ harness produced the events.
 The repo ships a complete demo persona in [`import/sales_agent/`](import/sales_agent/):
 a sales / customer-success intelligence assistant working a book of ~48
 enterprise car-rental customer accounts for **RoadFlex** (a corporate mobility
-provider). The minimum setup needs only Neo4j plus OpenAI: seed a blank Neo4j
+provider). The minimum setup needs only Neo4j plus an LLM provider key (OpenAI
+by default): seed a blank Neo4j
 database with the RoadFlex graph, persona, and bootstrap learnings, then start a
 session. BigQuery/Neocarta and Diffbot are optional add-ons for warehouse
 queries, catalog search, firmographics, and live news.
@@ -201,7 +202,10 @@ NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=<your-password>
 NEO4J_DATABASE=neo4j
 
-# Required: LLM calls for memory extraction and prompt rebuilds
+# Required: LLM calls for memory extraction and prompt rebuilds. Calls route
+# through litellm; the default model is OpenAI's, so set OPENAI_API_KEY. To use
+# another provider, set LLM_MODEL (e.g. anthropic/claude-haiku-4-5) and supply
+# that provider's key instead.
 OPENAI_API_KEY=<your-openai-api-key>
 
 # Optional: Diffbot live news / firmographic enrichment
@@ -274,8 +278,9 @@ an MCP server and fire lifecycle hooks.
 The Neo4j-backed memory and graph tools mount in the minimum setup. With
 `DIFFBOT_TOKEN` set, the server mounts `search_news` and `enhance_entity`. With
 `BIGQUERY_MCP_URL` set and Google auth available, it mounts
-`bigquery_execute_query`; with `GCP_PROJECT_ID` / `BIGQUERY_DATASET_ID` /
-`OPENAI_API_KEY` set, it also mounts the `neocarta_*` catalog tools.
+`bigquery_execute_query`; with `GCP_PROJECT_ID` / `BIGQUERY_DATASET_ID` set and
+the `EMBEDDING_MODEL`'s provider key available (OpenAI by default), it also
+mounts the `neocarta_*` catalog tools.
 
 ### 4. Start a session
 
@@ -301,13 +306,14 @@ persona prompt keeps improving itself via `:SystemPromptSuggestion` rebuilds.
 | `NEO4J_PASSWORD` | `--password` | `password` | |
 | `NEO4J_DATABASE` | `--database` | `neo4j` | |
 | `NEO4J_TRANSPORT` | `--transport` | `stdio` | |
-| `OPENAI_API_KEY` | — | — | Required by `process_project.py` and the prompt rebuild hooks; also used by Neocarta embeddings when that optional catalog is enabled. |
+| `OPENAI_API_KEY` | — | — | Default provider key: the hooks call `LLM_MODEL` and Neocarta embeds with `EMBEDDING_MODEL`, both via litellm, and both default to OpenAI models. For another provider, set the relevant model var and supply that provider's key instead. |
 | `DIFFBOT_TOKEN` | — | — | Enables `search_news` and `enhance_entity` when set. |
-| `LLM_MODEL` | — | `gpt-5.4-mini` | The single model knob for every LLM call: memory extraction and both prompt rebuilds. |
+| `LLM_MODEL` | — | `gpt-5.4-mini` | The single model knob for every LLM call (memory extraction and both prompt rebuilds), resolved through litellm — any litellm model string works (e.g. `anthropic/claude-haiku-4-5`, `gemini/gemini-2.5-flash`); supply the matching provider's key. |
+| `EMBEDDING_MODEL` | — | `text-embedding-3-small` | litellm embedding model for the optional Neocarta catalog (seed + runtime). Any litellm embedding model works (e.g. `cohere/embed-english-v3.0`, `gemini/text-embedding-004`); supply the matching provider's key. |
 | `MKG_PROMPT_REBUILD_MIN_HOURS` | — | `8` | Minimum hours between prompt rebuilds on Stop (system prompt and memory extraction prompt alike). |
 | `MKG_PROMPT_REBUILD_MIN_SUGGESTIONS` | — | `2` | Pending candidate suggestions required before a rebuild runs (both rebuilds). |
 | `MKG_PROMPT_MAX_CHARS` | — | `12000` | Length budget for a rebuilt prompt (both rebuilds). |
-| `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID` | — | — | Optional BigQuery/Neocarta settings. Required, with `OPENAI_API_KEY`, to mount the Neocarta catalog tools; `GCP_PROJECT_ID` is also the project queried by `bigquery_execute_query`. |
+| `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID` | — | — | Optional BigQuery/Neocarta settings. Required, with the `EMBEDDING_MODEL` provider key, to mount the Neocarta catalog tools; `GCP_PROJECT_ID` is also the project queried by `bigquery_execute_query`. |
 | `BIGQUERY_MCP_URL` | — | — | Optional. Mounts `bigquery_execute_query` when set, e.g. `https://bigquery.googleapis.com/mcp`. For `googleapis.com` URLs a Google ADC bearer token is fetched automatically. |
 | `BIGQUERY_MCP_AUTH`, `BIGQUERY_MCP_HEADERS` | — | — | Optional explicit bearer token / JSON dict of extra headers for the BigQuery MCP endpoint. |
 | `BIGQUERY_REGION`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | — | — | Optional; forwarded to the Neocarta subprocess when set. `BIGQUERY_REGION` (default `US`) also sets the dataset location when seeding the sales-agent demo. |

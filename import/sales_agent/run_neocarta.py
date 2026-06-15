@@ -24,9 +24,10 @@ from neocarta.enrichment.embeddings import LiteLLMEmbeddingsConnector
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
-async def populate_embeddings(neo4j_db: str) -> None:
+async def populate_embeddings(neo4j_db: str, embedding_model: str) -> None:
     # Give the async embedding connector a dedicated driver lifetime.
     embed_driver = GraphDatabase.driver(
         uri=os.environ["NEO4J_URI"],
@@ -34,7 +35,7 @@ async def populate_embeddings(neo4j_db: str) -> None:
     )
     try:
         connector = LiteLLMEmbeddingsConnector(
-            embedding_model="text-embedding-3-small",
+            embedding_model=embedding_model,
             neo4j_driver=embed_driver,
             database_name=neo4j_db,
         )
@@ -47,6 +48,7 @@ def main() -> None:
     load_dotenv(REPO_ROOT / ".env")
 
     neo4j_db = os.getenv("NEO4J_DATABASE", "neo4j")
+    embedding_model = os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
     bq_project_id = os.environ["GCP_PROJECT_ID"]
     dataset_id = os.environ["BIGQUERY_DATASET_ID"]
     billing_project_id = os.environ.get("GCP_BILLING_PROJECT_ID") or bq_project_id
@@ -68,8 +70,8 @@ def main() -> None:
             database_name=neo4j_db,
         ).run()
 
-        print("populating Neocarta embeddings")
-        asyncio.run(populate_embeddings(neo4j_db))
+        print(f"populating Neocarta embeddings ({embedding_model})")
+        asyncio.run(populate_embeddings(neo4j_db, embedding_model))
     finally:
         neo4j_driver.close()
 

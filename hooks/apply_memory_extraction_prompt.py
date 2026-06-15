@@ -32,6 +32,7 @@ from process_project import (  # noqa: E402
 from project_common import (  # noqa: E402
     ensure_project_schema,
     llm_model,
+    llm_ready,
     load_dotenv,
     neo4j_config,
     truncate,
@@ -165,10 +166,9 @@ def _json_from_llm_text(text: str) -> dict[str, Any]:
 
 
 def ask_llm_for_rewrite(prompt: str) -> dict[str, Any]:
-    from openai import OpenAI
+    import litellm
 
-    client = OpenAI()
-    response = client.chat.completions.create(
+    response = litellm.completion(
         model=llm_model(),
         messages=[
             {
@@ -249,7 +249,7 @@ def rewrite_prompt(
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
     current = current if memory_extraction_prompt_is_valid(current) else DEFAULT_MEMORY_EXTRACTION_PROMPT
     pending_ids = {str(item.get("id")) for item in suggestions if item.get("id")}
-    if os.environ.get("OPENAI_API_KEY"):
+    if llm_ready():
         try:
             parsed = ask_llm_for_rewrite(build_rebuild_prompt(current, suggestions, max_chars))
             validated = validate_llm_rewrite(parsed, pending_ids, max_chars)

@@ -24,8 +24,38 @@ def injection_window_start() -> str:
 
 
 def llm_model() -> str:
-    """Single model knob for every LLM call made by the hooks."""
+    """Single model knob for every LLM call made by the hooks.
+
+    The value is a litellm model string, so any provider works: ``gpt-5.4-mini``
+    routes to OpenAI, ``anthropic/claude-...`` to Anthropic, etc."""
     return os.environ.get("LLM_MODEL") or DEFAULT_LLM_MODEL
+
+
+def llm_ready() -> bool:
+    """True when the environment holds the credentials litellm needs for the
+    configured model, so hooks gate on whatever provider is in use rather than
+    assuming OpenAI."""
+    # litellm auto-loads a .env on its first import in the default DEV mode,
+    # which would silently repopulate a key the caller deliberately unset; pin
+    # PRODUCTION so the gate reflects the environment the hooks already loaded.
+    os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+    try:
+        import litellm
+    except Exception:
+        return False
+    # litellm.validate_environment checks key *presence*, but a present-but-empty
+    # var (e.g. ``OPENAI_API_KEY=``) means "no credentials" — hide those so the
+    # gate matches plain truthiness for whichever provider's key is required.
+    blanked = {k: v for k, v in os.environ.items() if not v.strip()}
+    for key in blanked:
+        del os.environ[key]
+    try:
+        result = litellm.validate_environment(model=llm_model())
+    except Exception:
+        return False
+    finally:
+        os.environ.update(blanked)
+    return bool(result.get("keys_in_environment"))
 
 
 @dataclass(frozen=True)

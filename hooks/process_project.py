@@ -30,6 +30,7 @@ from project_common import (  # noqa: E402
     fetch_project_learnings,
     learning_id,
     llm_model,
+    llm_ready,
     load_dotenv,
     merge_project_and_session,
     memory_extraction_prompt_suggestion_id,
@@ -323,13 +324,12 @@ def _json_from_llm_text(text: str) -> dict[str, Any]:
 
 
 def ask_llm_for_memory_actions(prompt: str) -> dict[str, Any]:
-    if not os.environ.get("OPENAI_API_KEY"):
+    if not llm_ready():
         return {"learnings": [], "decisions": []}
 
-    from openai import OpenAI
+    import litellm
 
-    client = OpenAI()
-    response = client.chat.completions.create(
+    response = litellm.completion(
         model=llm_model(),
         messages=[
             {

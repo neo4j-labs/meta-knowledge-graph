@@ -14,8 +14,8 @@ on every turn. A rebuild only runs when both gates pass:
 Gate check and claim happen in one conditional write so concurrent Stop events
 cannot double-rebuild. The previous prompt content is snapshotted as a
 ``(:SystemPromptVersion)`` node and each consumed suggestion is marked
-``applied`` or ``rejected``. With ``OPENAI_API_KEY`` set the rewrite is an LLM
-fold-in; without it the instructions are appended verbatim under a
+``applied`` or ``rejected``. With LLM credentials configured the rewrite is an
+LLM fold-in; without them the instructions are appended verbatim under a
 "Learned operating notes" section so the loop still closes.
 """
 
@@ -39,6 +39,7 @@ from inject_system_prompt import DEFAULT_PROMPT  # noqa: E402
 from project_common import (  # noqa: E402
     ensure_project_schema,
     llm_model,
+    llm_ready,
     load_dotenv,
     neo4j_config,
     truncate,
@@ -170,10 +171,9 @@ def _json_from_llm_text(text: str) -> dict[str, Any]:
 
 
 def ask_llm_for_rewrite(prompt: str) -> dict[str, Any]:
-    from openai import OpenAI
+    import litellm
 
-    client = OpenAI()
-    response = client.chat.completions.create(
+    response = litellm.completion(
         model=llm_model(),
         messages=[
             {
@@ -250,7 +250,7 @@ def rewrite_prompt(
     max_chars: int,
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
     pending_ids = {str(item.get("id")) for item in suggestions if item.get("id")}
-    if os.environ.get("OPENAI_API_KEY"):
+    if llm_ready():
         try:
             parsed = ask_llm_for_rewrite(build_rebuild_prompt(current, suggestions, max_chars))
             validated = validate_llm_rewrite(parsed, pending_ids, max_chars)
