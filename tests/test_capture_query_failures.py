@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
@@ -237,6 +239,267 @@ class QueryFailureCaptureTests(unittest.TestCase):
         write_params = tx.calls[-1][1]
         self.assertIn("query_row", write_params)
         self.assertNotIn("query", write_params)
+
+
+class TranscriptExtractionTests(unittest.TestCase):
+    """Stop-hook path: failed query tool calls are recovered from the transcript."""
+
+    def _tool_use(self, tool_use_id: str, tool_name: str, query: str) -> dict:
+        return {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_use_id,
+                        "name": tool_name,
+                        "input": {"query": query},
+                    }
+                ],
+            },
+        }
+
+    def _tool_result(self, tool_use_id: str, text: str, *, is_error: bool = False) -> dict:
+        return {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": [{"type": "text", "text": text}],
+                        "is_error": is_error,
+                    }
+                ],
+            },
+        }
+
+    def _codex_function_call(
+        self,
+        call_id: str,
+        tool_name: str,
+        arguments: dict,
+        *,
+        namespace: str = "mcp__meta_knowledge_graph",
+    ) -> dict:
+        return {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": tool_name,
+                "namespace": namespace,
+                "arguments": json.dumps(arguments),
+                "call_id": call_id,
+            },
+        }
+
+    def _codex_tool_end(
+        self,
+        call_id: str,
+        tool_name: str,
+        arguments: dict,
+        text: str,
+        *,
+        is_error: bool = False,
+        server: str = "meta-knowledge-graph",
+    ) -> dict:
+        return {
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "call_id": call_id,
+                "invocation": {
+                    "server": server,
+                    "tool": tool_name,
+                    "arguments": arguments,
+                },
+                "result": {
+                    "Ok": {
+                        "content": [{"type": "text", "text": text}],
+                        "isError": is_error,
+                    }
+                },
+            },
+        }
+
+    def _write_transcript(self, records: list[dict]) -> str:
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".jsonl", delete=False, encoding="utf-8"
+        )
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+        handle.close()
+        self.addCleanup(lambda: Path(handle.name).unlink(missing_ok=True))
+        return handle.name
+
+    def test_extracts_and_classifies_failed_calls_post_tool_use_misses(self) -> None:
+        bq = "mcp__meta_knowledge_graph__bigquery_execute_query"
+        neo = "mcp__meta_knowledge_graph__neo4j_read_cypher"
+        records = [
+            # isError calls PostToolUse never delivers:
+            self._tool_use("toolu_1", bq, "SELECT FROM acme_corp.accounts"),
+            self._tool_result(
+                "toolu_1", "Syntax error: SELECT list must not be empty at [1:8]", is_error=True
+            ),
+            self._tool_use("toolu_2", neo, "CALL gds.graph.list() YIELD graphName RETURN graphName"),
+            self._tool_result(
+                "toolu_2",
+                "Neo.ClientError.Procedure.ProcedureNotFound (There is no procedure "
+                "with the name `gds.graph.list` registered for this database instance.)",
+                is_error=True,
+            ),
+            # plain success that must be ignored entirely:
+            self._tool_use("toolu_3", neo, "MATCH (a:Account) RETURN a.name AS name LIMIT 1"),
+            self._tool_result("toolu_3", '[{"name": "Pfizer"}]'),
+            # success-path issue (also seen live by PostToolUse) -> same id, converges:
+            self._tool_use("toolu_4", bq, "SELECT account_id FROM acme_corp.accounts WHERE FALSE"),
+            self._tool_result(
+                "toolu_4",
+                '{"schema":{"fields":[{"name":"account_id","type":"STRING"}]},'
+                '"jobComplete":true,"queryId":"job_empty"}',
+            ),
+        ]
+        transcript = self._write_transcript(records)
+
+        payloads = capture_query_failures.extract_query_payloads(transcript, "session-x")
+        projections = {
+            payload["tool_use_id"]: capture_query_failures.build_failure_projection(payload)
+            for payload in payloads
+        }
+
+        # Four query calls extracted; the clean success yields no projection.
+        self.assertEqual(set(projections), {"toolu_1", "toolu_2", "toolu_3", "toolu_4"})
+        self.assertIsNone(projections["toolu_3"])
+        self.assertEqual(
+            sorted(i["type"] for i in projections["toolu_1"]["issues"]), ["syntax_error"]
+        )
+        self.assertEqual(
+            sorted(i["type"] for i in projections["toolu_2"]["issues"]),
+            ["capability_unavailable"],
+        )
+        self.assertEqual(
+            sorted(i["type"] for i in projections["toolu_4"]["issues"]), ["empty_result"]
+        )
+        # Stable id shared with the PostToolUse hook, so re-capture converges.
+        self.assertEqual(
+            projections["toolu_1"]["query"]["id"], "query-execution:session-x:toolu_1"
+        )
+
+    def test_ignores_non_query_tools(self) -> None:
+        records = [
+            self._tool_use(
+                "toolu_n", "mcp__meta_knowledge_graph__search_news", "type:Article tags.label:x"
+            ),
+            self._tool_result("toolu_n", "Diffbot request failed: boom", is_error=True),
+        ]
+        transcript = self._write_transcript(records)
+
+        self.assertEqual(
+            capture_query_failures.extract_query_payloads(transcript, "session-x"), []
+        )
+
+    def test_missing_transcript_file_is_safe(self) -> None:
+        self.assertEqual(
+            capture_query_failures.extract_query_payloads("/no/such/file.jsonl", "s"), []
+        )
+
+    def test_extracts_codex_mcp_tool_call_end_records(self) -> None:
+        records = [
+            self._codex_function_call(
+                "call_bq",
+                "bigquery_execute_query",
+                {"query": "SELECT FROM `acme_corp.accounts` LIMIT 1"},
+            ),
+            self._codex_tool_end(
+                "call_bq",
+                "bigquery_execute_query",
+                {"query": "SELECT FROM `acme_corp.accounts` LIMIT 1"},
+                "Syntax error: SELECT list must not be empty at [1:8]",
+                is_error=True,
+            ),
+            self._codex_function_call(
+                "call_neo",
+                "neo4j_read_cypher",
+                {
+                    "query": "MATCH (q:QueryExecution) RETURN collect(q.id) AS ids "
+                    "ORDER BY q.last_seen_at"
+                },
+            ),
+            self._codex_tool_end(
+                "call_neo",
+                "neo4j_read_cypher",
+                {
+                    "query": "MATCH (q:QueryExecution) RETURN collect(q.id) AS ids "
+                    "ORDER BY q.last_seen_at"
+                },
+                "Neo.ClientError.Statement.SyntaxError: In a WITH/RETURN with DISTINCT "
+                "or an aggregation, it is not possible to access variables declared "
+                "before the WITH/RETURN: q",
+                is_error=True,
+            ),
+            self._codex_function_call(
+                "call_ok",
+                "neo4j_read_cypher",
+                {"query": "MATCH (a:Account) RETURN a.name AS name LIMIT 1"},
+            ),
+            self._codex_tool_end(
+                "call_ok",
+                "neo4j_read_cypher",
+                {"query": "MATCH (a:Account) RETURN a.name AS name LIMIT 1"},
+                '[{"name": "Pfizer"}]',
+            ),
+        ]
+        transcript = self._write_transcript(records)
+
+        payloads = capture_query_failures.extract_query_payloads(transcript, "session-codex")
+        projections = {
+            payload["tool_use_id"]: capture_query_failures.build_failure_projection(payload)
+            for payload in payloads
+        }
+
+        self.assertEqual(set(projections), {"call_bq", "call_neo", "call_ok"})
+        self.assertEqual(
+            projections["call_bq"]["query"]["id"],
+            "query-execution:session-codex:call_bq",
+        )
+        self.assertEqual(
+            sorted(i["type"] for i in projections["call_bq"]["issues"]),
+            ["syntax_error"],
+        )
+        self.assertEqual(
+            sorted(i["type"] for i in projections["call_neo"]["issues"]),
+            ["syntax_error"],
+        )
+        self.assertIsNone(projections["call_ok"])
+
+    def test_extracts_codex_event_msg_without_prior_response_item(self) -> None:
+        arguments = {"query": "SELECT account_id FROM `acme_corp.accounts` WHERE FALSE"}
+        transcript = self._write_transcript(
+            [
+                self._codex_tool_end(
+                    "call_event_only",
+                    "bigquery_execute_query",
+                    arguments,
+                    '{"schema":{"fields":[{"name":"account_id","type":"STRING"}]},'
+                    '"jobComplete":true,"queryId":"job_empty"}',
+                )
+            ]
+        )
+
+        payloads = capture_query_failures.extract_query_payloads(transcript, "session-codex")
+        self.assertEqual(len(payloads), 1)
+        projection = capture_query_failures.build_failure_projection(payloads[0])
+
+        self.assertIsNotNone(projection)
+        self.assertEqual(
+            projection["query"]["tool_name"],
+            "mcp__meta_knowledge_graph__bigquery_execute_query",
+        )
+        self.assertEqual(
+            sorted(issue["type"] for issue in projection["issues"]), ["empty_result"]
+        )
 
 
 if __name__ == "__main__":

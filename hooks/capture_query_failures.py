@@ -600,6 +600,201 @@ def capture(payload: dict[str, Any]) -> int:
     return len(projection["issues"])
 
 
+def _iter_transcript_records(transcript_path: str):
+    path = Path(transcript_path)
+    if not path.exists():
+        return
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def _tool_result_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        ]
+        return "\n".join(parts)
+    return json.dumps(content, default=str) if content is not None else ""
+
+
+def _decode_arguments(value: Any) -> Any:
+    if isinstance(value, str):
+        parsed = _parse_json(value)
+        return parsed if parsed is not None else value
+    return value
+
+
+def _codex_tool_name(namespace: Any, name: Any) -> str:
+    tool_name = str(name or "")
+    namespace_name = str(namespace or "")
+    if namespace_name:
+        return f"{namespace_name}__{tool_name}"
+    return tool_name
+
+
+def _codex_invocation_tool_name(invocation: dict[str, Any]) -> str:
+    tool_name = str(invocation.get("tool") or "")
+    server = str(invocation.get("server") or "")
+    if server:
+        namespace = "mcp__" + server.replace("-", "_")
+        return _codex_tool_name(namespace, tool_name)
+    return tool_name
+
+
+def _codex_tool_response(result: Any) -> dict[str, Any]:
+    if isinstance(result, dict) and "Ok" in result:
+        ok = result.get("Ok")
+        if isinstance(ok, dict):
+            return ok
+        return {"content": [{"type": "text", "text": _tool_result_text(ok)}], "isError": False}
+    if isinstance(result, dict) and "Err" in result:
+        return {
+            "content": [{"type": "text", "text": _tool_result_text(result.get("Err"))}],
+            "isError": True,
+        }
+    return {
+        "content": [{"type": "text", "text": _tool_result_text(result)}],
+        "isError": True,
+    }
+
+
+def extract_query_payloads(transcript_path: str, session_id: str) -> list[dict[str, Any]]:
+    """Reconstruct PostToolUse-shaped payloads for query tools from a transcript.
+
+    PostToolUse hooks never fire for ``isError`` tool results in some harnesses,
+    so the transcript is the only complete record of failed queries. Supports
+    both Claude-style ``tool_use``/``tool_result`` message blocks and Codex
+    ``response_item/function_call`` plus ``event_msg/mcp_tool_call_end`` records,
+    normalizing each response into the ``{content, isError}`` shape the
+    classifier already understands.
+    """
+    pending: dict[Any, dict[str, Any]] = {}
+    payloads: list[dict[str, Any]] = []
+    for record in _iter_transcript_records(transcript_path):
+        payload = record.get("payload") if isinstance(record, dict) else None
+        if isinstance(payload, dict):
+            payload_type = payload.get("type")
+            if record.get("type") == "response_item" and payload_type == "function_call":
+                tool_name = _codex_tool_name(payload.get("namespace"), payload.get("name"))
+                if _engine(tool_name) is not None:
+                    pending[payload.get("call_id")] = {
+                        "tool_name": tool_name,
+                        "tool_input": _decode_arguments(payload.get("arguments")),
+                    }
+                continue
+            if record.get("type") == "event_msg" and payload_type == "mcp_tool_call_end":
+                call_id = payload.get("call_id")
+                invocation = payload.get("invocation")
+                invocation = invocation if isinstance(invocation, dict) else {}
+                meta = pending.pop(call_id, None)
+                if meta is None:
+                    tool_name = _codex_invocation_tool_name(invocation)
+                    if _engine(tool_name) is None:
+                        continue
+                    meta = {
+                        "tool_name": tool_name,
+                        "tool_input": invocation.get("arguments"),
+                    }
+                payloads.append(
+                    {
+                        "session_id": session_id,
+                        "tool_use_id": call_id,
+                        "tool_name": meta["tool_name"],
+                        "tool_input": meta["tool_input"],
+                        "tool_response": _codex_tool_response(payload.get("result")),
+                    }
+                )
+                continue
+
+        message = record.get("message") if isinstance(record, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "tool_use":
+                if _engine(str(block.get("name") or "")) is None:
+                    continue
+                pending[block.get("id")] = {
+                    "tool_name": str(block.get("name") or ""),
+                    "tool_input": block.get("input"),
+                }
+            elif block_type == "tool_result":
+                meta = pending.pop(block.get("tool_use_id"), None)
+                if meta is None:
+                    continue
+                payloads.append(
+                    {
+                        "session_id": session_id,
+                        "tool_use_id": block.get("tool_use_id"),
+                        "tool_name": meta["tool_name"],
+                        "tool_input": meta["tool_input"],
+                        "tool_response": {
+                            "content": [
+                                {"type": "text", "text": _tool_result_text(block.get("content"))}
+                            ],
+                            "isError": bool(block.get("is_error")),
+                        },
+                    }
+                )
+    return payloads
+
+
+def capture_transcript(
+    transcript_path: str,
+    session_id: str,
+    project_payload: dict[str, Any],
+    project_root: Path,
+) -> int:
+    """Scan a transcript and persist every detectable query issue. Idempotent.
+
+    Reuses the same stable ``query-execution:{session}:{tool_use_id}`` ids as the
+    PostToolUse hook, so success-path issues already captured live converge on the
+    same nodes instead of duplicating.
+    """
+    projections = [
+        projection
+        for payload in extract_query_payloads(transcript_path, session_id)
+        if (projection := build_failure_projection(payload)) is not None
+    ]
+    if not projections:
+        return 0
+
+    from neo4j import GraphDatabase
+
+    project = resolve_project(project_payload, project_root)
+    if project is None:
+        return 0
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    uri, user, password, database = neo4j_config()
+    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        with driver.session(database=database) as session:
+            session.execute_write(ensure_query_failure_schema)
+            for projection in projections:
+                session.execute_write(
+                    write_failure_projection,
+                    project,
+                    session_id,
+                    projection,
+                    timestamp,
+                )
+    return len(projections)
+
+
 def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
     load_dotenv(project_root / ".env")

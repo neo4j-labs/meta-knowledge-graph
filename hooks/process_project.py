@@ -40,6 +40,8 @@ from project_common import (  # noqa: E402
     truncate,
 )
 
+import capture_query_failures  # noqa: E402
+
 
 DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME = "default"
 MEMORY_EXTRACTION_PROMPT_TOKENS = (
@@ -863,6 +865,28 @@ def main() -> int:
     payload = _read_payload()
     if args.session_id:
         payload["session_id"] = args.session_id
+
+    # Deterministic query-failure capture runs synchronously in the foreground
+    # hook: it is LLM-free, and only the foreground payload carries
+    # transcript_path (the background re-invocation gets only --session-id).
+    # PostToolUse never fires for isError tool results, so the transcript is the
+    # sole complete record of failed queries.
+    transcript_path = payload.get("transcript_path")
+    if transcript_path:
+        try:
+            captured = capture_query_failures.capture_transcript(
+                transcript_path,
+                str(payload.get("session_id") or "unknown"),
+                payload,
+                project_root,
+            )
+            if captured:
+                print(f"[process_project] captured {captured} query issue(s) from transcript")
+        except Exception as exc:  # pragma: no cover - hook must never crash the session
+            print(
+                f"[process_project] transcript failure capture failed: {exc}",
+                file=sys.stderr,
+            )
 
     if args.background:
         _spawn_background(
