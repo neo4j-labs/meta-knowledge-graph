@@ -29,14 +29,14 @@ from project_common import (  # noqa: E402
     fetch_project_decisions,
     fetch_project_learnings,
     learning_id,
+    learning_namespace,
     llm_model,
     llm_ready,
     load_dotenv,
     merge_project_and_session,
-    memory_extraction_prompt_suggestion_id,
     neo4j_config,
+    normalize_scope,
     resolve_project,
-    system_prompt_suggestion_id,
     truncate,
 )
 
@@ -58,48 +58,30 @@ Current completed work:
 
 [[EXISTING_MEMORY]]
 
-Decide whether this completed work contains durable project memory worth storing.
+Decide whether this completed work contains durable memory worth storing.
 Prefer updating existing memory when it is materially the same idea. Create a new
 item only for a distinct reusable learning or major decision. Return ignore when
 the work is routine, transient, or already covered without needing reinforcement.
 
 Classify each candidate into the most specific applicable bucket. Do not record
 the same signal in multiple buckets. Use this routing precedence:
-1. memory_extraction_prompt_updates: feedback about this extraction prompt,
-   extraction quality, duplicate handling, sensitivity filtering, output
-   validation, or misclassification. Do not also create a learning for the same
-   signal.
-2. system_prompt_updates: explicit or repeatedly reinforced durable preferences
-   about assistant behavior, communication style, workflow defaults, or broad
-   operating principles for future sessions. Do not also create a learning for
-   the same signal.
-3. decisions: explicit decisions ("Decision:", "we decided", "going forward
+1. decisions: explicit decisions ("Decision:", "we decided", "going forward
    must/should") or stable project policy choices with implementation impact.
    Do not also create a learning for the same signal.
-4. learnings: reusable project facts, environment quirks, domain observations,
-   or task patterns that are not better represented as prompt updates or
-   decisions.
+2. learnings: reusable facts, environment quirks, domain observations, durable
+   user preferences, or task patterns that are not better represented as a
+   decision.
 
-If the work reveals that the persistent system prompt itself should change, propose
-a system_prompt_update. These should be uncommon, but use them instead of
-learnings when the signal belongs in the persistent system prompt. They may be
-general operating-principle changes, or high-level stable information about the
-user this prompt serves, such as broad interests, communication/workflow
-preferences, or durable domain priorities. Only suggest user-specific prompt
-changes when the signal is explicit or repeatedly reinforced. Do not suggest
-project-specific facts, transient details, secrets, sensitive personal data, or
-one-off task context. Suggestions queue as candidates; a rate-limited rebuild
-folds them into the live SystemPrompt once enough accumulate.
-
-If this memory extraction prompt itself should change, propose a
-memory_extraction_prompt_update. These should be uncommon, but use them instead
-of learnings when the signal is about how extraction should behave. They should
-be targeted instructions that would improve future extraction quality, duplicate
-handling, sensitivity filtering, routing precedence, or output validation. Do not
-use this field to store project facts, user facts, or task context; those belong
-in learnings, decisions, or system prompt updates. Suggestions queue as candidates;
-a rate-limited rebuild folds them into the live MemoryExtractionPrompt once enough
-accumulate.
+Every learning has a scope:
+- "user": a durable fact about the *person* you are working with that holds
+  across projects — their role, communication/workflow preferences, broad
+  interests, recurring constraints, or domain priorities. Only record these when
+  the signal is explicit or repeatedly reinforced.
+- "project": a fact, quirk, observation, or task pattern specific to this
+  project or its environment.
+Default to "project" unless the signal is clearly about the person themselves.
+Never store secrets, sensitive personal data, transient details, or one-off task
+context in either scope.
 
 Return JSON only with this shape:
 {
@@ -107,6 +89,7 @@ Return JSON only with this shape:
     {
       "action": "create|update|ignore",
       "existing_id": "learning id when action is update, otherwise null",
+      "scope": "project|user",
       "text": "concise durable learning, or null",
       "task_pattern": "short reusable task pattern, or null",
       "confidence": 0.0,
@@ -121,26 +104,6 @@ Return JSON only with this shape:
       "rationale": "why the decision matters, or null",
       "task_pattern": "short reusable task pattern, or null",
       "related_learning_id": "optional related learning id, or null",
-      "confidence": 0.0,
-      "reason": "why this action"
-    }
-  ],
-  "system_prompt_updates": [
-    {
-      "action": "suggest|ignore",
-      "prompt_name": "default",
-      "instruction": "specific instruction to add or modify, or null",
-      "rationale": "why this belongs in the persistent system prompt, or null",
-      "confidence": 0.0,
-      "reason": "why this action"
-    }
-  ],
-  "memory_extraction_prompt_updates": [
-    {
-      "action": "suggest|ignore",
-      "prompt_name": "default",
-      "instruction": "specific instruction to add or modify in the memory extraction prompt, or null",
-      "rationale": "why this improves future memory extraction, or null",
       "confidence": 0.0,
       "reason": "why this action"
     }
@@ -358,8 +321,6 @@ def _memory_rows_from_actions(
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
-    list[dict[str, Any]],
-    list[dict[str, Any]],
 ]:
     learning_rows: list[dict[str, Any]] = []
     for item in actions.get("learnings") or []:
@@ -374,7 +335,12 @@ def _memory_rows_from_actions(
             continue
         if action == "create" and not text:
             continue
-        row_id = existing_id if action == "update" else learning_id(project.id, text)
+        scope = normalize_scope(item.get("scope"))
+        row_id = (
+            existing_id
+            if action == "update"
+            else learning_id(learning_namespace(project.id, scope), text)
+        )
         learning_rows.append(
             {
                 "id": row_id,
@@ -383,7 +349,7 @@ def _memory_rows_from_actions(
                 "task_pattern": item.get("task_pattern"),
                 "confidence": _confidence(item.get("confidence")),
                 "status": "candidate",
-                "scope": "project",
+                "scope": scope,
                 "source": f"project_{mode}_llm",
                 "summary": text or item.get("reason"),
                 "reason": item.get("reason"),
@@ -418,58 +384,7 @@ def _memory_rows_from_actions(
                 "reason": item.get("reason"),
             }
         )
-    system_prompt_rows: list[dict[str, Any]] = []
-    for item in actions.get("system_prompt_updates") or []:
-        if not isinstance(item, dict):
-            continue
-        action = str(item.get("action") or "").lower()
-        if action != "suggest":
-            continue
-        instruction = truncate(str(item.get("instruction") or "").strip(), 700)
-        if not instruction:
-            continue
-        prompt_name = str(item.get("prompt_name") or "default").strip() or "default"
-        system_prompt_rows.append(
-            {
-                "id": system_prompt_suggestion_id(project.id, instruction),
-                "action": action,
-                "prompt_name": prompt_name,
-                "instruction": instruction,
-                "rationale": truncate(str(item.get("rationale") or ""), 700) or None,
-                "confidence": _confidence(item.get("confidence")),
-                "status": "candidate",
-                "source": f"project_{mode}_llm",
-                "reason": item.get("reason"),
-            }
-        )
-    extraction_prompt_rows: list[dict[str, Any]] = []
-    for item in actions.get("memory_extraction_prompt_updates") or []:
-        if not isinstance(item, dict):
-            continue
-        action = str(item.get("action") or "").lower()
-        if action != "suggest":
-            continue
-        instruction = truncate(str(item.get("instruction") or "").strip(), 700)
-        if not instruction:
-            continue
-        prompt_name = (
-            str(item.get("prompt_name") or DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME).strip()
-            or DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
-        )
-        extraction_prompt_rows.append(
-            {
-                "id": memory_extraction_prompt_suggestion_id(project.id, instruction),
-                "action": action,
-                "prompt_name": prompt_name,
-                "instruction": instruction,
-                "rationale": truncate(str(item.get("rationale") or ""), 700) or None,
-                "confidence": _confidence(item.get("confidence")),
-                "status": "candidate",
-                "source": f"project_{mode}_llm",
-                "reason": item.get("reason"),
-            }
-        )
-    return learning_rows[:3], decision_rows[:5], system_prompt_rows[:3], extraction_prompt_rows[:3]
+    return learning_rows[:3], decision_rows[:5]
 
 
 def _fetch_unprocessed_events(
@@ -506,8 +421,6 @@ def _write_processing(
     events: list[dict[str, Any]],
     learning_rows: list[dict[str, Any]],
     decision_rows: list[dict[str, Any]],
-    system_prompt_rows: list[dict[str, Any]],
-    extraction_prompt_rows: list[dict[str, Any]],
     memory_extraction_prompt_name: str,
     memory_extraction_prompt_version: int,
     timestamp: str,
@@ -517,9 +430,7 @@ def _write_processing(
     processing_id = f"processing:{project.id}:{session_id}:{mode}:{digest}"
     summary = (
         f"Processed {len(event_ids)} {mode} events and produced "
-        f"{len(learning_rows)} learning actions, {len(decision_rows)} decision actions, "
-        f"{len(system_prompt_rows)} system prompt suggestions, and "
-        f"{len(extraction_prompt_rows)} memory extraction prompt suggestions."
+        f"{len(learning_rows)} learning actions and {len(decision_rows)} decision actions."
     )
 
     tx.run(
@@ -541,8 +452,6 @@ def _write_processing(
             pp.event_count = $event_count,
             pp.learning_count = $learning_count,
             pp.decision_count = $decision_count,
-            pp.system_prompt_suggestion_count = $system_prompt_suggestion_count,
-            pp.memory_extraction_prompt_suggestion_count = $memory_extraction_prompt_suggestion_count,
             pp.memory_extraction_prompt_name = $memory_extraction_prompt_name,
             pp.memory_extraction_prompt_version = $memory_extraction_prompt_version,
             pp.summary = $summary,
@@ -561,8 +470,6 @@ def _write_processing(
         event_count=len(event_ids),
         learning_count=len(learning_rows),
         decision_count=len(decision_rows),
-        system_prompt_suggestion_count=len(system_prompt_rows),
-        memory_extraction_prompt_suggestion_count=len(extraction_prompt_rows),
         memory_extraction_prompt_name=memory_extraction_prompt_name,
         memory_extraction_prompt_version=memory_extraction_prompt_version,
         summary=summary,
@@ -737,76 +644,6 @@ def _write_processing(
             learnings=learning_rows,
         )
 
-    if system_prompt_rows:
-        tx.run(
-            """
-            MATCH (p:Project {id: $project_id})
-            MATCH (s:Session {session_id: $session_id})
-            MATCH (pp:ProjectProcessing {id: $processing_id})
-            UNWIND $suggestions AS row
-            MERGE (suggestion:SystemPromptSuggestion {id: row.id})
-            ON CREATE SET suggestion.created_at = $timestamp,
-                          suggestion.status = row.status,
-                          suggestion.support_count = 0
-            SET suggestion.prompt_name = row.prompt_name,
-                suggestion.instruction = row.instruction,
-                suggestion.rationale = row.rationale,
-                suggestion.source = row.source,
-                suggestion.project_id = $project_id,
-                suggestion.source_session_id = $session_id,
-                suggestion.last_reason = row.reason,
-                suggestion.updated_at = $timestamp,
-                suggestion.support_count = coalesce(suggestion.support_count, 0) + 1,
-                suggestion.confidence = CASE
-                    WHEN coalesce(suggestion.confidence, 0.0) < row.confidence THEN row.confidence
-                    ELSE suggestion.confidence
-                END
-            MERGE (p)-[:HAS_SYSTEM_PROMPT_SUGGESTION]->(suggestion)
-            MERGE (suggestion)-[:FROM_SESSION]->(s)
-            MERGE (pp)-[:PROPOSED_SYSTEM_PROMPT_UPDATE]->(suggestion)
-            """,
-            project_id=project.id,
-            session_id=session_id,
-            processing_id=processing_id,
-            suggestions=system_prompt_rows,
-            timestamp=timestamp,
-        )
-
-    if extraction_prompt_rows:
-        tx.run(
-            """
-            MATCH (p:Project {id: $project_id})
-            MATCH (s:Session {session_id: $session_id})
-            MATCH (pp:ProjectProcessing {id: $processing_id})
-            UNWIND $suggestions AS row
-            MERGE (suggestion:MemoryExtractionPromptSuggestion {id: row.id})
-            ON CREATE SET suggestion.created_at = $timestamp,
-                          suggestion.status = row.status,
-                          suggestion.support_count = 0
-            SET suggestion.prompt_name = row.prompt_name,
-                suggestion.instruction = row.instruction,
-                suggestion.rationale = row.rationale,
-                suggestion.source = row.source,
-                suggestion.project_id = $project_id,
-                suggestion.source_session_id = $session_id,
-                suggestion.last_reason = row.reason,
-                suggestion.updated_at = $timestamp,
-                suggestion.support_count = coalesce(suggestion.support_count, 0) + 1,
-                suggestion.confidence = CASE
-                    WHEN coalesce(suggestion.confidence, 0.0) < row.confidence THEN row.confidence
-                    ELSE suggestion.confidence
-                END
-            MERGE (p)-[:HAS_MEMORY_EXTRACTION_PROMPT_SUGGESTION]->(suggestion)
-            MERGE (suggestion)-[:FROM_SESSION]->(s)
-            MERGE (pp)-[:PROPOSED_MEMORY_EXTRACTION_PROMPT_UPDATE]->(suggestion)
-            """,
-            project_id=project.id,
-            session_id=session_id,
-            processing_id=processing_id,
-            suggestions=extraction_prompt_rows,
-            timestamp=timestamp,
-        )
-
 
 def _write_processing_error(
     tx,
@@ -852,8 +689,6 @@ def _write_processing_error(
             pp.event_count = $event_count,
             pp.learning_count = 0,
             pp.decision_count = 0,
-            pp.system_prompt_suggestion_count = 0,
-            pp.memory_extraction_prompt_suggestion_count = 0,
             pp.error = $error_text,
             pp.summary = $summary,
             pp.attempt_count = coalesce(pp.attempt_count, 0) + 1,
@@ -942,12 +777,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     template=prompt_template,
                 )
                 actions = ask_llm_for_memory_actions(prompt)
-                (
-                    learning_rows,
-                    decision_rows,
-                    system_prompt_rows,
-                    extraction_prompt_rows,
-                ) = _memory_rows_from_actions(
+                learning_rows, decision_rows = _memory_rows_from_actions(
                     project,
                     mode,
                     actions,
@@ -960,8 +790,6 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     events,
                     learning_rows,
                     decision_rows,
-                    system_prompt_rows,
-                    extraction_prompt_rows,
                     prompt_name,
                     prompt_version,
                     timestamp,

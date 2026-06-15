@@ -99,19 +99,15 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("Existing similar decisions", prompt)
         self.assertIn("decision:mkg:existing", prompt)
         self.assertIn('"action": "create|update|ignore"', prompt)
-        self.assertIn("system_prompt_updates", prompt)
-        self.assertIn("memory_extraction_prompt_updates", prompt)
         self.assertIn("routing precedence", prompt)
-        self.assertIn("Do not record", prompt)
         self.assertIn("Do not also create a learning", prompt)
         self.assertIn("we decided", prompt)
-        self.assertIn("misclassification", prompt)
-        self.assertIn("rate-limited rebuild", prompt)
-        self.assertIn("MemoryExtractionPrompt", prompt)
-        self.assertIn("high-level stable information", prompt)
-        self.assertIn("broad interests", prompt)
-        self.assertIn("communication/workflow", prompt)
+        self.assertIn('"scope": "project|user"', prompt)
+        self.assertIn("durable fact about the *person*", prompt)
         self.assertIn("sensitive personal data", prompt)
+        # The self-rewriting prompt-suggestion buckets are gone.
+        self.assertNotIn("system_prompt_updates", prompt)
+        self.assertNotIn("memory_extraction_prompt_updates", prompt)
 
     def test_memory_prompt_falls_back_when_template_lacks_required_tokens(self) -> None:
         prompt = process_project.build_memory_extraction_prompt(
@@ -149,49 +145,49 @@ class ProjectHookTests(unittest.TestCase):
                     "confidence": 0.9,
                 }
             ],
-            "system_prompt_updates": [
-                {
-                    "action": "suggest",
-                    "prompt_name": "default",
-                    "instruction": (
-                        "When project context is missing, ask for project goals "
-                        "and success criteria."
-                    ),
-                    "rationale": "This should apply across future MKG sessions.",
-                    "confidence": 0.85,
-                },
-                {"action": "ignore", "reason": "Too specific."},
-            ],
-            "memory_extraction_prompt_updates": [
-                {
-                    "action": "suggest",
-                    "prompt_name": "default",
-                    "instruction": "Prefer update over create when similar memory already exists.",
-                    "rationale": "This improves future duplicate handling.",
-                    "confidence": 0.8,
-                },
-                {"action": "ignore", "reason": "Already covered."},
-            ],
         }
 
-        (
-            learning_rows,
-            decision_rows,
-            system_prompt_rows,
-            extraction_prompt_rows,
-        ) = process_project._memory_rows_from_actions(project, "turn", actions)
+        learning_rows, decision_rows = process_project._memory_rows_from_actions(
+            project, "turn", actions
+        )
 
         self.assertEqual(len(learning_rows), 1)
         self.assertEqual(learning_rows[0]["id"], "learning:mkg:existing")
         self.assertEqual(learning_rows[0]["action"], "update")
+        self.assertEqual(learning_rows[0]["scope"], "project")
         self.assertEqual(len(decision_rows), 1)
         self.assertEqual(decision_rows[0]["action"], "create")
-        self.assertEqual(len(system_prompt_rows), 1)
-        self.assertEqual(system_prompt_rows[0]["prompt_name"], "default")
-        self.assertIn("project goals", system_prompt_rows[0]["instruction"])
-        self.assertEqual(len(extraction_prompt_rows), 1)
-        self.assertEqual(extraction_prompt_rows[0]["prompt_name"], "default")
-        self.assertIn("Prefer update", extraction_prompt_rows[0]["instruction"])
+
+    def test_user_scoped_learning_is_namespaced_above_the_project(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        actions = {
+            "learnings": [
+                {
+                    "action": "create",
+                    "scope": "user",
+                    "text": "Prefers terse, data-grounded answers.",
+                    "confidence": 0.9,
+                },
+                {
+                    "action": "create",
+                    "scope": "bogus-scope",
+                    "text": "A plain project fact.",
+                    "confidence": 0.7,
+                },
+            ],
+            "decisions": [],
+        }
+
+        learning_rows, _ = process_project._memory_rows_from_actions(
+            project, "turn", actions
+        )
+
+        by_scope = {row["scope"]: row for row in learning_rows}
+        self.assertEqual(set(by_scope), {"user", "project"})
+        # User facts collapse onto a project-independent namespace so the same
+        # fact dedupes across every project the user touches.
+        self.assertTrue(by_scope["user"]["id"].startswith("learning:user:"))
+        self.assertTrue(by_scope["project"]["id"].startswith("learning:mkg:"))
 
     def test_learning_context_marks_candidates_as_hints(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
@@ -226,7 +222,26 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("Relevant project decisions", context)
         self.assertIn("Use repo folder name", context)
 
-    def test_fetch_learnings_excludes_already_injected_in_session(self) -> None:
+    def test_learning_context_includes_user_facts(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        context = project_common.format_learning_context(
+            project,
+            [],
+            None,
+            [
+                {
+                    "text": "Prefers terse, data-grounded answers.",
+                    "status": "approved",
+                    "confidence": 0.9,
+                }
+            ],
+        )
+
+        self.assertIn("What we know about the user", context)
+        self.assertIn("Prefers terse", context)
+        self.assertIn("user facts as durable context", context)
+
+    def test_fetch_learnings_excludes_injected_and_in_session_memory(self) -> None:
         captured: list[tuple[str, dict]] = []
 
         class FakeSession:
@@ -248,8 +263,45 @@ class ProjectHookTests(unittest.TestCase):
         )
 
         for query, params in captured:
+            # Skip memory already shown in this session AND memory first produced
+            # in it: re-surfacing it would only echo the live conversation.
             self.assertIn("INJECTED_IN", query)
+            self.assertIn("FROM_SESSION", query)
             self.assertEqual(params["session_id"], "session-1")
+
+    def test_fetch_project_learnings_restricts_to_project_scope(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeSession:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.fetch_project_learnings(
+            FakeSession(), project_id="mkg", query=None
+        )
+
+        self.assertTrue(captured)
+        self.assertIn("coalesce(l.scope, 'project') = 'project'", captured[0][0])
+
+    def test_fetch_user_learnings_spans_projects_and_filters_scope(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeSession:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.fetch_user_learnings(
+            FakeSession(), query=None, exclude_session_id="session-1"
+        )
+
+        self.assertTrue(captured)
+        query, params = captured[0]
+        self.assertIn("(l:Learning {scope: 'user'})", query)
+        self.assertNotIn("HAS_LEARNING", query)
+        self.assertIn("FROM_SESSION", query)
+        self.assertEqual(params["session_id"], "session-1")
 
     def test_mark_injected_in_session_links_memory_to_session(self) -> None:
         captured: list[tuple[str, dict]] = []
@@ -355,15 +407,16 @@ class ProjectHookTests(unittest.TestCase):
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
         stop_hooks = config["hooks"]["Stop"][0]["hooks"]
 
-        self.assertEqual(len(stop_hooks), 4)
+        # The self-rewriting prompt-rebuild Stop hooks are gone; only logging and
+        # memory extraction remain.
+        self.assertEqual(len(stop_hooks), 2)
         self.assertIn("hooks/log_event.py", stop_hooks[0]["command"])
         self.assertIn("--client codex", stop_hooks[0]["command"])
         self.assertIn("hooks/process_project.py", stop_hooks[1]["command"])
         self.assertIn("--mode turn --background", stop_hooks[1]["command"])
-        self.assertIn("hooks/apply_system_prompt.py", stop_hooks[2]["command"])
-        self.assertIn("--background", stop_hooks[2]["command"])
-        self.assertIn("hooks/apply_memory_extraction_prompt.py", stop_hooks[3]["command"])
-        self.assertIn("--background", stop_hooks[3]["command"])
+        joined = "\n".join(hook["command"] for hook in stop_hooks)
+        self.assertNotIn("apply_system_prompt.py", joined)
+        self.assertNotIn("apply_memory_extraction_prompt.py", joined)
 
     def test_codex_hooks_inject_project_context_for_supported_context_events(self) -> None:
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())

@@ -46,26 +46,43 @@ PERMISSION_PATTERNS = (
     "unauthenticated",
     "credentials",
 )
-RESOURCE_PATTERNS = (
+TIMEOUT_PATTERNS = (
     "timeout",
     "timed out",
     "deadline exceeded",
+    "transaction has been terminated",
+    "transaction timed out",
+)
+RESULT_SIZE_PATTERNS = (
+    "result size",
+    "result set too large",
+    "response too large",
+    "too many rows",
+    "exceeds the maximum",
+    "maximum response size",
+    "allowlargeresults",
+)
+RESOURCE_PATTERNS = (
     "resources exceeded",
     "quota exceeded",
     "rate limit",
-    "memory",
-    "result size",
-    "response too large",
+    "exceeded memory",
+    "memory limit",
+    "out of memory",
 )
+# Procedures/extensions that are genuinely absent from the instance.
 CAPABILITY_PATTERNS = (
     "procedurenotfound",
     "there is no procedure",
     "no procedure with the name",
-    "unknown function",
-    "functionnotfound",
+    "unknown procedure",
     "not installed",
     "not registered",
 )
+# A function call scoped to an optional plugin namespace; an unknown one means
+# the plugin is missing (capability gap). A bare unknown function is a typo and
+# is handled as a syntax error instead.
+EXTENSION_NAMESPACES = ("apoc.", "gds.")
 SCHEMA_PATTERNS = (
     "unrecognized name",
     "not found: table",
@@ -79,12 +96,14 @@ SCHEMA_PATTERNS = (
 )
 SYNTAX_PATTERNS = (
     "syntax error",
+    "syntaxerror",
     "parse error",
     "parser exception",
     "invalid input",
     "unexpected keyword",
     "unexpected end",
     "select list must not be empty",
+    "unknown function",
 )
 
 
@@ -219,6 +238,8 @@ def _looks_like_error(text: str) -> bool:
         pattern in lowered
         for pattern in (
             *PERMISSION_PATTERNS,
+            *TIMEOUT_PATTERNS,
+            *RESULT_SIZE_PATTERNS,
             *RESOURCE_PATTERNS,
             *CAPABILITY_PATTERNS,
             *SCHEMA_PATTERNS,
@@ -226,6 +247,15 @@ def _looks_like_error(text: str) -> bool:
             "neo4jerror",
             "invalidquery",
         )
+    )
+
+
+def _is_capability_issue(lowered: str) -> bool:
+    """A missing procedure, or an unknown function in an optional plugin namespace."""
+    if any(pattern in lowered for pattern in CAPABILITY_PATTERNS):
+        return True
+    return "unknown function" in lowered and any(
+        namespace in lowered for namespace in EXTENSION_NAMESPACES
     )
 
 
@@ -288,10 +318,10 @@ def detect_issues(engine: str, normalized: NormalizedResponse) -> list[dict[str,
                     evidence={"status": normalized.status},
                 )
             )
-        elif any(pattern in lowered for pattern in RESOURCE_PATTERNS):
+        elif any(pattern in lowered for pattern in TIMEOUT_PATTERNS):
             issues.append(
                 _issue(
-                    "timeout_or_resource_limit",
+                    "timeout",
                     raw,
                     severity="high",
                     confidence=0.92,
@@ -299,7 +329,29 @@ def detect_issues(engine: str, normalized: NormalizedResponse) -> list[dict[str,
                     needs_optimization=True,
                 )
             )
-        elif any(pattern in lowered for pattern in CAPABILITY_PATTERNS):
+        elif any(pattern in lowered for pattern in RESULT_SIZE_PATTERNS):
+            issues.append(
+                _issue(
+                    "result_size_limit",
+                    raw,
+                    severity="high",
+                    confidence=0.92,
+                    evidence={"status": normalized.status},
+                    needs_optimization=True,
+                )
+            )
+        elif any(pattern in lowered for pattern in RESOURCE_PATTERNS):
+            issues.append(
+                _issue(
+                    "resource_limit",
+                    raw,
+                    severity="high",
+                    confidence=0.9,
+                    evidence={"status": normalized.status},
+                    needs_optimization=True,
+                )
+            )
+        elif _is_capability_issue(lowered):
             issues.append(
                 _issue(
                     "capability_unavailable",

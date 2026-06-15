@@ -70,9 +70,22 @@ def _resolve_project_id(explicit: Optional[str]) -> str:
     return _slugify_project_id(Path(os.getcwd()).name or "default")
 
 
-def _learning_id(project_id: str, text: str) -> str:
-    digest = sha1(f"{project_id}\n{text.strip()}".encode("utf-8")).hexdigest()[:16]
-    return f"learning:{project_id}:{digest}"
+USER_LEARNING_NAMESPACE = "user"
+LEARNING_SCOPES = ("project", "user")
+
+
+def _normalize_scope(value: Optional[str]) -> str:
+    scope = (value or "").strip().lower()
+    return scope if scope in LEARNING_SCOPES else "project"
+
+
+def _learning_namespace(project_id: str, scope: str) -> str:
+    return USER_LEARNING_NAMESPACE if _normalize_scope(scope) == "user" else project_id
+
+
+def _learning_id(namespace: str, text: str) -> str:
+    digest = sha1(f"{namespace}\n{text.strip()}".encode("utf-8")).hexdigest()[:16]
+    return f"learning:{namespace}:{digest}"
 
 
 def _truncate(value: str, limit: int = MAX_LEARNING_TEXT) -> str:
@@ -713,6 +726,7 @@ def create_mcp_server(
                         YIELD node, score
                         MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)
                         WHERE node.status IN $statuses
+                          AND coalesce(node.scope, 'project') = 'project'
                         RETURN node.id AS id, node.text AS text, node.status AS status,
                                node.confidence AS confidence, node.task_pattern AS task_pattern,
                                score
@@ -734,6 +748,7 @@ def create_mcp_server(
                     """
                     MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
                     WHERE l.status IN $statuses
+                      AND coalesce(l.scope, 'project') = 'project'
                     RETURN l.id AS id, l.text AS text, l.status AS status,
                            l.confidence AS confidence, l.task_pattern AS task_pattern,
                            0.0 AS score
@@ -746,6 +761,46 @@ def create_mcp_server(
                     limit=limit,
                 )
                 learnings = [dict(r) async for r in records]
+
+            user_learnings: list[dict] = []
+            if normalized_query:
+                try:
+                    records = await session.run(
+                        """
+                        CALL db.index.fulltext.queryNodes('project_learning_fulltext', $q)
+                        YIELD node, score
+                        WHERE node.scope = 'user' AND node.status IN $statuses
+                        RETURN node.id AS id, node.text AS text, node.status AS status,
+                               node.confidence AS confidence, node.task_pattern AS task_pattern,
+                               score
+                        ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
+                                 score DESC, coalesce(node.confidence, 0.0) DESC
+                        LIMIT $limit
+                        """,
+                        q=normalized_query,
+                        statuses=resolved_statuses,
+                        limit=limit,
+                    )
+                    user_learnings = [dict(r) async for r in records]
+                except Neo4jError:
+                    user_learnings = []
+
+            if not user_learnings:
+                records = await session.run(
+                    """
+                    MATCH (l:Learning {scope: 'user'})
+                    WHERE l.status IN $statuses
+                    RETURN l.id AS id, l.text AS text, l.status AS status,
+                           l.confidence AS confidence, l.task_pattern AS task_pattern,
+                           0.0 AS score
+                    ORDER BY CASE l.status WHEN 'approved' THEN 0 ELSE 1 END,
+                             coalesce(l.last_used_at, l.updated_at, l.created_at) DESC
+                    LIMIT $limit
+                    """,
+                    statuses=resolved_statuses,
+                    limit=limit,
+                )
+                user_learnings = [dict(r) async for r in records]
 
             decisions: list[dict] = []
             if normalized_query:
@@ -784,22 +839,26 @@ def create_mcp_server(
                 )
                 decisions = [dict(r) async for r in records]
 
-            if learnings:
-                ids = [item["id"] for item in learnings if item.get("id")]
-                if ids:
-                    await session.run(
-                        """
-                        MATCH (l:Learning) WHERE l.id IN $ids
-                        SET l.last_used_at = datetime(),
-                            l.use_count = coalesce(l.use_count, 0) + 1
-                        """,
-                        ids=ids,
-                    )
+            ids = [
+                item["id"]
+                for item in (*user_learnings, *learnings)
+                if item.get("id")
+            ]
+            if ids:
+                await session.run(
+                    """
+                    MATCH (l:Learning) WHERE l.id IN $ids
+                    SET l.last_used_at = datetime(),
+                        l.use_count = coalesce(l.use_count, 0) + 1
+                    """,
+                    ids=ids,
+                )
 
         payload = {
             "project": dict(project_record) if project_record else {"id": resolved_pid},
             "query": normalized_query or None,
             "statuses": resolved_statuses,
+            "user_learnings": user_learnings,
             "learnings": learnings,
             "decisions": decisions,
         }
@@ -816,6 +875,14 @@ def create_mcp_server(
             None,
             description="Short reusable task pattern this learning applies to.",
         ),
+        scope: str = Field(
+            "project",
+            description=(
+                "'project' (default) for a fact about this project/environment, or "
+                "'user' for a durable fact about the person that holds across "
+                "projects (role, preferences, recurring constraints)."
+            ),
+        ),
         confidence: float = Field(
             0.6,
             description="Confidence 0.0-1.0. Existing higher confidence is preserved.",
@@ -829,14 +896,17 @@ def create_mcp_server(
             description="Provenance tag for the writer (e.g. 'agent', 'user', '<tool>_llm').",
         ),
     ) -> str:
-        """Persist a durable project learning. Idempotent on (project_id, text)."""
+        """Persist a durable learning. Idempotent on (scope namespace, text)."""
         clean_text = _truncate((text or "").strip())
         if not clean_text:
             return json.dumps({"status": "error", "error": "text is required"})
         normalized_status = status if status in {"candidate", "approved"} else "candidate"
+        normalized_scope = _normalize_scope(scope)
         clamped_confidence = max(0.0, min(1.0, float(confidence)))
         resolved_pid = _resolve_project_id(project_id)
-        row_id = _learning_id(resolved_pid, clean_text)
+        row_id = _learning_id(
+            _learning_namespace(resolved_pid, normalized_scope), clean_text
+        )
 
         async with neo4j_driver.session(database=database) as session:
             for stmt in (
@@ -867,7 +937,7 @@ def create_mcp_server(
                             WHEN l.status = 'approved' THEN l.status
                             ELSE $status
                         END,
-                        l.scope = coalesce(l.scope, 'project'),
+                        l.scope = $scope,
                         l.source = coalesce(l.source, $source),
                         l.last_source = $source,
                         l.project_id = $project_id,
@@ -879,6 +949,7 @@ def create_mcp_server(
                         END
                     MERGE (p)-[:HAS_LEARNING]->(l)
                     RETURN l.id AS id, l.text AS text, l.status AS status,
+                           l.scope AS scope,
                            l.confidence AS confidence, l.task_pattern AS task_pattern,
                            l.support_count AS support_count,
                            CASE WHEN l.created_at = l.updated_at THEN 'created' ELSE 'updated' END AS action
@@ -888,6 +959,7 @@ def create_mcp_server(
                     text=clean_text,
                     task_pattern=task_pattern,
                     status=normalized_status,
+                    scope=normalized_scope,
                     source=source,
                     confidence=clamped_confidence,
                 )

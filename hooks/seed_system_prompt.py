@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Seed or update a ``(:SystemPrompt {name})`` node in Neo4j.
 
-Replaced content is snapshotted as a ``(:SystemPromptVersion)`` and the version
-counter bumped — the same versioning the Stop-event rebuild uses — so manual
-seeds slot into one shared history chain. Re-seeding identical content is a
-no-op.
+The prompt is frozen at runtime — the SessionStart hook only reads it — so this
+seed script (and the future consolidation service) are the writers. Re-seeding
+identical content is a no-op; a content change bumps the version counter.
 
 Usage:
     python hooks/seed_system_prompt.py            # seed 'default' from DEFAULT_PROMPT
@@ -22,9 +21,12 @@ HOOK_DIR = Path(__file__).resolve().parent
 if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
-from apply_system_prompt import upsert_prompt  # noqa: E402
 from inject_system_prompt import DEFAULT_PROMPT, load_dotenv  # noqa: E402
-from project_common import ensure_project_schema, neo4j_config  # noqa: E402
+from project_common import (  # noqa: E402
+    ensure_project_schema,
+    neo4j_config,
+    upsert_prompt_node,
+)
 
 
 def main(argv: list[str]) -> int:
@@ -46,10 +48,10 @@ def main(argv: list[str]) -> int:
         with driver.session(database=database) as session:
             session.execute_write(ensure_project_schema)
             result = session.execute_write(
-                upsert_prompt,
+                upsert_prompt_node,
+                label="SystemPrompt",
                 name=name,
                 content=content,
-                source="seed",
                 now=now,
             )
     print(

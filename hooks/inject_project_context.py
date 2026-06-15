@@ -15,6 +15,7 @@ from project_common import (  # noqa: E402
     ensure_project_schema,
     fetch_project_decisions,
     fetch_project_learnings,
+    fetch_user_learnings,
     format_learning_context,
     load_dotenv,
     mark_injected_in_session,
@@ -56,6 +57,13 @@ def main() -> int:
         with GraphDatabase.driver(uri, auth=(user, password)) as driver:
             with driver.session(database=database) as session:
                 session.execute_write(ensure_project_schema)
+                user_learnings = fetch_user_learnings(
+                    session,
+                    query=prompt,
+                    statuses=["approved", "candidate"],
+                    limit=3,
+                    exclude_session_id=exclude_session_id,
+                )
                 learnings = fetch_project_learnings(
                     session,
                     project_id=project.id,
@@ -64,10 +72,12 @@ def main() -> int:
                     limit=5,
                     exclude_session_id=exclude_session_id,
                 )
-                mark_learnings_used(
-                    session,
-                    [learning["id"] for learning in learnings if learning.get("id")],
-                )
+                learning_ids = [
+                    learning["id"]
+                    for learning in (*user_learnings, *learnings)
+                    if learning.get("id")
+                ]
+                mark_learnings_used(session, learning_ids)
                 decisions = fetch_project_decisions(
                     session,
                     project_id=project.id,
@@ -78,7 +88,7 @@ def main() -> int:
                 mark_injected_in_session(
                     session,
                     session_id,
-                    [learning["id"] for learning in learnings if learning.get("id")],
+                    learning_ids,
                     [decision["id"] for decision in decisions if decision.get("id")],
                     hook_event,
                     source=payload.get("source"),
@@ -88,7 +98,7 @@ def main() -> int:
         print(f"[inject_project_context] error: {exc}", file=sys.stderr)
         return 0
 
-    context = format_learning_context(project, learnings, decisions)
+    context = format_learning_context(project, learnings, decisions, user_learnings)
     if not context:
         return 0
 

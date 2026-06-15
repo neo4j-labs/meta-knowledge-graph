@@ -135,14 +135,6 @@
           {
             "type": "command",
             "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/process_project.py\" --mode turn --background"
-          },
-          {
-            "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/apply_system_prompt.py\" --background"
-          },
-          {
-            "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/apply_memory_extraction_prompt.py\" --background"
           }
         ]
       }

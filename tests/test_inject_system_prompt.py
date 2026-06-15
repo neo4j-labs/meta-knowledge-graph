@@ -28,7 +28,9 @@ class InjectSystemPromptTests(unittest.TestCase):
         self.assertIn("what project they are working on", prompt)
         self.assertIn("what goals or", prompt)
         self.assertIn("success criteria", prompt)
-        self.assertIn("persist a refined ``SystemPrompt`` back", prompt)
+        self.assertIn("user-scoped learnings", prompt)
+        # The prompt no longer rewrites itself at runtime.
+        self.assertNotIn("persist a refined ``SystemPrompt`` back", prompt)
 
     def test_fallback_injection_log_is_concise(self) -> None:
         summary = inject_system_prompt.summarize_injection_content(

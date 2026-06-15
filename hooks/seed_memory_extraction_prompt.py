@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Seed or update a ``(:MemoryExtractionPrompt {name})`` node in Neo4j.
 
-Replaced content is snapshotted as a ``(:MemoryExtractionPromptVersion)`` and
-the version counter bumped, matching the Stop-event rebuild path.
+The template is frozen at runtime — ``process_project.py`` only reads it — so
+this seed script (and the future consolidation service) are the writers.
+Re-seeding identical content is a no-op; a content change bumps the version
+counter.
 
 Usage:
     python hooks/seed_memory_extraction_prompt.py            # seed 'default'
@@ -20,13 +22,17 @@ HOOK_DIR = Path(__file__).resolve().parent
 if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
-from apply_memory_extraction_prompt import upsert_memory_extraction_prompt  # noqa: E402
 from process_project import (  # noqa: E402
     DEFAULT_MEMORY_EXTRACTION_PROMPT,
     DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME,
     memory_extraction_prompt_is_valid,
 )
-from project_common import ensure_project_schema, load_dotenv, neo4j_config  # noqa: E402
+from project_common import (  # noqa: E402
+    ensure_project_schema,
+    load_dotenv,
+    neo4j_config,
+    upsert_prompt_node,
+)
 
 
 def main(argv: list[str]) -> int:
@@ -55,10 +61,10 @@ def main(argv: list[str]) -> int:
         with driver.session(database=database) as session:
             session.execute_write(ensure_project_schema)
             result = session.execute_write(
-                upsert_memory_extraction_prompt,
+                upsert_prompt_node,
+                label="MemoryExtractionPrompt",
                 name=name,
                 content=content,
-                source="seed",
                 now=now,
             )
     print(

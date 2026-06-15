@@ -125,28 +125,12 @@ def ensure_project_schema(tx) -> None:
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (l:Learning) REQUIRE l.id IS UNIQUE")
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (d:Decision) REQUIRE d.id IS UNIQUE")
     tx.run(
-        "CREATE CONSTRAINT IF NOT EXISTS FOR (s:SystemPromptSuggestion) "
-        "REQUIRE s.id IS UNIQUE"
-    )
-    tx.run(
         "CREATE CONSTRAINT IF NOT EXISTS FOR (sp:SystemPrompt) "
         "REQUIRE sp.name IS UNIQUE"
     )
     tx.run(
-        "CREATE CONSTRAINT IF NOT EXISTS FOR (v:SystemPromptVersion) "
-        "REQUIRE v.id IS UNIQUE"
-    )
-    tx.run(
-        "CREATE CONSTRAINT IF NOT EXISTS FOR (s:MemoryExtractionPromptSuggestion) "
-        "REQUIRE s.id IS UNIQUE"
-    )
-    tx.run(
         "CREATE CONSTRAINT IF NOT EXISTS FOR (p:MemoryExtractionPrompt) "
         "REQUIRE p.name IS UNIQUE"
-    )
-    tx.run(
-        "CREATE CONSTRAINT IF NOT EXISTS FOR (v:MemoryExtractionPromptVersion) "
-        "REQUIRE v.id IS UNIQUE"
     )
     tx.run(
         "CREATE CONSTRAINT IF NOT EXISTS FOR (p:ProjectProcessing) "
@@ -211,9 +195,25 @@ def link_event_to_project(
     )
 
 
-def learning_id(project_id: str, text: str) -> str:
-    digest = sha1(f"{project_id}\n{text.strip()}".encode("utf-8")).hexdigest()[:16]
-    return f"learning:{project_id}:{digest}"
+# User-scoped learnings live above any single project, so they are keyed on this
+# fixed namespace instead of a project id. The same durable fact about the person
+# then collapses to one node no matter which project surfaced it.
+USER_LEARNING_NAMESPACE = "user"
+LEARNING_SCOPES = ("project", "user")
+
+
+def normalize_scope(value: object) -> str:
+    scope = str(value or "").strip().lower()
+    return scope if scope in LEARNING_SCOPES else "project"
+
+
+def learning_namespace(project_id: str, scope: str) -> str:
+    return USER_LEARNING_NAMESPACE if normalize_scope(scope) == "user" else project_id
+
+
+def learning_id(namespace: str, text: str) -> str:
+    digest = sha1(f"{namespace}\n{text.strip()}".encode("utf-8")).hexdigest()[:16]
+    return f"learning:{namespace}:{digest}"
 
 
 def decision_id(project_id: str, text: str) -> str:
@@ -221,14 +221,46 @@ def decision_id(project_id: str, text: str) -> str:
     return f"decision:{project_id}:{digest}"
 
 
-def system_prompt_suggestion_id(project_id: str, instruction: str) -> str:
-    digest = sha1(f"{project_id}\n{instruction.strip()}".encode("utf-8")).hexdigest()[:16]
-    return f"system-prompt-suggestion:{project_id}:{digest}"
+PROMPT_LABELS = ("SystemPrompt", "MemoryExtractionPrompt")
 
 
-def memory_extraction_prompt_suggestion_id(project_id: str, instruction: str) -> str:
-    digest = sha1(f"{project_id}\n{instruction.strip()}".encode("utf-8")).hexdigest()[:16]
-    return f"memory-extraction-prompt-suggestion:{project_id}:{digest}"
+def upsert_prompt_node(tx, label: str, name: str, content: str, now: str) -> dict[str, Any]:
+    """MERGE a frozen prompt node (``SystemPrompt`` / ``MemoryExtractionPrompt``).
+
+    The prompts no longer rewrite themselves at runtime, so this only sets the
+    content and bumps a version counter when it actually changes; it keeps no
+    version-history snapshot. Seed scripts and the future consolidation service
+    are the only writers. Returns the action taken and the resulting version.
+    """
+    if label not in PROMPT_LABELS:
+        raise ValueError(f"unknown prompt label: {label!r}")
+    record = tx.run(
+        f"""
+        MERGE (p:{label} {{name: $name}})
+        ON CREATE SET p.created_at = datetime($now), p.version = 1
+        WITH p, p.content AS old_content
+        SET p.content = $content,
+            p.updated_at = datetime($now),
+            p.version = CASE
+                WHEN old_content IS NULL OR old_content = $content
+                    THEN coalesce(p.version, 1)
+                ELSE coalesce(p.version, 1) + 1
+            END
+        RETURN
+            CASE
+                WHEN old_content IS NULL THEN 'created'
+                WHEN old_content = $content THEN 'unchanged'
+                ELSE 'updated'
+            END AS action,
+            p.version AS version
+        """,
+        name=name,
+        content=content,
+        now=now,
+    ).single()
+    if not record:
+        return {"action": "created", "version": 1}
+    return {"action": str(record["action"]), "version": int(record["version"])}
 
 
 def truncate(value: str, limit: int = MAX_LEARNING_TEXT) -> str:
@@ -255,8 +287,10 @@ def fetch_project_learnings(
                 YIELD node, score
                 MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)
                 WHERE node.status IN $statuses
-                  AND ($session_id IS NULL
-                       OR NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id}))
+                  AND coalesce(node.scope, 'project') = 'project'
+                  AND ($session_id IS NULL OR (
+                       NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
+                       AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
                 RETURN node.id AS id,
                        node.text AS text,
                        node.status AS status,
@@ -284,8 +318,10 @@ def fetch_project_learnings(
         """
         MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
         WHERE l.status IN $statuses
-          AND ($session_id IS NULL
-               OR NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id}))
+          AND coalesce(l.scope, 'project') = 'project'
+          AND ($session_id IS NULL OR (
+               NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id})
+               AND NOT (l)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
         RETURN l.id AS id,
                l.text AS text,
                l.status AS status,
@@ -297,6 +333,78 @@ def fetch_project_learnings(
         LIMIT $limit
         """,
         project_id=project_id,
+        statuses=statuses,
+        limit=limit,
+        session_id=exclude_session_id,
+    )
+    return [dict(record) for record in records]
+
+
+def fetch_user_learnings(
+    session,
+    query: str | None,
+    statuses: list[str] | None = None,
+    limit: int = 5,
+    exclude_session_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch durable, cross-project facts about the user (``scope = 'user'``).
+
+    Unlike project learnings these are not bound to a single ``(:Project)``: a
+    user fact applies in every project, so the query spans all of them. Dedup
+    still skips anything already injected into or first produced during the
+    active session.
+    """
+    statuses = statuses or ["approved", "candidate"]
+    if query and query.strip():
+        try:
+            records = session.run(
+                """
+                CALL db.index.fulltext.queryNodes('project_learning_fulltext', $search_query)
+                YIELD node, score
+                WHERE node.scope = 'user'
+                  AND node.status IN $statuses
+                  AND ($session_id IS NULL OR (
+                       NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
+                       AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
+                RETURN node.id AS id,
+                       node.text AS text,
+                       node.status AS status,
+                       node.confidence AS confidence,
+                       node.task_pattern AS task_pattern,
+                       score
+                ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
+                         score DESC,
+                         coalesce(node.confidence, 0.0) DESC
+                LIMIT $limit
+                """,
+                search_query=query,
+                statuses=statuses,
+                limit=limit,
+                session_id=exclude_session_id,
+            )
+            rows = [dict(record) for record in records]
+            if rows:
+                return rows
+        except Exception:
+            pass
+
+    records = session.run(
+        """
+        MATCH (l:Learning {scope: 'user'})
+        WHERE l.status IN $statuses
+          AND ($session_id IS NULL OR (
+               NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id})
+               AND NOT (l)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
+        RETURN l.id AS id,
+               l.text AS text,
+               l.status AS status,
+               l.confidence AS confidence,
+               l.task_pattern AS task_pattern,
+               0.0 AS score
+        ORDER BY CASE l.status WHEN 'approved' THEN 0 ELSE 1 END,
+                 coalesce(l.last_used_at, l.updated_at, l.created_at) DESC
+        LIMIT $limit
+        """,
         statuses=statuses,
         limit=limit,
         session_id=exclude_session_id,
@@ -318,8 +426,9 @@ def fetch_project_decisions(
                 CALL db.index.fulltext.queryNodes('project_decision_fulltext', $search_query)
                 YIELD node, score
                 MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(node)
-                WHERE $session_id IS NULL
-                      OR NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
+                WHERE $session_id IS NULL OR (
+                      NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
+                      AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id}))
                 RETURN node.id AS id,
                        node.text AS text,
                        node.rationale AS rationale,
@@ -344,8 +453,9 @@ def fetch_project_decisions(
     records = session.run(
         """
         MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(d:Decision)
-        WHERE $session_id IS NULL
-              OR NOT (d)-[:INJECTED_IN]->(:Session {session_id: $session_id})
+        WHERE $session_id IS NULL OR (
+              NOT (d)-[:INJECTED_IN]->(:Session {session_id: $session_id})
+              AND NOT (d)-[:FROM_SESSION]->(:Session {session_id: $session_id}))
         RETURN d.id AS id,
                d.text AS text,
                d.rationale AS rationale,
@@ -445,14 +555,28 @@ def format_learning_context(
     project: ProjectRef,
     learnings: list[dict[str, Any]],
     decisions: list[dict[str, Any]] | None = None,
+    user_learnings: list[dict[str, Any]] | None = None,
 ) -> str:
     decisions = decisions or []
-    if not learnings and not decisions:
+    user_learnings = user_learnings or []
+    if not learnings and not decisions and not user_learnings:
         return ""
 
     lines = [
         f"Project context for {project.name} ({project.id}):",
     ]
+    if user_learnings:
+        lines.extend(["", "What we know about the user:"])
+        for learning in user_learnings:
+            status = learning.get("status") or "candidate"
+            confidence = learning.get("confidence")
+            confidence_text = (
+                f", confidence {float(confidence):.2f}" if confidence is not None else ""
+            )
+            lines.append(
+                f"- [{status}{confidence_text}] "
+                f"{truncate(str(learning.get('text') or ''), 240)}"
+            )
     if learnings:
         lines.extend(["", "Relevant project learnings:"])
         for learning in learnings:
@@ -479,7 +603,7 @@ def format_learning_context(
     lines.extend(
         [
             "",
-            "Use approved learnings as scoped project memory. Treat candidate learnings as hints and decisions as context, not policy.",
+            "Treat user facts as durable context about the person. Use approved learnings as scoped project memory; treat candidate learnings as hints and decisions as context, not policy.",
         ]
     )
     return "\n".join(lines)

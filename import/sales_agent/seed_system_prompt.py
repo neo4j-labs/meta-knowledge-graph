@@ -25,8 +25,7 @@ HOOKS_DIR = Path(__file__).resolve().parents[2] / "hooks"
 if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
 
-from apply_system_prompt import upsert_prompt  # noqa: E402
-from project_common import ensure_project_schema  # noqa: E402
+from project_common import ensure_project_schema, upsert_prompt_node  # noqa: E402
 
 PROMPT_NAME = "default"
 PROMPT_FILE = Path(__file__).resolve().parent / "system_prompt.md"
@@ -36,10 +35,10 @@ load_dotenv()
 
 def _seed(session, name: str, content: str, now: str) -> None:
     result = session.execute_write(
-        upsert_prompt,
+        upsert_prompt_node,
+        label="SystemPrompt",
         name=name,
         content=content,
-        source="seed",
         now=now,
     )
     print(

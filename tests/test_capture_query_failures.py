@@ -116,6 +116,77 @@ class QueryFailureCaptureTests(unittest.TestCase):
 
         self.assertEqual(self._issue_types(projection), ["capability_unavailable"])
 
+    def test_namespaced_unknown_function_is_capability(self) -> None:
+        projection = self._projection(
+            "mcp__meta_knowledge_graph__neo4j_read_cypher",
+            "RETURN apoc.text.format('%d', [1]) AS x",
+            _content(
+                "Neo.ClientError.Statement.SyntaxError: "
+                "Unknown function 'apoc.text.format' (line 1, column 8)"
+            ),
+        )
+
+        self.assertEqual(self._issue_types(projection), ["capability_unavailable"])
+
+    def test_bare_unknown_function_typo_is_syntax(self) -> None:
+        projection = self._projection(
+            "mcp__meta_knowledge_graph__neo4j_read_cypher",
+            "RETURN datetimee() AS now",
+            _content(
+                "Neo.ClientError.Statement.SyntaxError: "
+                "Unknown function 'datetimee' (line 1, column 8)"
+            ),
+        )
+
+        self.assertEqual(self._issue_types(projection), ["syntax_error"])
+
+    def test_captures_neo4j_timeout(self) -> None:
+        projection = self._projection(
+            "mcp__meta_knowledge_graph__neo4j_read_cypher",
+            "MATCH (a)-[*]->(b) RETURN count(*) AS c",
+            _content(
+                "The transaction has been terminated. "
+                "Retry your operation in a new transaction: the transaction timed out."
+            ),
+        )
+
+        self.assertEqual(self._issue_types(projection), ["timeout"])
+        self.assertTrue(projection["query"]["needs_optimization"])
+
+    def test_captures_bigquery_timeout(self) -> None:
+        projection = self._projection(
+            "mcp__meta_knowledge_graph__bigquery_execute_query",
+            "SELECT * FROM `acme_corp.account_product_usage`",
+            _content("Operation timed out after 600000 ms"),
+        )
+
+        self.assertEqual(self._issue_types(projection), ["timeout"])
+
+    def test_captures_bigquery_result_size_limit(self) -> None:
+        projection = self._projection(
+            "mcp__meta_knowledge_graph__bigquery_execute_query",
+            "SELECT * FROM `acme_corp.account_product_usage`",
+            _content(
+                "Response too large to return. Consider setting allowLargeResults "
+                "to true in your job configuration."
+            ),
+        )
+
+        self.assertEqual(self._issue_types(projection), ["result_size_limit"])
+        self.assertTrue(projection["query"]["needs_optimization"])
+
+    def test_captures_bigquery_resource_limit(self) -> None:
+        projection = self._projection(
+            "mcp__meta_knowledge_graph__bigquery_execute_query",
+            "SELECT * FROM `acme_corp.account_product_usage` ORDER BY mau",
+            _content(
+                "Resources exceeded during query execution: the query exceeded "
+                "memory limit."
+            ),
+        )
+
+        self.assertEqual(self._issue_types(projection), ["resource_limit"])
+
     def test_captures_neo4j_temporal_serialization_issue(self) -> None:
         projection = self._projection(
             "mcp__meta_knowledge_graph__neo4j_read_cypher",

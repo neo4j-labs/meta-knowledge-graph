@@ -43,10 +43,11 @@ available in this session):
    ``:Decision`` candidates. Do not double-record what the pipeline will catch.
 4. Keep stored items small, durable, and reusable across tasks. Avoid
    transcripts, ephemeral state, and project-internal trivia.
-5. Improve the persisted system prompt itself when the environment teaches you
-   something stable about how this project should be operated. Future sessions
-   read that prompt on start, so it is the right place for durable operating
-   guidance.
+5. Separate user memory from project memory. A durable fact about the person
+   you work with — their role, communication and workflow preferences, recurring
+   constraints, or domain priorities — is a user-scoped learning that should
+   follow them across projects. Repo- and domain-specific facts stay
+   project-scoped. Lean toward capturing both as you learn them.
 """
 
 FALLBACK_BOOTSTRAP_PROMPT = DEFAULT_PROMPT + """
@@ -73,13 +74,11 @@ in project context):
    - important constraints, relevant systems/assets,
    - what success criteria define "done".
    Keep project and goals first; name is secondary but worth having.
-5. Store only concise, factual, user-provided answers as durable learnings:
-   user name, project name, goals, constraints, success criteria. Do not store
-   a raw transcript or a verbose biography.
-6. Once bootstrap answers are gathered, persist a refined ``SystemPrompt`` back
-   to Neo4j using whatever write capability this runtime offers, folding in the
-   discovered tools, the user's name, and the project specifics, so the next
-   session loads that prompt directly.
+5. Store only concise, factual, user-provided answers as durable learnings.
+   Capture facts about the person (name, role, durable preferences) as
+   user-scoped learnings and facts about the work (project name, goals,
+   constraints, success criteria) as project-scoped learnings. Do not store a
+   raw transcript or a verbose biography.
 """
 
 
@@ -136,7 +135,7 @@ def summarize_injection_content(prompt_name: str, content: str, source: str) -> 
         f"Injected default MKG SystemPrompt (no persisted node for {prompt_name!r}; "
         f"{len(content)} chars). Drives bootstrap: inspect tools, recall memory, "
         "ask whether the user knows what they want or wants help starting, gather "
-        "name/project/goals when missing, then persist a refined SystemPrompt."
+        "name/project/goals when missing, then capture them as user/project learnings."
     )
 
 
