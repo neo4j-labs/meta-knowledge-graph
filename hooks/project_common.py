@@ -199,6 +199,7 @@ def link_event_to_project(
 # fixed namespace instead of a project id. The same durable fact about the person
 # then collapses to one node no matter which project surfaced it.
 USER_LEARNING_NAMESPACE = "user"
+USER_DECISION_NAMESPACE = "user"
 LEARNING_SCOPES = ("project", "user")
 
 
@@ -211,14 +212,18 @@ def learning_namespace(project_id: str, scope: str) -> str:
     return USER_LEARNING_NAMESPACE if normalize_scope(scope) == "user" else project_id
 
 
+def decision_namespace(project_id: str, scope: str) -> str:
+    return USER_DECISION_NAMESPACE if normalize_scope(scope) == "user" else project_id
+
+
 def learning_id(namespace: str, text: str) -> str:
     digest = sha1(f"{namespace}\n{text.strip()}".encode("utf-8")).hexdigest()[:16]
     return f"learning:{namespace}:{digest}"
 
 
-def decision_id(project_id: str, text: str) -> str:
-    digest = sha1(f"{project_id}\n{text.strip()}".encode("utf-8")).hexdigest()[:16]
-    return f"decision:{project_id}:{digest}"
+def decision_id(namespace: str, text: str) -> str:
+    digest = sha1(f"{namespace}\n{text.strip()}".encode("utf-8")).hexdigest()[:16]
+    return f"decision:{namespace}:{digest}"
 
 
 PROMPT_LABELS = ("SystemPrompt", "MemoryExtractionPrompt")
@@ -426,14 +431,16 @@ def fetch_project_decisions(
                 CALL db.index.fulltext.queryNodes('project_decision_fulltext', $search_query)
                 YIELD node, score
                 MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(node)
-                WHERE $session_id IS NULL OR (
+                WHERE ($session_id IS NULL OR (
                       NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
-                      AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id}))
+                      AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
+                  AND coalesce(node.scope, 'project') = 'project'
                 RETURN node.id AS id,
                        node.text AS text,
                        node.rationale AS rationale,
                        node.confidence AS confidence,
                        node.task_pattern AS task_pattern,
+                       coalesce(node.scope, 'project') AS scope,
                        score
                 ORDER BY score DESC,
                          coalesce(node.confidence, 0.0) DESC
@@ -453,6 +460,67 @@ def fetch_project_decisions(
     records = session.run(
         """
         MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(d:Decision)
+        WHERE ($session_id IS NULL OR (
+              NOT (d)-[:INJECTED_IN]->(:Session {session_id: $session_id})
+              AND NOT (d)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
+          AND coalesce(d.scope, 'project') = 'project'
+        RETURN d.id AS id,
+               d.text AS text,
+               d.rationale AS rationale,
+               d.confidence AS confidence,
+               d.task_pattern AS task_pattern,
+               coalesce(d.scope, 'project') AS scope,
+               0.0 AS score
+        ORDER BY coalesce(d.updated_at, d.created_at) DESC
+        LIMIT $limit
+        """,
+        project_id=project_id,
+        limit=limit,
+        session_id=exclude_session_id,
+    )
+    return [dict(record) for record in records]
+
+
+def fetch_user_decisions(
+    session,
+    query: str | None,
+    limit: int = 3,
+    exclude_session_id: str | None = None,
+) -> list[dict[str, Any]]:
+    if query and query.strip():
+        try:
+            records = session.run(
+                """
+                CALL db.index.fulltext.queryNodes('project_decision_fulltext', $search_query)
+                YIELD node, score
+                WHERE node.scope = 'user'
+                  AND ($session_id IS NULL OR (
+                       NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
+                       AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
+                RETURN node.id AS id,
+                       node.text AS text,
+                       node.rationale AS rationale,
+                       node.confidence AS confidence,
+                       node.task_pattern AS task_pattern,
+                       node.scope AS scope,
+                       score
+                ORDER BY score DESC,
+                         coalesce(node.confidence, 0.0) DESC
+                LIMIT $limit
+                """,
+                search_query=query,
+                limit=limit,
+                session_id=exclude_session_id,
+            )
+            rows = [dict(record) for record in records]
+            if rows:
+                return rows
+        except Exception:
+            pass
+
+    records = session.run(
+        """
+        MATCH (d:Decision {scope: 'user'})
         WHERE $session_id IS NULL OR (
               NOT (d)-[:INJECTED_IN]->(:Session {session_id: $session_id})
               AND NOT (d)-[:FROM_SESSION]->(:Session {session_id: $session_id}))
@@ -461,11 +529,11 @@ def fetch_project_decisions(
                d.rationale AS rationale,
                d.confidence AS confidence,
                d.task_pattern AS task_pattern,
+               d.scope AS scope,
                0.0 AS score
         ORDER BY coalesce(d.updated_at, d.created_at) DESC
         LIMIT $limit
         """,
-        project_id=project_id,
         limit=limit,
         session_id=exclude_session_id,
     )
@@ -556,10 +624,12 @@ def format_learning_context(
     learnings: list[dict[str, Any]],
     decisions: list[dict[str, Any]] | None = None,
     user_learnings: list[dict[str, Any]] | None = None,
+    user_decisions: list[dict[str, Any]] | None = None,
 ) -> str:
     decisions = decisions or []
     user_learnings = user_learnings or []
-    if not learnings and not decisions and not user_learnings:
+    user_decisions = user_decisions or []
+    if not learnings and not decisions and not user_learnings and not user_decisions:
         return ""
 
     lines = [
@@ -576,6 +646,17 @@ def format_learning_context(
             lines.append(
                 f"- [{status}{confidence_text}] "
                 f"{truncate(str(learning.get('text') or ''), 240)}"
+            )
+    if user_decisions:
+        lines.extend(["", "User-scoped decisions:"])
+        for decision in user_decisions:
+            confidence = decision.get("confidence")
+            confidence_text = (
+                f", confidence {float(confidence):.2f}" if confidence is not None else ""
+            )
+            lines.append(
+                f"- [decision{confidence_text}] "
+                f"{truncate(str(decision.get('text') or ''), 240)}"
             )
     if learnings:
         lines.extend(["", "Relevant project learnings:"])
@@ -603,7 +684,7 @@ def format_learning_context(
     lines.extend(
         [
             "",
-            "Treat user facts as durable context about the person. Use approved learnings as scoped project memory; treat candidate learnings as hints and decisions as context, not policy.",
+            "Treat user facts and user-scoped decisions as durable context about the person. Use approved learnings as scoped project memory; treat candidate learnings as hints and decisions as context, not policy.",
         ]
     )
     return "\n".join(lines)

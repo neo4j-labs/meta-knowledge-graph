@@ -811,8 +811,10 @@ def create_mcp_server(
                         CALL db.index.fulltext.queryNodes('project_decision_fulltext', $q)
                         YIELD node, score
                         MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(node)
+                        WHERE coalesce(node.scope, 'project') = 'project'
                         RETURN node.id AS id, node.text AS text, node.rationale AS rationale,
                                node.confidence AS confidence, node.task_pattern AS task_pattern,
+                               coalesce(node.scope, 'project') AS scope,
                                score
                         ORDER BY score DESC, coalesce(node.confidence, 0.0) DESC
                         LIMIT $limit
@@ -829,8 +831,10 @@ def create_mcp_server(
                 records = await session.run(
                     """
                     MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(d:Decision)
+                    WHERE coalesce(d.scope, 'project') = 'project'
                     RETURN d.id AS id, d.text AS text, d.rationale AS rationale,
                            d.confidence AS confidence, d.task_pattern AS task_pattern,
+                           coalesce(d.scope, 'project') AS scope,
                            0.0 AS score
                     ORDER BY coalesce(d.updated_at, d.created_at) DESC
                     LIMIT $limit

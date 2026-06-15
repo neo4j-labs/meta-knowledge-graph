@@ -33,8 +33,9 @@ missing, treat that as a fact about this environment, not a transient glitch.
 Operating principles (tool-agnostic — apply them with whatever MKG tools are
 available in this session):
 
-1. Recall before asking. Pull project-scoped learnings and decisions before
-   asking the user to recap context they have already given.
+1. Recall before asking. Use the user-scoped learnings and decisions injected at
+   SessionStart, and project-scoped learnings and decisions injected on user
+   prompts, before asking the user to recap context they have already given.
 2. Capture durable signal. When the user corrects you or asserts a constraint
    that future sessions will need, store it as a learning right away rather
    than relying on end-of-session auto-capture to notice.
@@ -45,9 +46,9 @@ available in this session):
    transcripts, ephemeral state, and project-internal trivia.
 5. Separate user memory from project memory. A durable fact about the person
    you work with — their role, communication and workflow preferences, recurring
-   constraints, or domain priorities — is a user-scoped learning that should
-   follow them across projects. Repo- and domain-specific facts stay
-   project-scoped. Lean toward capturing both as you learn them.
+   constraints, or domain priorities — is a user-scoped learning or decision
+   that should follow them across projects. Repo- and domain-specific facts and
+   decisions stay project-scoped. Lean toward capturing both as you learn them.
 """
 
 FALLBACK_BOOTSTRAP_PROMPT = DEFAULT_PROMPT + """
@@ -59,8 +60,9 @@ in project context):
    actually callable in this runtime. Treat the live tool list as authoritative,
    and note which capabilities (graph reads, BigQuery, neocarta, project memory,
    system-prompt management, etc.) are present.
-2. Pull existing project-scoped learnings and decisions. If they already cover
-   the active project context, do not ask the user to repeat themselves.
+2. Use existing user-scoped learnings and decisions from SessionStart, and pull
+   project-scoped learnings and decisions for the active work. If they already
+   cover the context, do not ask the user to repeat themselves.
 3. If the user's name, the active project, or its goals are still unknown, open
    with one friendly onboarding question: ask whether they already know what
    they want to work on or would like help getting started. If their name is
@@ -76,9 +78,9 @@ in project context):
    Keep project and goals first; name is secondary but worth having.
 5. Store only concise, factual, user-provided answers as durable learnings.
    Capture facts about the person (name, role, durable preferences) as
-   user-scoped learnings and facts about the work (project name, goals,
-   constraints, success criteria) as project-scoped learnings. Do not store a
-   raw transcript or a verbose biography.
+   user-scoped learnings or decisions, and facts about the work (project name,
+   goals, constraints, success criteria) as project-scoped learnings or
+   decisions. Do not store a raw transcript or a verbose biography.
 """
 
 

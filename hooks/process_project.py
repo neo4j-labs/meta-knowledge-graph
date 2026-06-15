@@ -25,6 +25,7 @@ if str(HOOK_DIR) not in sys.path:
 from project_common import (  # noqa: E402
     ProjectRef,
     decision_id,
+    decision_namespace,
     ensure_project_schema,
     fetch_project_decisions,
     fetch_project_learnings,
@@ -68,7 +69,7 @@ the work is routine, transient, or already covered without needing reinforcement
 Classify each candidate into the most specific applicable bucket. Do not record
 the same signal in multiple buckets. Use this routing precedence:
 1. decisions: explicit decisions ("Decision:", "we decided", "going forward
-   must/should") or stable project policy choices with implementation impact.
+   must/should") or stable policy choices with implementation impact.
    Do not also create a learning for the same signal.
 2. learnings: reusable facts, environment quirks, domain observations, durable
    user preferences, or task patterns that are not better represented as a
@@ -84,6 +85,13 @@ Every learning has a scope:
 Default to "project" unless the signal is clearly about the person themselves.
 Never store secrets, sensitive personal data, transient details, or one-off task
 context in either scope.
+
+Every decision also has a scope:
+- "user": a stable working agreement, preference, or operating policy about how
+  to collaborate with this person across projects.
+- "project": a project-specific policy or implementation choice.
+Default to "project" unless the decision is clearly about the person or their
+cross-project working preferences.
 
 Return JSON only with this shape:
 {
@@ -102,6 +110,7 @@ Return JSON only with this shape:
     {
       "action": "create|update|ignore",
       "existing_id": "decision id when action is update, otherwise null",
+      "scope": "project|user",
       "text": "concise major decision, or null",
       "rationale": "why the decision matters, or null",
       "task_pattern": "short reusable task pattern, or null",
@@ -173,6 +182,7 @@ def _format_existing_memory(
             lines.append(
                 "- "
                 f"id={item.get('id')}; "
+                f"scope={item.get('scope') or 'project'}; "
                 f"status={item.get('status')}; "
                 f"task_pattern={item.get('task_pattern')}; "
                 f"text={truncate(str(item.get('text') or ''), 300)}"
@@ -187,6 +197,7 @@ def _format_existing_memory(
             lines.append(
                 "- "
                 f"id={item.get('id')}; "
+                f"scope={item.get('scope') or 'project'}; "
                 f"task_pattern={item.get('task_pattern')}; "
                 f"text={truncate(str(item.get('text') or ''), 260)}; "
                 f"rationale={truncate(str(item.get('rationale') or ''), 260)}"
@@ -316,6 +327,15 @@ def _confidence(value: object, default: float = 0.6) -> float:
     return max(0.0, min(1.0, parsed))
 
 
+def _scope_from_action(item: dict[str, Any], existing_id: str) -> str:
+    scope_value = str(item.get("scope") or "").strip().lower()
+    if scope_value:
+        return normalize_scope(scope_value)
+    if existing_id.startswith(("learning:user:", "decision:user:")):
+        return "user"
+    return "project"
+
+
 def _memory_rows_from_actions(
     project: ProjectRef,
     mode: str,
@@ -337,7 +357,7 @@ def _memory_rows_from_actions(
             continue
         if action == "create" and not text:
             continue
-        scope = normalize_scope(item.get("scope"))
+        scope = _scope_from_action(item, existing_id)
         row_id = (
             existing_id
             if action == "update"
@@ -371,7 +391,12 @@ def _memory_rows_from_actions(
             continue
         if action == "create" and not text:
             continue
-        row_id = existing_id if action == "update" else decision_id(project.id, text)
+        scope = _scope_from_action(item, existing_id)
+        row_id = (
+            existing_id
+            if action == "update"
+            else decision_id(decision_namespace(project.id, scope), text)
+        )
         decision_rows.append(
             {
                 "id": row_id,
@@ -380,6 +405,7 @@ def _memory_rows_from_actions(
                 "rationale": truncate(str(item.get("rationale") or ""), 500) or None,
                 "task_pattern": item.get("task_pattern"),
                 "confidence": _confidence(item.get("confidence")),
+                "scope": scope,
                 "source": f"project_{mode}_llm",
                 "summary": text or item.get("reason"),
                 "related_learning_id": item.get("related_learning_id"),
@@ -571,11 +597,13 @@ def _write_processing(
                           d.task_pattern = row.task_pattern,
                           d.summary = row.summary,
                           d.source = row.source,
+                          d.scope = row.scope,
                           d.support_count = 0
             SET d.text = row.text,
                 d.rationale = row.rationale,
                 d.task_pattern = row.task_pattern,
                 d.summary = row.summary,
+                d.scope = row.scope,
                 d.last_source = row.source,
                 d.last_source_session_id = $session_id,
                 d.last_reason = row.reason,
@@ -609,6 +637,7 @@ def _write_processing(
                 d.rationale = coalesce(row.rationale, d.rationale),
                 d.task_pattern = coalesce(row.task_pattern, d.task_pattern),
                 d.summary = coalesce(row.summary, d.summary),
+                d.scope = coalesce(row.scope, d.scope, 'project'),
                 d.last_source = row.source,
                 d.last_source_session_id = $session_id,
                 d.last_reason = row.reason,

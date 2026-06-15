@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inject scoped project learnings for the current prompt/session."""
+"""Inject scoped memory for the current prompt/session."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from project_common import (  # noqa: E402
     ensure_project_schema,
     fetch_project_decisions,
     fetch_project_learnings,
+    fetch_user_decisions,
     fetch_user_learnings,
     format_learning_context,
     load_dotenv,
@@ -25,12 +26,19 @@ from project_common import (  # noqa: E402
 )
 
 
+USER_SCOPED_CONTEXT_EVENTS = {"SessionStart"}
+
+
 def _read_payload() -> dict:
     try:
         raw = sys.stdin.read()
         return json.loads(raw) if raw.strip() else {}
     except Exception:
         return {}
+
+
+def context_scope_for_hook(hook_event: str) -> str:
+    return "user" if hook_event in USER_SCOPED_CONTEXT_EVENTS else "project"
 
 
 def main() -> int:
@@ -49,6 +57,11 @@ def main() -> int:
         return 0
 
     prompt = payload.get("prompt") or payload.get("last_assistant_message") or ""
+    context_scope = context_scope_for_hook(hook_event)
+    user_learnings: list[dict] = []
+    user_decisions: list[dict] = []
+    learnings: list[dict] = []
+    decisions: list[dict] = []
 
     try:
         from neo4j import GraphDatabase
@@ -57,39 +70,52 @@ def main() -> int:
         with GraphDatabase.driver(uri, auth=(user, password)) as driver:
             with driver.session(database=database) as session:
                 session.execute_write(ensure_project_schema)
-                user_learnings = fetch_user_learnings(
-                    session,
-                    query=prompt,
-                    statuses=["approved", "candidate"],
-                    limit=3,
-                    exclude_session_id=exclude_session_id,
-                )
-                learnings = fetch_project_learnings(
-                    session,
-                    project_id=project.id,
-                    query=prompt,
-                    statuses=["approved", "candidate"],
-                    limit=5,
-                    exclude_session_id=exclude_session_id,
-                )
+                if context_scope == "user":
+                    user_learnings = fetch_user_learnings(
+                        session,
+                        query=prompt,
+                        statuses=["approved", "candidate"],
+                        limit=5,
+                        exclude_session_id=exclude_session_id,
+                    )
+                    user_decisions = fetch_user_decisions(
+                        session,
+                        query=prompt,
+                        limit=5,
+                        exclude_session_id=exclude_session_id,
+                    )
+                else:
+                    learnings = fetch_project_learnings(
+                        session,
+                        project_id=project.id,
+                        query=prompt,
+                        statuses=["approved", "candidate"],
+                        limit=5,
+                        exclude_session_id=exclude_session_id,
+                    )
+                    decisions = fetch_project_decisions(
+                        session,
+                        project_id=project.id,
+                        query=prompt,
+                        limit=3,
+                        exclude_session_id=exclude_session_id,
+                    )
                 learning_ids = [
                     learning["id"]
                     for learning in (*user_learnings, *learnings)
                     if learning.get("id")
                 ]
                 mark_learnings_used(session, learning_ids)
-                decisions = fetch_project_decisions(
-                    session,
-                    project_id=project.id,
-                    query=prompt,
-                    limit=3,
-                    exclude_session_id=exclude_session_id,
-                )
+                decision_ids = [
+                    decision["id"]
+                    for decision in (*user_decisions, *decisions)
+                    if decision.get("id")
+                ]
                 mark_injected_in_session(
                     session,
                     session_id,
                     learning_ids,
-                    [decision["id"] for decision in decisions if decision.get("id")],
+                    decision_ids,
                     hook_event,
                     source=payload.get("source"),
                     prompt=payload.get("prompt"),
@@ -98,7 +124,13 @@ def main() -> int:
         print(f"[inject_project_context] error: {exc}", file=sys.stderr)
         return 0
 
-    context = format_learning_context(project, learnings, decisions, user_learnings)
+    context = format_learning_context(
+        project,
+        learnings,
+        decisions,
+        user_learnings,
+        user_decisions,
+    )
     if not context:
         return 0
 

@@ -27,6 +27,7 @@ def load_hook_module(name: str):
 project_common = load_hook_module("project_common")
 process_project = load_hook_module("process_project")
 log_event = load_hook_module("log_event")
+inject_project_context = load_hook_module("inject_project_context")
 
 
 class ProjectHookTests(unittest.TestCase):
@@ -104,6 +105,8 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("we decided", prompt)
         self.assertIn('"scope": "project|user"', prompt)
         self.assertIn("durable fact about the *person*", prompt)
+        self.assertIn("Every decision also has a scope", prompt)
+        self.assertIn("cross-project working preferences", prompt)
         self.assertIn("sensitive personal data", prompt)
         # The self-rewriting prompt-suggestion buckets are gone.
         self.assertNotIn("system_prompt_updates", prompt)
@@ -157,6 +160,7 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(learning_rows[0]["scope"], "project")
         self.assertEqual(len(decision_rows), 1)
         self.assertEqual(decision_rows[0]["action"], "create")
+        self.assertEqual(decision_rows[0]["scope"], "project")
 
     def test_user_scoped_learning_is_namespaced_above_the_project(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
@@ -188,6 +192,37 @@ class ProjectHookTests(unittest.TestCase):
         # fact dedupes across every project the user touches.
         self.assertTrue(by_scope["user"]["id"].startswith("learning:user:"))
         self.assertTrue(by_scope["project"]["id"].startswith("learning:mkg:"))
+
+    def test_user_scoped_decision_is_namespaced_above_the_project(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        actions = {
+            "learnings": [],
+            "decisions": [
+                {
+                    "action": "create",
+                    "scope": "user",
+                    "text": "Use terse status updates across projects.",
+                    "rationale": "The user made this a durable working agreement.",
+                    "confidence": 0.9,
+                },
+                {
+                    "action": "create",
+                    "scope": "bogus-scope",
+                    "text": "Keep hook injection project-specific.",
+                    "rationale": "This is a project implementation policy.",
+                    "confidence": 0.8,
+                },
+            ],
+        }
+
+        _, decision_rows = process_project._memory_rows_from_actions(
+            project, "turn", actions
+        )
+
+        by_scope = {row["scope"]: row for row in decision_rows}
+        self.assertEqual(set(by_scope), {"user", "project"})
+        self.assertTrue(by_scope["user"]["id"].startswith("decision:user:"))
+        self.assertTrue(by_scope["project"]["id"].startswith("decision:mkg:"))
 
     def test_learning_context_marks_candidates_as_hints(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
@@ -239,7 +274,25 @@ class ProjectHookTests(unittest.TestCase):
 
         self.assertIn("What we know about the user", context)
         self.assertIn("Prefers terse", context)
-        self.assertIn("user facts as durable context", context)
+        self.assertIn("user facts and user-scoped decisions", context)
+
+    def test_learning_context_includes_user_decisions(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        context = project_common.format_learning_context(
+            project,
+            [],
+            None,
+            None,
+            [
+                {
+                    "text": "Use user-scoped memory only at SessionStart.",
+                    "confidence": 0.8,
+                }
+            ],
+        )
+
+        self.assertIn("User-scoped decisions", context)
+        self.assertIn("SessionStart", context)
 
     def test_fetch_learnings_excludes_injected_and_in_session_memory(self) -> None:
         captured: list[tuple[str, dict]] = []
@@ -284,6 +337,21 @@ class ProjectHookTests(unittest.TestCase):
         self.assertTrue(captured)
         self.assertIn("coalesce(l.scope, 'project') = 'project'", captured[0][0])
 
+    def test_fetch_project_decisions_restricts_to_project_scope(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeSession:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.fetch_project_decisions(
+            FakeSession(), project_id="mkg", query=None
+        )
+
+        self.assertTrue(captured)
+        self.assertIn("coalesce(d.scope, 'project') = 'project'", captured[0][0])
+
     def test_fetch_user_learnings_spans_projects_and_filters_scope(self) -> None:
         captured: list[tuple[str, dict]] = []
 
@@ -302,6 +370,34 @@ class ProjectHookTests(unittest.TestCase):
         self.assertNotIn("HAS_LEARNING", query)
         self.assertIn("FROM_SESSION", query)
         self.assertEqual(params["session_id"], "session-1")
+
+    def test_fetch_user_decisions_spans_projects_and_filters_scope(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeSession:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.fetch_user_decisions(
+            FakeSession(), query=None, exclude_session_id="session-1"
+        )
+
+        self.assertTrue(captured)
+        query, params = captured[0]
+        self.assertIn("(d:Decision {scope: 'user'})", query)
+        self.assertNotIn("HAS_DECISION", query)
+        self.assertIn("FROM_SESSION", query)
+        self.assertEqual(params["session_id"], "session-1")
+
+    def test_context_injection_scope_follows_hook_event(self) -> None:
+        self.assertEqual(
+            inject_project_context.context_scope_for_hook("SessionStart"), "user"
+        )
+        self.assertEqual(
+            inject_project_context.context_scope_for_hook("UserPromptSubmit"),
+            "project",
+        )
 
     def test_mark_injected_in_session_links_memory_to_session(self) -> None:
         captured: list[tuple[str, dict]] = []
