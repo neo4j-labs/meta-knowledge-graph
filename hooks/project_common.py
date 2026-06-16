@@ -136,6 +136,8 @@ def _execute_query_single(driver, database: str, query: str, **params):
 
 def ensure_project_schema(tx) -> None:
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE")
+    tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.session_id IS UNIQUE")
+    tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (e:SessionEvent) REQUIRE e.event_id IS UNIQUE")
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (l:Learning) REQUIRE l.id IS UNIQUE")
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (d:Decision) REQUIRE d.id IS UNIQUE")
     tx.run(
@@ -153,6 +155,10 @@ def ensure_project_schema(tx) -> None:
     tx.run(
         "CREATE CONSTRAINT IF NOT EXISTS FOR (v:SystemPromptVersion) "
         "REQUIRE v.id IS UNIQUE"
+    )
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (i:SystemPromptInjection) "
+        "REQUIRE i.injection_id IS UNIQUE"
     )
     tx.run(
         "CREATE FULLTEXT INDEX project_learning_fulltext IF NOT EXISTS "
@@ -333,7 +339,7 @@ def count_user_profile_memories_pending(driver, database: str) -> int:
         """
         MATCH (l:Learning {scope: 'user', status: 'candidate'})
         WHERE l.consolidated_at IS NULL
-           OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
+           OR toString(coalesce(l.updated_at, l.created_at)) > l.consolidated_at
         RETURN count(l) AS pending
         """
     )
@@ -352,14 +358,14 @@ def fetch_user_profile_memories_pending(
         """
         MATCH (l:Learning {scope: 'user', status: 'candidate'})
         WHERE l.consolidated_at IS NULL
-           OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
+           OR toString(coalesce(l.updated_at, l.created_at)) > l.consolidated_at
         RETURN l.id AS id,
                l.text AS text,
                l.confidence AS confidence,
                l.task_pattern AS task_pattern,
                coalesce(l.updated_at, l.created_at) AS updated_at
         ORDER BY coalesce(l.confidence, 0.0) DESC,
-                 coalesce(l.updated_at, l.created_at) DESC
+                 toString(coalesce(l.updated_at, l.created_at)) DESC
         LIMIT $limit
         """,
         limit=limit,
@@ -553,7 +559,7 @@ def fetch_project_learnings(
                l.task_pattern AS task_pattern,
                0.0 AS score
         ORDER BY CASE l.status WHEN 'approved' THEN 0 ELSE 1 END,
-                 coalesce(l.last_used_at, l.updated_at, l.created_at) DESC
+                 toString(coalesce(l.last_used_at, l.updated_at, l.created_at)) DESC
         LIMIT $limit
         """,
         project_id=project_id,
@@ -591,7 +597,7 @@ def fetch_user_learnings(
                 WHERE node.scope = 'user'
                   AND node.status IN $statuses
                   AND (node.consolidated_at IS NULL
-                       OR coalesce(node.updated_at, node.created_at) > node.consolidated_at)
+                       OR toString(coalesce(node.updated_at, node.created_at)) > node.consolidated_at)
                   AND ($session_id IS NULL OR (
                        NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                        AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -624,7 +630,7 @@ def fetch_user_learnings(
         MATCH (l:Learning {scope: 'user'})
         WHERE l.status IN $statuses
           AND (l.consolidated_at IS NULL
-               OR coalesce(l.updated_at, l.created_at) > l.consolidated_at)
+               OR toString(coalesce(l.updated_at, l.created_at)) > l.consolidated_at)
           AND ($session_id IS NULL OR (
                NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                AND NOT (l)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -635,7 +641,7 @@ def fetch_user_learnings(
                l.task_pattern AS task_pattern,
                0.0 AS score
         ORDER BY CASE l.status WHEN 'approved' THEN 0 ELSE 1 END,
-                 coalesce(l.last_used_at, l.updated_at, l.created_at) DESC
+                 toString(coalesce(l.last_used_at, l.updated_at, l.created_at)) DESC
         LIMIT $limit
         """,
         statuses=statuses,
@@ -851,16 +857,18 @@ def mark_injected_in_session(
 def mark_learnings_used(driver, database: str, learning_ids: list[str]) -> None:
     if not learning_ids:
         return
+    timestamp = datetime.now(timezone.utc).isoformat()
     _execute_query(
         driver,
         database,
         """
         MATCH (l:Learning)
         WHERE l.id IN $learning_ids
-        SET l.last_used_at = datetime(),
+        SET l.last_used_at = $timestamp,
             l.use_count = coalesce(l.use_count, 0) + 1
         """,
         learning_ids=learning_ids,
+        timestamp=timestamp,
     )
 
 

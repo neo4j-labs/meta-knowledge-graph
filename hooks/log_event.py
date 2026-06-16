@@ -70,12 +70,6 @@ def _read_transcript(path: str | None) -> str | None:
 
 
 def _ensure_constraints(tx) -> None:
-    tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.session_id IS UNIQUE")
-    tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (e:SessionEvent) REQUIRE e.event_id IS UNIQUE")
-    tx.run(
-        "CREATE FULLTEXT INDEX memory_fulltext IF NOT EXISTS "
-        "FOR (m:Memory) ON EACH [m.content, m.path]"
-    )
     ensure_project_schema(tx)
 
 

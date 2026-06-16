@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import tempfile
+from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
 from typing import Any, List, Literal, Optional
@@ -94,6 +95,10 @@ def _truncate(value: str, limit: int = MAX_LEARNING_TEXT) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 3].rstrip() + "..."
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_error(error: str, **extra: Any) -> str:
@@ -764,7 +769,7 @@ def create_mcp_server(
                            l.confidence AS confidence, l.task_pattern AS task_pattern,
                            0.0 AS score
                     ORDER BY CASE l.status WHEN 'approved' THEN 0 ELSE 1 END,
-                             coalesce(l.last_used_at, l.updated_at, l.created_at) DESC
+                             toString(coalesce(l.last_used_at, l.updated_at, l.created_at)) DESC
                     LIMIT $limit
                     """,
                     project_id=resolved_pid,
@@ -780,7 +785,10 @@ def create_mcp_server(
                         """
                         CALL db.index.fulltext.queryNodes('project_learning_fulltext', $q)
                         YIELD node, score
-                        WHERE node.scope = 'user' AND node.status IN $statuses
+                        WHERE node.scope = 'user'
+                          AND node.status IN $statuses
+                          AND (node.consolidated_at IS NULL
+                               OR toString(coalesce(node.updated_at, node.created_at)) > node.consolidated_at)
                         RETURN node.id AS id, node.text AS text, node.status AS status,
                                node.confidence AS confidence, node.task_pattern AS task_pattern,
                                score
@@ -801,11 +809,13 @@ def create_mcp_server(
                     """
                     MATCH (l:Learning {scope: 'user'})
                     WHERE l.status IN $statuses
+                      AND (l.consolidated_at IS NULL
+                           OR toString(coalesce(l.updated_at, l.created_at)) > l.consolidated_at)
                     RETURN l.id AS id, l.text AS text, l.status AS status,
                            l.confidence AS confidence, l.task_pattern AS task_pattern,
                            0.0 AS score
                     ORDER BY CASE l.status WHEN 'approved' THEN 0 ELSE 1 END,
-                             coalesce(l.last_used_at, l.updated_at, l.created_at) DESC
+                             toString(coalesce(l.last_used_at, l.updated_at, l.created_at)) DESC
                     LIMIT $limit
                     """,
                     statuses=resolved_statuses,
@@ -860,13 +870,15 @@ def create_mcp_server(
                 if item.get("id")
             ]
             if ids:
+                timestamp = _now_iso()
                 await _execute_query(
                     """
                     MATCH (l:Learning) WHERE l.id IN $ids
-                    SET l.last_used_at = datetime(),
+                    SET l.last_used_at = $timestamp,
                         l.use_count = coalesce(l.use_count, 0) + 1
                     """,
                     ids=ids,
+                    timestamp=timestamp,
                 )
 
         payload = {
@@ -922,6 +934,7 @@ def create_mcp_server(
         row_id = _learning_id(
             _learning_namespace(resolved_pid, normalized_scope), clean_text
         )
+        timestamp = _now_iso()
 
         async with neo4j_driver.session(database=database):
             for stmt in (
@@ -935,13 +948,13 @@ def create_mcp_server(
             record = await _execute_query_single(
                 """
                 MERGE (p:Project {id: $project_id})
-                ON CREATE SET p.created_at = datetime(),
+                ON CREATE SET p.created_at = $timestamp,
                               p.name = $project_id,
                               p.source = 'agent'
-                SET p.updated_at = datetime(),
-                    p.last_activity_at = datetime()
+                SET p.updated_at = $timestamp,
+                    p.last_activity_at = $timestamp
                 MERGE (l:Learning {id: $row_id})
-                ON CREATE SET l.created_at = datetime(),
+                ON CREATE SET l.created_at = $timestamp,
                               l.use_count = 0,
                               l.support_count = 0
                 SET l.text = $text,
@@ -955,7 +968,7 @@ def create_mcp_server(
                     l.source = coalesce(l.source, $source),
                     l.last_source = $source,
                     l.project_id = $project_id,
-                    l.updated_at = datetime(),
+                    l.updated_at = $timestamp,
                     l.support_count = coalesce(l.support_count, 0) + 1,
                     l.confidence = CASE
                         WHEN coalesce(l.confidence, 0.0) < $confidence THEN $confidence
@@ -976,6 +989,7 @@ def create_mcp_server(
                 scope=normalized_scope,
                 source=source,
                 confidence=clamped_confidence,
+                timestamp=timestamp,
             )
 
         return json.dumps(dict(record) if record else {}, default=str)

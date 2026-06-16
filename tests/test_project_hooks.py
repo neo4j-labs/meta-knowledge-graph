@@ -59,6 +59,8 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("FOR (e:SessionEvent)", joined)
         self.assertIn("CREATE (e:SessionEvent $event_props)", joined)
         self.assertIn("prev:SessionEvent", joined)
+        self.assertIn("FOR (i:SystemPromptInjection)", joined)
+        self.assertNotIn("m:Memory", joined)
         self.assertNotIn(":Event", joined)
 
     def test_memory_prompt_includes_similar_existing_memory(self) -> None:
@@ -521,6 +523,23 @@ class ProjectHookTests(unittest.TestCase):
         project_common.mark_injected_in_session(
             ExplodingDriver(), "neo4j", "session-1", [], [], "SessionStart"
         )
+
+    def test_mark_learnings_used_writes_iso_timestamp(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.mark_learnings_used(FakeDriver(), "neo4j", ["learning:mkg:a"])
+
+        self.assertEqual(len(captured), 1)
+        query, params = captured[0]
+        self.assertIn("l.last_used_at = $timestamp", query)
+        self.assertNotIn("last_used_at = datetime()", query)
+        self.assertIn("T", params["timestamp"])
+        self.assertEqual(params["learning_ids"], ["learning:mkg:a"])
 
     def test_background_processor_is_fire_and_forget(self) -> None:
         with patch.object(process_project.subprocess, "Popen") as popen:
