@@ -250,7 +250,7 @@ class DiffbotToolHelperTests(unittest.TestCase):
     def test_bounded_diffbot_json_keeps_first_match_as_last_resort(self) -> None:
         payload = {
             "data": [
-                {"entity": {"name": f"match-{i}", "blob": "x" * 9000}}
+                {"entity": {"name": f"match-{i}", "blob": "x" * 20000}}
                 for i in range(5)
             ]
         }
@@ -270,6 +270,27 @@ class DiffbotToolHelperTests(unittest.TestCase):
 
         self.assertEqual(result, payload)
         self.assertNotIn("truncated", result)
+
+    def test_compact_clips_article_text_and_keeps_all_articles(self) -> None:
+        payload = {
+            "data": [
+                {"entity": {"title": f"Article {i}", "text": "y" * 50000}}
+                for i in range(server.MAX_DIFFBOT_ARTICLES)
+            ]
+        }
+
+        result = json.loads(
+            server._bounded_diffbot_json(server._compact_diffbot_payload(payload))
+        )
+
+        self.assertEqual(len(result["data"]), server.MAX_DIFFBOT_ARTICLES)
+        self.assertNotIn("truncated", result)
+        for item in result["data"]:
+            text = item["entity"]["text"]
+            self.assertTrue(text.endswith("…[clipped]"))
+            self.assertLessEqual(
+                len(text), server.MAX_DIFFBOT_ARTICLE_TEXT_CHARS + len("…[clipped]")
+            )
 
     def test_enhance_params_require_valid_entity_type(self) -> None:
         params, error = server._build_diffbot_enhance_params(

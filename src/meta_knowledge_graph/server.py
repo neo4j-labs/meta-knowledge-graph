@@ -22,7 +22,14 @@ DIFFBOT_API_BASE_URL = "https://kg.diffbot.com/kg/v3"
 DIFFBOT_TIMEOUT_SECONDS = 30.0
 MAX_DIFFBOT_LOCATIONS = 3
 MAX_DIFFBOT_LIST_ITEMS = 6
-MAX_DIFFBOT_RESPONSE_CHARS = 20_000
+# News articles carry a full-text `text` body; clip it per article and cap the
+# number of articles so a multi-hit news search no longer collapses to a single
+# match (or overflows the client) on raw article bodies alone.
+MAX_DIFFBOT_ARTICLE_TEXT_CHARS = 5_000
+MAX_DIFFBOT_ARTICLES = 10
+# Sized to hold MAX_DIFFBOT_ARTICLES clipped articles (plus metadata/escaping)
+# without tripping the row-shedding last resort below.
+MAX_DIFFBOT_RESPONSE_CHARS = 70_000
 # Nested Diffbot entity references carry diffbotUri/image/types baggage that
 # dominated oversized enhance responses. Place refs collapse to their name;
 # person/org refs keep name + Diffbot id so they can be written back to Neo4j.
@@ -232,6 +239,13 @@ def _compact_diffbot_ref(value: Any) -> Any:
     return compact or value
 
 
+def _clip_article_text(value: str) -> str:
+    """Clip a long article body to a bounded snippet."""
+    if len(value) <= MAX_DIFFBOT_ARTICLE_TEXT_CHARS:
+        return value
+    return value[:MAX_DIFFBOT_ARTICLE_TEXT_CHARS] + "…[clipped]"
+
+
 def _compact_diffbot_location(location: Any) -> Any:
     if not isinstance(location, dict):
         return location
@@ -276,6 +290,8 @@ def _compact_diffbot_payload(value: Any) -> Any:
             ]
         elif key == "allNames" and isinstance(child, list):
             compacted[key] = child[:MAX_DIFFBOT_LIST_ITEMS]
+        elif key == "text" and isinstance(child, str):
+            compacted[key] = _clip_article_text(child)
         elif key in DIFFBOT_PLACE_REF_KEYS:
             compacted[key] = _entity_ref_name(child)
         elif key in DIFFBOT_AGENT_REF_KEYS:
@@ -607,7 +623,7 @@ def create_mcp_server(
             ),
             max_results: int = Field(
                 10,
-                description="Maximum news articles to return, from 1 to 25.",
+                description="Maximum news articles to return, from 1 to 10.",
             ),
         ) -> str:
             """Search recent Diffbot news/articles; use tags.label first, then text fallback."""
@@ -619,7 +635,7 @@ def create_mcp_server(
 
             params = {
                 "query": clean_dql,
-                "size": _bounded_int(max_results, 1, 25),
+                "size": _bounded_int(max_results, 1, MAX_DIFFBOT_ARTICLES),
                 "format": "json",
                 "cluster": "dedupe",
                 "filter": DIFFBOT_NEWS_FILTER,
