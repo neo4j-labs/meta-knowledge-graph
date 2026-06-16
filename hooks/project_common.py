@@ -179,12 +179,12 @@ def merge_project_and_session(
     tx.run(
         """
         MERGE (p:Project {id: $project_id})
-        ON CREATE SET p.created_at = $timestamp
+        ON CREATE SET p.created_at = datetime($timestamp)
         SET p += $project_props,
-            p.updated_at = $timestamp,
-            p.last_activity_at = $timestamp
+            p.updated_at = datetime($timestamp),
+            p.last_activity_at = datetime($timestamp)
         MERGE (s:Session {session_id: $session_id})
-        ON CREATE SET s.created_at = $timestamp
+        ON CREATE SET s.created_at = datetime($timestamp)
         MERGE (p)-[:HAS_SESSION]->(s)
         """,
         project_id=project.id,
@@ -205,10 +205,10 @@ def link_event_to_project(
     tx.run(
         """
         MERGE (p:Project {id: $project_id})
-        ON CREATE SET p.created_at = $timestamp
+        ON CREATE SET p.created_at = datetime($timestamp)
         SET p += $project_props,
-            p.updated_at = $timestamp,
-            p.last_activity_at = $timestamp
+            p.updated_at = datetime($timestamp),
+            p.last_activity_at = datetime($timestamp)
         MATCH (s:Session {session_id: $session_id})
         MERGE (p)-[:HAS_SESSION]->(s)
         """,
@@ -834,7 +834,7 @@ def mark_injected_in_session(
             f"""
             MATCH (s:Session {{session_id: $session_id}})
                   -[:HAS_EVENT]->(e:SessionEvent {{event_name: $hook_event}})
-            WHERE e.timestamp >= $since
+            WHERE e.timestamp >= datetime($since)
               AND ($prompt IS NULL OR e.prompt = $prompt)
               AND ($source IS NULL OR e.source = $source)
             WITH e
@@ -864,7 +864,7 @@ def mark_learnings_used(driver, database: str, learning_ids: list[str]) -> None:
         """
         MATCH (l:Learning)
         WHERE l.id IN $learning_ids
-        SET l.last_used_at = $timestamp,
+        SET l.last_used_at = datetime($timestamp),
             l.use_count = coalesce(l.use_count, 0) + 1
         """,
         learning_ids=learning_ids,

@@ -466,14 +466,14 @@ def _write_processing(
     tx.run(
         """
         MERGE (p:Project {id: $project_id})
-        ON CREATE SET p.created_at = $timestamp
-        SET p.updated_at = $timestamp,
-            p.last_activity_at = $timestamp
+        ON CREATE SET p.created_at = datetime($timestamp)
+        SET p.updated_at = datetime($timestamp),
+            p.last_activity_at = datetime($timestamp)
         MERGE (s:Session {session_id: $session_id})
-        ON CREATE SET s.created_at = $timestamp
+        ON CREATE SET s.created_at = datetime($timestamp)
         MERGE (p)-[:HAS_SESSION]->(s)
         MERGE (pp:ProjectProcessing {id: $processing_id})
-        ON CREATE SET pp.created_at = $timestamp
+        ON CREATE SET pp.created_at = datetime($timestamp)
         SET pp.project_id = $project_id,
             pp.session_id = $session_id,
             pp.mode = $mode,
@@ -485,7 +485,7 @@ def _write_processing(
             pp.memory_extraction_prompt_name = $memory_extraction_prompt_name,
             pp.memory_extraction_prompt_version = $memory_extraction_prompt_version,
             pp.summary = $summary,
-            pp.updated_at = $timestamp
+            pp.updated_at = datetime($timestamp)
         MERGE (p)-[:HAS_PROCESSING]->(pp)
         MERGE (s)-[:HAS_PROCESSING]->(pp)
         WITH pp
@@ -520,7 +520,7 @@ def _write_processing(
             MATCH (pp:ProjectProcessing {id: $processing_id})
             UNWIND $learnings AS row
             MERGE (l:Learning {id: row.id})
-            ON CREATE SET l.created_at = $timestamp,
+            ON CREATE SET l.created_at = datetime($timestamp),
                           l.text = row.text,
                           l.task_pattern = row.task_pattern,
                           l.summary = row.summary,
@@ -536,7 +536,7 @@ def _write_processing(
                 l.last_source_session_id = $session_id,
                 l.last_reason = row.reason,
                 l.project_id = $project_id,
-                l.updated_at = $timestamp,
+                l.updated_at = datetime($timestamp),
                 l.support_count = coalesce(l.support_count, 0) + 1,
                 l.confidence = CASE
                     WHEN coalesce(l.confidence, 0.0) < row.confidence THEN row.confidence
@@ -568,7 +568,7 @@ def _write_processing(
                 l.last_source_session_id = $session_id,
                 l.last_reason = row.reason,
                 l.project_id = $project_id,
-                l.updated_at = $timestamp,
+                l.updated_at = datetime($timestamp),
                 l.support_count = coalesce(l.support_count, 0) + 1,
                 l.confidence = CASE
                     WHEN coalesce(l.confidence, 0.0) < row.confidence THEN row.confidence
@@ -593,7 +593,7 @@ def _write_processing(
             MATCH (pp:ProjectProcessing {id: $processing_id})
             UNWIND $decisions AS row
             MERGE (d:Decision {id: row.id})
-            ON CREATE SET d.created_at = $timestamp,
+            ON CREATE SET d.created_at = datetime($timestamp),
                           d.text = row.text,
                           d.rationale = row.rationale,
                           d.task_pattern = row.task_pattern,
@@ -610,7 +610,7 @@ def _write_processing(
                 d.last_source_session_id = $session_id,
                 d.last_reason = row.reason,
                 d.project_id = $project_id,
-                d.updated_at = $timestamp,
+                d.updated_at = datetime($timestamp),
                 d.support_count = coalesce(d.support_count, 0) + 1,
                 d.confidence = CASE
                     WHEN coalesce(d.confidence, 0.0) < row.confidence THEN row.confidence
@@ -644,7 +644,7 @@ def _write_processing(
                 d.last_source_session_id = $session_id,
                 d.last_reason = row.reason,
                 d.project_id = $project_id,
-                d.updated_at = $timestamp,
+                d.updated_at = datetime($timestamp),
                 d.support_count = coalesce(d.support_count, 0) + 1,
                 d.confidence = CASE
                     WHEN coalesce(d.confidence, 0.0) < row.confidence THEN row.confidence
@@ -705,15 +705,15 @@ def _write_processing_error(
     tx.run(
         """
         MERGE (p:Project {id: $project_id})
-        ON CREATE SET p.created_at = $timestamp
-        SET p.updated_at = $timestamp,
-            p.last_activity_at = $timestamp
+        ON CREATE SET p.created_at = datetime($timestamp)
+        SET p.updated_at = datetime($timestamp),
+            p.last_activity_at = datetime($timestamp)
         MERGE (s:Session {session_id: $session_id})
-        ON CREATE SET s.created_at = $timestamp
+        ON CREATE SET s.created_at = datetime($timestamp)
         MERGE (p)-[:HAS_SESSION]->(s)
         MERGE (pp:ProjectProcessing {id: $processing_id})
-        ON CREATE SET pp.created_at = $timestamp,
-                      pp.first_error_at = $timestamp
+        ON CREATE SET pp.created_at = datetime($timestamp),
+                      pp.first_error_at = datetime($timestamp)
         SET pp.project_id = $project_id,
             pp.session_id = $session_id,
             pp.mode = $mode,
@@ -725,8 +725,8 @@ def _write_processing_error(
             pp.error = $error_text,
             pp.summary = $summary,
             pp.attempt_count = coalesce(pp.attempt_count, 0) + 1,
-            pp.last_error_at = $timestamp,
-            pp.updated_at = $timestamp
+            pp.last_error_at = datetime($timestamp),
+            pp.updated_at = datetime($timestamp)
         MERGE (p)-[:HAS_PROCESSING]->(pp)
         MERGE (s)-[:HAS_PROCESSING]->(pp)
         """,

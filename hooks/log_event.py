@@ -77,10 +77,11 @@ def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
     tx.run(
         """
         MERGE (s:Session {session_id: $session_id})
-        ON CREATE SET s.created_at = $timestamp, s.client = $client
+        ON CREATE SET s.created_at = datetime($timestamp), s.client = $client
         SET s.client = coalesce(s.client, $client)
         WITH s
         CREATE (e:SessionEvent $event_props)
+        SET e.timestamp = datetime($timestamp)
         CREATE (s)-[:HAS_EVENT]->(e)
         WITH s, e
         OPTIONAL MATCH (s)-[old_latest:LATEST_EVENT]->(prev:SessionEvent)
@@ -115,7 +116,7 @@ def _link_injected_memory(tx, session_id: str, event_id: str, event_name: str) -
           AND inj.last_injected_at >= datetime($since)
           AND NOT EXISTS {
               MATCH (m)-[:INJECTED_AT]->(recent:SessionEvent)
-              WHERE recent.timestamp >= $since
+              WHERE recent.timestamp >= datetime($since)
           }
         MERGE (m)-[r:INJECTED_AT]->(e)
         ON CREATE SET r.injected_at = datetime()

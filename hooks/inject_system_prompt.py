@@ -185,7 +185,7 @@ def record_injection(
                 driver.execute_query(
                     """
                     MERGE (s:Session {session_id: $session_id})
-                    ON CREATE SET s.created_at = $timestamp
+                    ON CREATE SET s.created_at = datetime($timestamp)
                     MERGE (s)-[:INJECTED]->(i:SystemPromptInjection {
                         prompt_name: $prompt_name,
                         content_sha: $content_sha,
@@ -197,11 +197,11 @@ def record_injection(
                                   i.content_summary = $content_summary,
                                   i.char_count = $char_count,
                                   i.summary_char_count = $summary_char_count,
-                                  i.timestamp = $timestamp,
+                                  i.timestamp = datetime($timestamp),
                                   i.injection_count = 1
-                    ON MATCH SET i.last_seen_at = $timestamp,
+                    ON MATCH SET i.last_seen_at = datetime($timestamp),
                                  i.injection_count = i.injection_count + 1
-                    WITH i, i.timestamp = $timestamp AS created
+                    WITH i, i.timestamp = datetime($timestamp) AS created
                     FOREACH (_ IN CASE WHEN created AND $source = 'neo4j' THEN [1] ELSE [] END |
                         MERGE (sp:SystemPrompt {name: $prompt_name})
                         MERGE (i)-[:OF_PROMPT]->(sp)

@@ -524,7 +524,7 @@ class ProjectHookTests(unittest.TestCase):
             ExplodingDriver(), "neo4j", "session-1", [], [], "SessionStart"
         )
 
-    def test_mark_learnings_used_writes_iso_timestamp(self) -> None:
+    def test_mark_learnings_used_casts_iso_timestamp(self) -> None:
         captured: list[tuple[str, dict]] = []
 
         class FakeDriver:
@@ -536,7 +536,7 @@ class ProjectHookTests(unittest.TestCase):
 
         self.assertEqual(len(captured), 1)
         query, params = captured[0]
-        self.assertIn("l.last_used_at = $timestamp", query)
+        self.assertIn("l.last_used_at = datetime($timestamp)", query)
         self.assertNotIn("last_used_at = datetime()", query)
         self.assertIn("T", params["timestamp"])
         self.assertEqual(params["learning_ids"], ["learning:mkg:a"])

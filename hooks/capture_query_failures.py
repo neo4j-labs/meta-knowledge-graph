@@ -542,26 +542,26 @@ def write_failure_projection(
         MATCH (p:Project {id: $project_id})
         MATCH (s:Session {session_id: $session_id})
         MERGE (q:QueryExecution {id: $query_row.id})
-        ON CREATE SET q.created_at = $timestamp
+        ON CREATE SET q.created_at = datetime($timestamp)
         SET q += $query_row,
             q.project_id = $project_id,
             q.session_id = $session_id,
-            q.updated_at = $timestamp,
-            q.last_seen_at = $timestamp
+            q.updated_at = datetime($timestamp),
+            q.last_seen_at = datetime($timestamp)
         MERGE (p)-[:HAS_QUERY_EXECUTION]->(q)
         MERGE (s)-[:HAS_QUERY_EXECUTION]->(q)
         WITH q
         UNWIND $issues AS row
         MERGE (issue:QueryIssue {id: row.id})
-        ON CREATE SET issue.created_at = $timestamp
+        ON CREATE SET issue.created_at = datetime($timestamp)
         SET issue.type = row.type,
             issue.severity = row.severity,
             issue.confidence = row.confidence,
             issue.message = row.message,
             issue.evidence_json = row.evidence_json,
             issue.needs_optimization = row.needs_optimization,
-            issue.updated_at = $timestamp,
-            issue.last_seen_at = $timestamp
+            issue.updated_at = datetime($timestamp),
+            issue.last_seen_at = datetime($timestamp)
         MERGE (q)-[:HAS_ISSUE]->(issue)
         """,
         project_id=project.id,
