@@ -77,12 +77,16 @@ the same signal in multiple buckets. Use this routing precedence:
 
 Every learning has a scope:
 - "user": a durable fact about the *person* you are working with that holds
-  across projects — their role, communication/workflow preferences, broad
-  interests, recurring constraints, or domain priorities. Only record these when
-  the signal is explicit or repeatedly reinforced.
+  across projects — their role and identity, communication/workflow
+  preferences, language and tooling preferences, coding and writing style,
+  broad interests, recurring constraints, or domain priorities. When the signal
+  is unambiguously about the person, scope it to "user" on the first explicit
+  mention; do not wait for it to be repeated. Require repetition only for
+  borderline traits you are inferring rather than ones the person stated.
 - "project": a fact, quirk, observation, or task pattern specific to this
   project or its environment.
-Default to "project" unless the signal is clearly about the person themselves.
+Default to "project" only when it is genuinely unclear whether the signal is
+about the person or the project; a clearly personal fact always takes "user".
 Never store secrets, sensitive personal data, transient details, or one-off task
 context in either scope.
 
