@@ -27,6 +27,20 @@ BASELINE_ENV = {
 
 
 class SalesAgentSeedAllTests(unittest.TestCase):
+    def test_sales_prompt_uses_mkg_memory_contract(self) -> None:
+        prompt = (ROOT / "import" / "sales_agent" / "system_prompt.md").read_text()
+        normalized_prompt = " ".join(prompt.split())
+
+        self.assertIn("Meta Knowledge Graph memory", prompt)
+        self.assertIn("always mean the Meta Knowledge Graph (MKG) memory", prompt)
+        self.assertIn("system: Neo4j-backed", prompt)
+        self.assertIn("Neo4j-backed `:Learning` / `:Decision` nodes", prompt)
+        self.assertIn("`project_get_context`, `project_add_learning`", prompt)
+        self.assertIn(
+            "Do not refer to, rely on, or imply any separate memory provider",
+            normalized_prompt,
+        )
+
     def test_baseline_env_requires_neo4j_and_openai(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(seed_all.SeedAllError) as ctx:
