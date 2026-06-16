@@ -225,18 +225,27 @@ def main(argv: list[str]) -> int:
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(ensure_project_schema)
-            session.run(
-                MERGE_PROJECT,
-                project_id=project_id,
-                project_name=project_name,
-                now=now,
-            )
-            session.run(
-                MERGE_LEARNINGS, project_id=project_id, rows=learning_rows, now=now
-            )
-            session.run(
-                MERGE_DECISIONS, project_id=project_id, rows=decision_rows, now=now
-            )
+        driver.execute_query(
+            MERGE_PROJECT,
+            project_id=project_id,
+            project_name=project_name,
+            now=now,
+            database_=database,
+        )
+        driver.execute_query(
+            MERGE_LEARNINGS,
+            project_id=project_id,
+            rows=learning_rows,
+            now=now,
+            database_=database,
+        )
+        driver.execute_query(
+            MERGE_DECISIONS,
+            project_id=project_id,
+            rows=decision_rows,
+            now=now,
+            database_=database,
+        )
 
     print(f"  seeded {len(learning_rows)} learnings, {len(decision_rows)} decisions "
           f"on (:Project {{id: '{project_id}'}})")

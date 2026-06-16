@@ -35,28 +35,30 @@ from project_common import (  # noqa: E402
 )
 
 
-def fetch_all_session_events(session, session_id: str):
-    records = session.run(
+def fetch_all_session_events(driver, database: str, session_id: str):
+    result = driver.execute_query(
         """
         MATCH (s:Session {session_id: $session_id})-[:HAS_EVENT]->(e:SessionEvent)
         RETURN properties(e) AS event
         ORDER BY e.timestamp
         """,
         session_id=session_id,
+        database_=database,
     )
-    return [dict(r["event"]) for r in records]
+    return [dict(r["event"]) for r in result.records]
 
 
-def fetch_events_for_processing(session, processing_id: str):
-    records = session.run(
+def fetch_events_for_processing(driver, database: str, processing_id: str):
+    result = driver.execute_query(
         """
         MATCH (:ProjectProcessing {id: $processing_id})-[:PROCESSED_EVENT]->(e:SessionEvent)
         RETURN properties(e) AS event
         ORDER BY e.timestamp
         """,
         processing_id=processing_id,
+        database_=database,
     )
-    return [dict(r["event"]) for r in records]
+    return [dict(r["event"]) for r in result.records]
 
 
 def main() -> int:
@@ -81,19 +83,19 @@ def main() -> int:
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         with driver.session(database=database) as sess:
             if args.processing_id:
-                events = fetch_events_for_processing(sess, args.processing_id)
+                events = fetch_events_for_processing(driver, database, args.processing_id)
             else:
-                events = fetch_all_session_events(sess, args.session_id)
+                events = fetch_all_session_events(driver, database, args.session_id)
             print(f"[debug] events: {len(events)}", file=sys.stderr)
             corpus = _event_corpus(events)
             print(f"[debug] corpus chars: {len(corpus)}", file=sys.stderr)
             search_query = _search_query(corpus)
             similar_learnings = fetch_project_learnings(
-                sess, project_id=project.id, query=search_query,
+                driver, database, project_id=project.id, query=search_query,
                 statuses=["approved", "candidate"], limit=8,
             )
             similar_decisions = fetch_project_decisions(
-                sess, project_id=project.id, query=search_query, limit=8,
+                driver, database, project_id=project.id, query=search_query, limit=8,
             )
             prompt_record = sess.execute_write(
                 load_or_seed_memory_extraction_prompt,

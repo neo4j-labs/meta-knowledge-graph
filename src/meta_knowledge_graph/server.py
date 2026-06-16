@@ -406,6 +406,18 @@ def create_mcp_server(
         },
     )
 
+    async def _execute_query(query: str, **params: Any) -> list[Any]:
+        result = await neo4j_driver.execute_query(
+            query,
+            database_=database,
+            **params,
+        )
+        return list(getattr(result, "records", result) or [])
+
+    async def _execute_query_single(query: str, **params: Any):
+        records = await _execute_query(query, **params)
+        return records[0] if records else None
+
     # Mount Neo4j Agent Memory MCP server (https://github.com/neo4j-labs/agent-memory)
     # if os.environ.get("OPENAI_API_KEY"):
     #     agent_memory_proxy = FastMCP.as_proxy(
@@ -708,20 +720,18 @@ def create_mcp_server(
         resolved_statuses = statuses or ["approved", "candidate"]
         normalized_query = (query or "").strip()
 
-        async with neo4j_driver.session(database=database) as session:
-            project_record = await (
-                await session.run(
-                    "MATCH (p:Project {id: $project_id}) "
-                    "RETURN p.id AS id, p.name AS name, p.status AS status, "
-                    "p.last_activity_at AS last_activity_at",
-                    project_id=resolved_pid,
-                )
-            ).single()
+        async with neo4j_driver.session(database=database):
+            project_record = await _execute_query_single(
+                "MATCH (p:Project {id: $project_id}) "
+                "RETURN p.id AS id, p.name AS name, p.status AS status, "
+                "p.last_activity_at AS last_activity_at",
+                project_id=resolved_pid,
+            )
 
             learnings: list[dict] = []
             if normalized_query:
                 try:
-                    records = await session.run(
+                    records = await _execute_query(
                         """
                         CALL db.index.fulltext.queryNodes('project_learning_fulltext', $q)
                         YIELD node, score
@@ -740,12 +750,12 @@ def create_mcp_server(
                         statuses=resolved_statuses,
                         limit=limit,
                     )
-                    learnings = [dict(r) async for r in records]
+                    learnings = [dict(r) for r in records]
                 except Neo4jError:
                     learnings = []
 
             if not learnings:
-                records = await session.run(
+                records = await _execute_query(
                     """
                     MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
                     WHERE l.status IN $statuses
@@ -761,12 +771,12 @@ def create_mcp_server(
                     statuses=resolved_statuses,
                     limit=limit,
                 )
-                learnings = [dict(r) async for r in records]
+                learnings = [dict(r) for r in records]
 
             user_learnings: list[dict] = []
             if normalized_query:
                 try:
-                    records = await session.run(
+                    records = await _execute_query(
                         """
                         CALL db.index.fulltext.queryNodes('project_learning_fulltext', $q)
                         YIELD node, score
@@ -782,12 +792,12 @@ def create_mcp_server(
                         statuses=resolved_statuses,
                         limit=limit,
                     )
-                    user_learnings = [dict(r) async for r in records]
+                    user_learnings = [dict(r) for r in records]
                 except Neo4jError:
                     user_learnings = []
 
             if not user_learnings:
-                records = await session.run(
+                records = await _execute_query(
                     """
                     MATCH (l:Learning {scope: 'user'})
                     WHERE l.status IN $statuses
@@ -801,12 +811,12 @@ def create_mcp_server(
                     statuses=resolved_statuses,
                     limit=limit,
                 )
-                user_learnings = [dict(r) async for r in records]
+                user_learnings = [dict(r) for r in records]
 
             decisions: list[dict] = []
             if normalized_query:
                 try:
-                    records = await session.run(
+                    records = await _execute_query(
                         """
                         CALL db.index.fulltext.queryNodes('project_decision_fulltext', $q)
                         YIELD node, score
@@ -823,12 +833,12 @@ def create_mcp_server(
                         q=normalized_query,
                         limit=limit,
                     )
-                    decisions = [dict(r) async for r in records]
+                    decisions = [dict(r) for r in records]
                 except Neo4jError:
                     decisions = []
 
             if not decisions:
-                records = await session.run(
+                records = await _execute_query(
                     """
                     MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(d:Decision)
                     WHERE coalesce(d.scope, 'project') = 'project'
@@ -842,7 +852,7 @@ def create_mcp_server(
                     project_id=resolved_pid,
                     limit=limit,
                 )
-                decisions = [dict(r) async for r in records]
+                decisions = [dict(r) for r in records]
 
             ids = [
                 item["id"]
@@ -850,7 +860,7 @@ def create_mcp_server(
                 if item.get("id")
             ]
             if ids:
-                await session.run(
+                await _execute_query(
                     """
                     MATCH (l:Learning) WHERE l.id IN $ids
                     SET l.last_used_at = datetime(),
@@ -913,62 +923,60 @@ def create_mcp_server(
             _learning_namespace(resolved_pid, normalized_scope), clean_text
         )
 
-        async with neo4j_driver.session(database=database) as session:
+        async with neo4j_driver.session(database=database):
             for stmt in (
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE",
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (l:Learning) REQUIRE l.id IS UNIQUE",
                 "CREATE FULLTEXT INDEX project_learning_fulltext IF NOT EXISTS "
                 "FOR (l:Learning) ON EACH [l.text, l.task_pattern, l.summary]",
             ):
-                await session.run(stmt)
+                await _execute_query(stmt)
 
-            record = await (
-                await session.run(
-                    """
-                    MERGE (p:Project {id: $project_id})
-                    ON CREATE SET p.created_at = datetime(),
-                                  p.name = $project_id,
-                                  p.source = 'agent'
-                    SET p.updated_at = datetime(),
-                        p.last_activity_at = datetime()
-                    MERGE (l:Learning {id: $row_id})
-                    ON CREATE SET l.created_at = datetime(),
-                                  l.use_count = 0,
-                                  l.support_count = 0
-                    SET l.text = $text,
-                        l.summary = $text,
-                        l.task_pattern = coalesce($task_pattern, l.task_pattern),
-                        l.status = CASE
-                            WHEN l.status = 'approved' THEN l.status
-                            ELSE $status
-                        END,
-                        l.scope = $scope,
-                        l.source = coalesce(l.source, $source),
-                        l.last_source = $source,
-                        l.project_id = $project_id,
-                        l.updated_at = datetime(),
-                        l.support_count = coalesce(l.support_count, 0) + 1,
-                        l.confidence = CASE
-                            WHEN coalesce(l.confidence, 0.0) < $confidence THEN $confidence
-                            ELSE l.confidence
-                        END
-                    MERGE (p)-[:HAS_LEARNING]->(l)
-                    RETURN l.id AS id, l.text AS text, l.status AS status,
-                           l.scope AS scope,
-                           l.confidence AS confidence, l.task_pattern AS task_pattern,
-                           l.support_count AS support_count,
-                           CASE WHEN l.created_at = l.updated_at THEN 'created' ELSE 'updated' END AS action
-                    """,
-                    project_id=resolved_pid,
-                    row_id=row_id,
-                    text=clean_text,
-                    task_pattern=task_pattern,
-                    status=normalized_status,
-                    scope=normalized_scope,
-                    source=source,
-                    confidence=clamped_confidence,
-                )
-            ).single()
+            record = await _execute_query_single(
+                """
+                MERGE (p:Project {id: $project_id})
+                ON CREATE SET p.created_at = datetime(),
+                              p.name = $project_id,
+                              p.source = 'agent'
+                SET p.updated_at = datetime(),
+                    p.last_activity_at = datetime()
+                MERGE (l:Learning {id: $row_id})
+                ON CREATE SET l.created_at = datetime(),
+                              l.use_count = 0,
+                              l.support_count = 0
+                SET l.text = $text,
+                    l.summary = $text,
+                    l.task_pattern = coalesce($task_pattern, l.task_pattern),
+                    l.status = CASE
+                        WHEN l.status = 'approved' THEN l.status
+                        ELSE $status
+                    END,
+                    l.scope = $scope,
+                    l.source = coalesce(l.source, $source),
+                    l.last_source = $source,
+                    l.project_id = $project_id,
+                    l.updated_at = datetime(),
+                    l.support_count = coalesce(l.support_count, 0) + 1,
+                    l.confidence = CASE
+                        WHEN coalesce(l.confidence, 0.0) < $confidence THEN $confidence
+                        ELSE l.confidence
+                    END
+                MERGE (p)-[:HAS_LEARNING]->(l)
+                RETURN l.id AS id, l.text AS text, l.status AS status,
+                       l.scope AS scope,
+                       l.confidence AS confidence, l.task_pattern AS task_pattern,
+                       l.support_count AS support_count,
+                       CASE WHEN l.created_at = l.updated_at THEN 'created' ELSE 'updated' END AS action
+                """,
+                project_id=resolved_pid,
+                row_id=row_id,
+                text=clean_text,
+                task_pattern=task_pattern,
+                status=normalized_status,
+                scope=normalized_scope,
+                source=source,
+                confidence=clamped_confidence,
+            )
 
         return json.dumps(dict(record) if record else {}, default=str)
 

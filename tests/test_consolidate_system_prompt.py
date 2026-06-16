@@ -206,19 +206,17 @@ class PendingCountQueryTests(unittest.TestCase):
     def test_pending_query_filters_user_candidates(self) -> None:
         captured: dict = {}
 
-        class FakeResult:
-            def single(self):
-                return {"pending": 7}
-
-        class FakeSession:
-            def run(self, query, **kwargs):
+        class FakeDriver:
+            def execute_query(self, query, **kwargs):
                 captured["query"] = query
-                return FakeResult()
+                captured["params"] = kwargs
+                return [{"pending": 7}]
 
-        count = project_common.count_user_profile_memories_pending(FakeSession())
+        count = project_common.count_user_profile_memories_pending(FakeDriver(), "neo4j")
         self.assertEqual(count, 7)
         self.assertIn("scope: 'user', status: 'candidate'", captured["query"])
         self.assertIn("l.consolidated_at IS NULL", captured["query"])
+        self.assertEqual(captured["params"]["database_"], "neo4j")
 
 
 def _fake_litellm(content: str):

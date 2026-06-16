@@ -297,19 +297,21 @@ class ProjectHookTests(unittest.TestCase):
     def test_fetch_learnings_excludes_injected_and_in_session_memory(self) -> None:
         captured: list[tuple[str, dict]] = []
 
-        class FakeSession:
-            def run(self, query: str, **params):
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
                 captured.append((query, params))
                 return []
 
         project_common.fetch_project_learnings(
-            FakeSession(),
+            FakeDriver(),
+            "neo4j",
             project_id="mkg",
             query=None,
             exclude_session_id="session-1",
         )
         project_common.fetch_project_decisions(
-            FakeSession(),
+            FakeDriver(),
+            "neo4j",
             project_id="mkg",
             query=None,
             exclude_session_id="session-1",
@@ -325,13 +327,13 @@ class ProjectHookTests(unittest.TestCase):
     def test_fetch_project_learnings_restricts_to_project_scope(self) -> None:
         captured: list[tuple[str, dict]] = []
 
-        class FakeSession:
-            def run(self, query: str, **params):
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
                 captured.append((query, params))
                 return []
 
         project_common.fetch_project_learnings(
-            FakeSession(), project_id="mkg", query=None
+            FakeDriver(), "neo4j", project_id="mkg", query=None
         )
 
         self.assertTrue(captured)
@@ -340,13 +342,13 @@ class ProjectHookTests(unittest.TestCase):
     def test_fetch_project_decisions_restricts_to_project_scope(self) -> None:
         captured: list[tuple[str, dict]] = []
 
-        class FakeSession:
-            def run(self, query: str, **params):
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
                 captured.append((query, params))
                 return []
 
         project_common.fetch_project_decisions(
-            FakeSession(), project_id="mkg", query=None
+            FakeDriver(), "neo4j", project_id="mkg", query=None
         )
 
         self.assertTrue(captured)
@@ -355,13 +357,13 @@ class ProjectHookTests(unittest.TestCase):
     def test_fetch_user_learnings_spans_projects_and_filters_scope(self) -> None:
         captured: list[tuple[str, dict]] = []
 
-        class FakeSession:
-            def run(self, query: str, **params):
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
                 captured.append((query, params))
                 return []
 
         project_common.fetch_user_learnings(
-            FakeSession(), query=None, exclude_session_id="session-1"
+            FakeDriver(), "neo4j", query=None, exclude_session_id="session-1"
         )
 
         self.assertTrue(captured)
@@ -374,8 +376,8 @@ class ProjectHookTests(unittest.TestCase):
     def test_fetch_user_learnings_excludes_consolidated_prompt_facts(self) -> None:
         captured: list[tuple[str, dict]] = []
 
-        class FakeSession:
-            def run(self, query: str, **params):
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
                 captured.append((query, params))
                 if "fulltext.queryNodes" in query:
                     return [
@@ -390,8 +392,8 @@ class ProjectHookTests(unittest.TestCase):
                     ]
                 return []
 
-        project_common.fetch_user_learnings(FakeSession(), query="Tomaz")
-        project_common.fetch_user_learnings(FakeSession(), query=None)
+        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query="Tomaz")
+        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query=None)
 
         self.assertEqual(len(captured), 2)
         for query, _ in captured:
@@ -403,13 +405,13 @@ class ProjectHookTests(unittest.TestCase):
     def test_fetch_user_decisions_spans_projects_and_filters_scope(self) -> None:
         captured: list[tuple[str, dict]] = []
 
-        class FakeSession:
-            def run(self, query: str, **params):
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
                 captured.append((query, params))
                 return []
 
         project_common.fetch_user_decisions(
-            FakeSession(), query=None, exclude_session_id="session-1"
+            FakeDriver(), "neo4j", query=None, exclude_session_id="session-1"
         )
 
         self.assertTrue(captured)
@@ -431,13 +433,14 @@ class ProjectHookTests(unittest.TestCase):
     def test_mark_injected_in_session_links_memory_to_session(self) -> None:
         captured: list[tuple[str, dict]] = []
 
-        class FakeSession:
-            def run(self, query: str, **params):
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
                 captured.append((query, params))
                 return []
 
         project_common.mark_injected_in_session(
-            FakeSession(),
+            FakeDriver(),
+            "neo4j",
             "session-1",
             ["learning:mkg:a"],
             ["decision:mkg:b"],
@@ -457,13 +460,14 @@ class ProjectHookTests(unittest.TestCase):
     def test_mark_injected_in_session_links_memory_to_hook_event(self) -> None:
         captured: list[tuple[str, dict]] = []
 
-        class FakeSession:
-            def run(self, query: str, **params):
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
                 captured.append((query, params))
                 return []
 
         project_common.mark_injected_in_session(
-            FakeSession(),
+            FakeDriver(),
+            "neo4j",
             "session-1",
             ["learning:mkg:a"],
             [],
@@ -504,18 +508,18 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(params["event_name"], "UserPromptSubmit")
 
     def test_mark_injected_in_session_skips_unknown_session(self) -> None:
-        class ExplodingSession:
-            def run(self, query: str, **params):
+        class ExplodingDriver:
+            def execute_query(self, query: str, **params):
                 raise AssertionError("should not write for unknown session")
 
         project_common.mark_injected_in_session(
-            ExplodingSession(), "unknown", ["learning:mkg:a"], [], "SessionStart"
+            ExplodingDriver(), "neo4j", "unknown", ["learning:mkg:a"], [], "SessionStart"
         )
         project_common.mark_injected_in_session(
-            ExplodingSession(), None, ["learning:mkg:a"], [], "SessionStart"
+            ExplodingDriver(), "neo4j", None, ["learning:mkg:a"], [], "SessionStart"
         )
         project_common.mark_injected_in_session(
-            ExplodingSession(), "session-1", [], [], "SessionStart"
+            ExplodingDriver(), "neo4j", "session-1", [], [], "SessionStart"
         )
 
     def test_background_processor_is_fire_and_forget(self) -> None:

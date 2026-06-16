@@ -72,21 +72,24 @@ def main() -> int:
                 session.execute_write(ensure_project_schema)
                 if context_scope == "user":
                     user_learnings = fetch_user_learnings(
-                        session,
+                        driver,
+                        database,
                         query=prompt,
                         statuses=["approved", "candidate"],
                         limit=5,
                         exclude_session_id=exclude_session_id,
                     )
                     user_decisions = fetch_user_decisions(
-                        session,
+                        driver,
+                        database,
                         query=prompt,
                         limit=5,
                         exclude_session_id=exclude_session_id,
                     )
                 else:
                     learnings = fetch_project_learnings(
-                        session,
+                        driver,
+                        database,
                         project_id=project.id,
                         query=prompt,
                         statuses=["approved", "candidate"],
@@ -94,7 +97,8 @@ def main() -> int:
                         exclude_session_id=exclude_session_id,
                     )
                     decisions = fetch_project_decisions(
-                        session,
+                        driver,
+                        database,
                         project_id=project.id,
                         query=prompt,
                         limit=3,
@@ -105,14 +109,15 @@ def main() -> int:
                     for learning in (*user_learnings, *learnings)
                     if learning.get("id")
                 ]
-                mark_learnings_used(session, learning_ids)
+                mark_learnings_used(driver, database, learning_ids)
                 decision_ids = [
                     decision["id"]
                     for decision in (*user_decisions, *decisions)
                     if decision.get("id")
                 ]
                 mark_injected_in_session(
-                    session,
+                    driver,
+                    database,
                     session_id,
                     learning_ids,
                     decision_ids,

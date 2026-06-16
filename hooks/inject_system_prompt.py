@@ -105,6 +105,11 @@ def _neo4j_config() -> tuple[str, str, str, str]:
     return uri, user, password, database
 
 
+def _first_record(result):
+    records = getattr(result, "records", result) or []
+    return records[0] if records else None
+
+
 def fetch_prompt_from_neo4j(name: str) -> str | None:
     try:
         from neo4j import GraphDatabase
@@ -115,12 +120,14 @@ def fetch_prompt_from_neo4j(name: str) -> str | None:
 
     try:
         with GraphDatabase.driver(uri, auth=(user, password)) as driver:
-            with driver.session(database=database) as session:
-                record = session.run(
+            record = _first_record(
+                driver.execute_query(
                     "MATCH (p:SystemPrompt {name: $name}) "
                     "RETURN p.content AS content LIMIT 1",
                     name=name,
-                ).single()
+                    database_=database,
+                )
+            )
         if record and record.get("content"):
             content = str(record["content"])
             if content.strip():
@@ -174,8 +181,8 @@ def record_injection(
 
     try:
         with GraphDatabase.driver(uri, auth=(user, password)) as driver:
-            with driver.session(database=database) as session:
-                record = session.run(
+            row = _first_record(
+                driver.execute_query(
                     """
                     MERGE (s:Session {session_id: $session_id})
                     ON CREATE SET s.created_at = $timestamp
@@ -212,8 +219,9 @@ def record_injection(
                     char_count=len(content),
                     summary_char_count=len(content_summary),
                     timestamp=timestamp,
+                    database_=database,
                 )
-                row = record.single()
+            )
         if row is not None:
             return bool(row["created"])
     except Exception as exc:  # pragma: no cover - hook must never crash the session

@@ -47,22 +47,6 @@ class InjectSystemPromptTests(unittest.TestCase):
         self.assertNotIn("You are the Intelligence Agent", summary)
 
     def _record_injection(self, *, created: bool, captured: dict) -> bool:
-        class FakeResult:
-            def single(self):
-                return {"created": created}
-
-        class FakeSession:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, traceback):
-                return False
-
-            def run(self, query: str, **params):
-                captured["query"] = query
-                captured["params"] = params
-                return FakeResult()
-
         class FakeDriver:
             def __enter__(self):
                 return self
@@ -70,9 +54,10 @@ class InjectSystemPromptTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, traceback):
                 return False
 
-            def session(self, *, database: str):
-                captured["database"] = database
-                return FakeSession()
+            def execute_query(self, query: str, **params):
+                captured["query"] = query
+                captured["params"] = params
+                return [{"created": created}]
 
         class FakeGraphDatabase:
             @staticmethod
@@ -112,6 +97,7 @@ class InjectSystemPromptTests(unittest.TestCase):
         self.assertEqual(
             params["content_sha"], inject_system_prompt.content_sha(content)
         )
+        self.assertEqual(params["database_"], "neo4j")
         self.assertNotEqual(params["content_summary"], content)
         self.assertEqual(params["char_count"], len(content))
         self.assertEqual(params["summary_char_count"], len(params["content_summary"]))

@@ -52,7 +52,6 @@ from project_common import (  # noqa: E402
     load_dotenv,
     neo4j_config,
     read_system_prompt_state,
-    resolve_project,
     snapshot_and_update_system_prompt,
     truncate,
 )
@@ -182,8 +181,6 @@ def ask_llm_for_consolidated_prompt(prompt: str) -> str | None:
 
 
 def consolidate(payload: dict[str, Any]) -> None:
-    project_root = Path(__file__).resolve().parents[1]
-    project = resolve_project(payload, project_root)
     session_id = str(payload.get("session_id") or "unknown")
 
     from neo4j import GraphDatabase
@@ -198,8 +195,8 @@ def consolidate(payload: dict[str, Any]) -> None:
         with driver.session(database=database) as session:
             session.execute_write(ensure_project_schema)
 
-            pending_count = count_user_profile_memories_pending(session)
-            state = read_system_prompt_state(session, PROMPT_NAME)
+            pending_count = count_user_profile_memories_pending(driver, database)
+            state = read_system_prompt_state(driver, database, PROMPT_NAME)
 
             proceed, reason = consolidation_gate(
                 pending_count=pending_count,
@@ -220,7 +217,7 @@ def consolidate(payload: dict[str, Any]) -> None:
                 )
                 return
 
-            memories = fetch_user_profile_memories_pending(session, limit=40)
+            memories = fetch_user_profile_memories_pending(driver, database, limit=40)
             if not memories:
                 return
 

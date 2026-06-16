@@ -416,13 +416,14 @@ def _memory_rows_from_actions(
 
 
 def _fetch_unprocessed_events(
-    session,
+    driver,
+    database: str,
     project_id: str,
     session_id: str,
     mode: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    records = session.run(
+    result = driver.execute_query(
         """
         MATCH (s:Session {session_id: $session_id})-[:HAS_EVENT]->(e:SessionEvent)
         WHERE NOT EXISTS {
@@ -437,8 +438,9 @@ def _fetch_unprocessed_events(
         session_id=session_id,
         mode=mode,
         limit=limit,
+        database_=database,
     )
-    return [dict(record["event"]) for record in records]
+    return [dict(record["event"]) for record in result.records]
 
 
 def _write_processing(
@@ -759,7 +761,8 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
             session.execute_write(ensure_project_schema)
             session.execute_write(merge_project_and_session, project, session_id, timestamp)
             events = _fetch_unprocessed_events(
-                session,
+                driver,
+                database,
                 project_id=project.id,
                 session_id=session_id,
                 mode=mode,
@@ -787,14 +790,16 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                 corpus = _event_corpus(events)
                 search_query = _search_query(corpus)
                 similar_learnings = fetch_project_learnings(
-                    session,
+                    driver,
+                    database,
                     project_id=project.id,
                     query=search_query,
                     statuses=["approved", "candidate"],
                     limit=8,
                 )
                 similar_decisions = fetch_project_decisions(
-                    session,
+                    driver,
+                    database,
                     project_id=project.id,
                     query=search_query,
                     limit=8,

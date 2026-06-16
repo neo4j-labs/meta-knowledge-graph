@@ -149,16 +149,15 @@ def main() -> None:
     edges = _usage_edges(data["usage"])
 
     with _driver() as driver:
-        with driver.session(database=database) as session:
-            for stmt in SCHEMA_STATEMENTS:
-                session.run(stmt)
-            session.run(MERGE_ACCOUNTS, accounts=data["accounts"])
-            session.run(MERGE_PRODUCTS, products=data["products"])
-            session.run(MERGE_OWNERSHIP, accounts=data["accounts"])
-            session.run(REFRESH_CONTACT_EDGES)
-            session.run(MERGE_CONTACTS, contacts=data["contacts"])
-            session.run(REFRESH_USAGE_EDGES)
-            session.run(MERGE_USAGE_EDGES, edges=edges)
+        for stmt in SCHEMA_STATEMENTS:
+            driver.execute_query(stmt, database_=database)
+        driver.execute_query(MERGE_ACCOUNTS, accounts=data["accounts"], database_=database)
+        driver.execute_query(MERGE_PRODUCTS, products=data["products"], database_=database)
+        driver.execute_query(MERGE_OWNERSHIP, accounts=data["accounts"], database_=database)
+        driver.execute_query(REFRESH_CONTACT_EDGES, database_=database)
+        driver.execute_query(MERGE_CONTACTS, contacts=data["contacts"], database_=database)
+        driver.execute_query(REFRESH_USAGE_EDGES, database_=database)
+        driver.execute_query(MERGE_USAGE_EDGES, edges=edges, database_=database)
 
     print(f"  accounts merged      : {len(data['accounts'])}")
     print(f"  products merged      : {len(data['products'])}")

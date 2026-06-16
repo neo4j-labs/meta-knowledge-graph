@@ -120,6 +120,20 @@ def project_props(project: ProjectRef) -> dict[str, Any]:
     return {k: v for k, v in props.items() if v is not None}
 
 
+def _query_records(result: Any) -> list[Any]:
+    return list(getattr(result, "records", result) or [])
+
+
+def _execute_query(driver, database: str, query: str, **params) -> list[Any]:
+    result = driver.execute_query(query, database_=database, **params)
+    return _query_records(result)
+
+
+def _execute_query_single(driver, database: str, query: str, **params):
+    records = _execute_query(driver, database, query, **params)
+    return records[0] if records else None
+
+
 def ensure_project_schema(tx) -> None:
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE")
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (l:Learning) REQUIRE l.id IS UNIQUE")
@@ -306,27 +320,35 @@ def consolidation_interval_hours() -> float:
     )
 
 
-def count_user_profile_memories_pending(session) -> int:
+def count_user_profile_memories_pending(driver, database: str) -> int:
     """Count user-scoped candidate learnings still awaiting consolidation.
 
     A learning counts as pending when it has never been folded into the prompt
     (``consolidated_at`` unset) or has been edited since it last was, so a fact
     that changes after consolidation re-enters the review backlog.
     """
-    record = session.run(
+    record = _execute_query_single(
+        driver,
+        database,
         """
         MATCH (l:Learning {scope: 'user', status: 'candidate'})
         WHERE l.consolidated_at IS NULL
            OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
         RETURN count(l) AS pending
         """
-    ).single()
+    )
     return int(record["pending"]) if record else 0
 
 
-def fetch_user_profile_memories_pending(session, limit: int = 40) -> list[dict[str, Any]]:
+def fetch_user_profile_memories_pending(
+    driver,
+    database: str,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
     """Fetch the user-scoped candidate learnings the consolidation should fold in."""
-    records = session.run(
+    records = _execute_query(
+        driver,
+        database,
         """
         MATCH (l:Learning {scope: 'user', status: 'candidate'})
         WHERE l.consolidated_at IS NULL
@@ -345,13 +367,15 @@ def fetch_user_profile_memories_pending(session, limit: int = 40) -> list[dict[s
     return [dict(record) for record in records]
 
 
-def read_system_prompt_state(session, name: str) -> dict[str, Any]:
+def read_system_prompt_state(driver, database: str, name: str) -> dict[str, Any]:
     """Read the active prompt's content, version, and last consolidation time.
 
     ``last_consolidated_at`` is stored as an ISO string (unlike the node's
     datetime-typed created_at/updated_at) so the rate-limit math can stay in
     Python on the hook side."""
-    record = session.run(
+    record = _execute_query_single(
+        driver,
+        database,
         """
         MATCH (sp:SystemPrompt {name: $name})
         RETURN sp.content AS content,
@@ -359,7 +383,7 @@ def read_system_prompt_state(session, name: str) -> dict[str, Any]:
                sp.last_consolidated_at AS last_consolidated_at
         """,
         name=name,
-    ).single()
+    )
     if not record:
         return {"content": None, "version": 0, "last_consolidated_at": None}
     return {
@@ -466,7 +490,8 @@ def truncate(value: str, limit: int = MAX_LEARNING_TEXT) -> str:
 
 
 def fetch_project_learnings(
-    session,
+    driver,
+    database: str,
     project_id: str,
     query: str | None,
     statuses: list[str] | None = None,
@@ -476,7 +501,9 @@ def fetch_project_learnings(
     statuses = statuses or ["approved", "candidate"]
     if query and query.strip():
         try:
-            records = session.run(
+            records = _execute_query(
+                driver,
+                database,
                 """
                 CALL db.index.fulltext.queryNodes('project_learning_fulltext', $search_query)
                 YIELD node, score
@@ -509,7 +536,9 @@ def fetch_project_learnings(
         except Exception:
             pass
 
-    records = session.run(
+    records = _execute_query(
+        driver,
+        database,
         """
         MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
         WHERE l.status IN $statuses
@@ -536,7 +565,8 @@ def fetch_project_learnings(
 
 
 def fetch_user_learnings(
-    session,
+    driver,
+    database: str,
     query: str | None,
     statuses: list[str] | None = None,
     limit: int = 5,
@@ -552,7 +582,9 @@ def fetch_user_learnings(
     statuses = statuses or ["approved", "candidate"]
     if query and query.strip():
         try:
-            records = session.run(
+            records = _execute_query(
+                driver,
+                database,
                 """
                 CALL db.index.fulltext.queryNodes('project_learning_fulltext', $search_query)
                 YIELD node, score
@@ -585,7 +617,9 @@ def fetch_user_learnings(
         except Exception:
             pass
 
-    records = session.run(
+    records = _execute_query(
+        driver,
+        database,
         """
         MATCH (l:Learning {scope: 'user'})
         WHERE l.status IN $statuses
@@ -612,7 +646,8 @@ def fetch_user_learnings(
 
 
 def fetch_project_decisions(
-    session,
+    driver,
+    database: str,
     project_id: str,
     query: str | None,
     limit: int = 3,
@@ -620,7 +655,9 @@ def fetch_project_decisions(
 ) -> list[dict[str, Any]]:
     if query and query.strip():
         try:
-            records = session.run(
+            records = _execute_query(
+                driver,
+                database,
                 """
                 CALL db.index.fulltext.queryNodes('project_decision_fulltext', $search_query)
                 YIELD node, score
@@ -651,7 +688,9 @@ def fetch_project_decisions(
         except Exception:
             pass
 
-    records = session.run(
+    records = _execute_query(
+        driver,
+        database,
         """
         MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(d:Decision)
         WHERE ($session_id IS NULL OR (
@@ -676,14 +715,17 @@ def fetch_project_decisions(
 
 
 def fetch_user_decisions(
-    session,
+    driver,
+    database: str,
     query: str | None,
     limit: int = 3,
     exclude_session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if query and query.strip():
         try:
-            records = session.run(
+            records = _execute_query(
+                driver,
+                database,
                 """
                 CALL db.index.fulltext.queryNodes('project_decision_fulltext', $search_query)
                 YIELD node, score
@@ -712,7 +754,9 @@ def fetch_user_decisions(
         except Exception:
             pass
 
-    records = session.run(
+    records = _execute_query(
+        driver,
+        database,
         """
         MATCH (d:Decision {scope: 'user'})
         WHERE $session_id IS NULL OR (
@@ -735,7 +779,8 @@ def fetch_user_decisions(
 
 
 def mark_injected_in_session(
-    session,
+    driver,
+    database: str,
     session_id: str | None,
     learning_ids: list[str],
     decision_ids: list[str],
@@ -759,7 +804,9 @@ def mark_injected_in_session(
     for label, ids in (("Learning", learning_ids), ("Decision", decision_ids)):
         if not ids:
             continue
-        session.run(
+        _execute_query(
+            driver,
+            database,
             f"""
             MERGE (s:Session {{session_id: $session_id}})
             ON CREATE SET s.created_at = datetime()
@@ -775,7 +822,9 @@ def mark_injected_in_session(
             ids=ids,
             hook_event=hook_event,
         )
-        session.run(
+        _execute_query(
+            driver,
+            database,
             f"""
             MATCH (s:Session {{session_id: $session_id}})
                   -[:HAS_EVENT]->(e:SessionEvent {{event_name: $hook_event}})
@@ -799,10 +848,12 @@ def mark_injected_in_session(
         )
 
 
-def mark_learnings_used(session, learning_ids: list[str]) -> None:
+def mark_learnings_used(driver, database: str, learning_ids: list[str]) -> None:
     if not learning_ids:
         return
-    session.run(
+    _execute_query(
+        driver,
+        database,
         """
         MATCH (l:Learning)
         WHERE l.id IN $learning_ids

@@ -62,8 +62,7 @@ def _verify_neo4j() -> None:
     try:
         with GraphDatabase.driver(uri, auth=(user, password)) as driver:
             driver.verify_connectivity()
-            with driver.session(database=database) as session:
-                session.run("RETURN 1").consume()
+            driver.execute_query("RETURN 1", database_=database)
     except Exception as exc:  # noqa: BLE001 - driver-specific failures vary.
         raise SeedAllError(
             "Neo4j credentials are configured but not usable. Check "
