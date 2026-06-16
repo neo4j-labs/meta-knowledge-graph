@@ -914,10 +914,6 @@ def create_mcp_server(
             0.6,
             description="Confidence 0.0-1.0. Existing higher confidence is preserved.",
         ),
-        status: str = Field(
-            "candidate",
-            description="'candidate' (default) or 'approved'. Approved skips the review queue.",
-        ),
         source: str = Field(
             "agent",
             description="Provenance tag for the writer (e.g. 'agent', 'user', '<tool>_llm').",
@@ -927,8 +923,11 @@ def create_mcp_server(
         clean_text = _truncate((text or "").strip())
         if not clean_text:
             return json.dumps({"status": "error", "error": "text is required"})
-        normalized_status = status if status in {"candidate", "approved"} else "candidate"
         normalized_scope = _normalize_scope(scope)
+        # The tool always writes candidates; promotion to 'approved' is owned by
+        # the human review gate (and the seed scripts). This keeps user-scoped
+        # facts flowing through the queue the prompt-consolidation service reads.
+        normalized_status = "candidate"
         clamped_confidence = max(0.0, min(1.0, float(confidence)))
         resolved_pid = _resolve_project_id(project_id)
         row_id = _learning_id(
