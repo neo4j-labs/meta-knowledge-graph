@@ -25,9 +25,10 @@ The hooks write to the same graph the MCP tools read from, so each new session
 starts with the most relevant prior learnings already injected — both
 project-scoped memory and durable facts about the user. The persisted **system
 prompt** and **memory extraction prompt** are frozen at runtime: they are read
-on start but never rewrite themselves. (A deliberate consolidation service that
-rebuilds those prompts from the accumulated learning corpus is planned, and is
-the only intended writer besides the seed scripts.)
+on start but never rewrite themselves. The only writers besides the seed scripts
+are the deliberate consolidation services — a rate-limited Stop/SessionEnd hook
+that folds accumulated user-profile memory into the system prompt once enough of
+it has piled up unreviewed, keeping every superseded prompt as version history.
 
 A complete end-to-end demo — a B2B sales / customer-success assistant for an
 enterprise car-rental provider — ships in the repo; see
@@ -65,6 +66,7 @@ exposed under `.claude/hooks/` as symlinks back to the canonical versions in
 | `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits: project-scoped learnings/decisions for the current project, plus durable user-scoped learnings that follow the user across every project. Every injected item is linked to the session via `[:INJECTED_IN]`; items already injected earlier in the same session — or first produced during it (`[:FROM_SESSION]`) — are excluded from retrieval, so a conversation never receives the same learning or decision twice, nor has its own freshly-extracted memory echoed back. Marks served learnings as used. |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | `hooks/log_event.py` | Persists each event as a `:SessionEvent` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the memory extraction processor later reads. |
 | `Stop` (`--mode turn`), `SessionEnd` (`--mode session`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions for two buckets: `:Decision` nodes and `:Learning` nodes. Each learning is classified `project` (a fact about the project/environment) or `user` (a durable fact about the person that holds across projects); user-scoped learnings are keyed on a project-independent namespace so the same fact dedupes everywhere. Writes new nodes with status `candidate`. |
+| `Stop`, `SessionEnd` | `hooks/consolidate_system_prompt.py` | Runs in the background, rate-limited. The system-prompt consolidation service: it only does work when **more than 5** user-profile memories are in need of review — user-scoped `candidate` learnings not yet folded into the prompt (`MKG_PROMPT_CONSOLIDATION_THRESHOLD`) — and not more than once per cooldown window (`MKG_PROMPT_CONSOLIDATION_INTERVAL_HOURS`, default 24h, tracked via `last_consolidated_at` on the node). When both gates pass, it sends the current `(:SystemPrompt {name: 'default'})` plus the pending user facts to the LLM, which folds those facts into the persona, then archives the outgoing prompt as a `(:SystemPromptVersion)` history node before overwriting the active one and bumping its version. The folded learnings are stamped `consolidated_at` so they drop out of the backlog; their `candidate` status is left untouched, so the human promotion gate still owns `candidate → approved`. |
 | `PostToolUse` (matcher on the Diffbot tools `enhance_entity` / `search_news`) | `hooks/ingest_diffbot.py` | Builds Diffbot tool results back into the graph instead of letting them evaporate with the conversation. `enhance_entity` firmographics become `(:Account)-[:HAS_ENRICHMENT]→(:DiffbotOrganization)` or `(:DiffbotPerson)` (matched on domain, name/`allNames`, and employer hints); `search_news` articles become `(:NewsArticle)-[:MENTIONS]→(:Account)` plus `[:MENTIONS]→(:DiffbotOrganization)` when organization tags or account matches identify companies, and `[:TAGGED]→(:NewsTag)`. Only entities carrying a real Diffbot id are stored — references without one are dropped instead of being keyed on synthetic hashes. Diffbot entities and articles link `[:CAPTURED_IN]→(:Session)` for provenance. Handles the harness's response wrappers, including oversized results that arrive as a saved-to-file notice. |
 | `PostToolUse` (matcher on the query tools `bigquery_execute_query` / `neo4j_read_cypher`) | `hooks/capture_query_failures.py` | Captures failed or suspicious query outputs as structured `(:QueryExecution)-[:HAS_ISSUE]→(:QueryIssue)` artifacts. The first pass records issues visible in PostToolUse payloads: empty result sets, parser/schema/permission/resource/capability errors, malformed outputs, and Neo4j serialization cases such as temporal values returned as `{}`. Clean successful query results are ignored. |
 
@@ -83,7 +85,9 @@ exposed under `.claude/hooks/` as symlinks back to the canonical versions in
                                             ─[:PRODUCED_DECISION]→ (:Decision)
 
 # Frozen at runtime (read on start; written only by seed scripts / consolidation):
-(:SystemPrompt {name, version, content})
+(:SystemPrompt {name, version, content, last_consolidated_at})
+   ─[:HAS_VERSION]→ (:SystemPromptVersion {name, version, content, is_current})  # prompt history
+   ─[:CONSOLIDATED]→ (:Learning {scope: 'user'})                                # folded-in user facts
 (:MemoryExtractionPrompt {name, version, content})
 
 # Produced by hooks/enrich_events.py (on demand):
@@ -114,9 +118,12 @@ TODOs). Fulltext indexes
 path; the same learning index serves both project-scoped and user-scoped lookups
 (the latter filtered to `scope = 'user'` and unbound from any single project).
 The persisted system prompt and memory extraction prompt are frozen at runtime —
-read on session start but never self-modified. Improving them from the
-accumulated learning corpus is the job of a planned consolidation service, which
-(with the seed scripts) is the only intended writer of those nodes.
+read on session start but never self-modified mid-session. Improving the system
+prompt from the accumulated learning corpus is the job of the rate-limited
+`consolidate_system_prompt.py` service (see the hooks table), which folds pending
+user-profile memory into the persona and keeps every superseded prompt as a
+`:SystemPromptVersion`. It and the seed scripts are the only writers of those
+nodes.
 
 ## Quick Start
 

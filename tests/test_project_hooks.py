@@ -371,6 +371,35 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("FROM_SESSION", query)
         self.assertEqual(params["session_id"], "session-1")
 
+    def test_fetch_user_learnings_excludes_consolidated_prompt_facts(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeSession:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+                if "fulltext.queryNodes" in query:
+                    return [
+                        {
+                            "id": "learning:user:a",
+                            "text": "The user's name is Tomaz.",
+                            "status": "candidate",
+                            "confidence": 1.0,
+                            "task_pattern": "user profile",
+                            "score": 1.0,
+                        }
+                    ]
+                return []
+
+        project_common.fetch_user_learnings(FakeSession(), query="Tomaz")
+        project_common.fetch_user_learnings(FakeSession(), query=None)
+
+        self.assertEqual(len(captured), 2)
+        for query, _ in captured:
+            self.assertIn("consolidated_at IS NULL", query)
+            self.assertIn("coalesce(", query)
+            self.assertIn("> ", query)
+            self.assertIn("consolidated_at", query)
+
     def test_fetch_user_decisions_spans_projects_and_filters_scope(self) -> None:
         captured: list[tuple[str, dict]] = []
 
@@ -503,13 +532,15 @@ class ProjectHookTests(unittest.TestCase):
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
         stop_hooks = config["hooks"]["Stop"][0]["hooks"]
 
-        # The self-rewriting prompt-rebuild Stop hooks are gone; only logging and
-        # memory extraction remain.
-        self.assertEqual(len(stop_hooks), 2)
+        # The self-rewriting prompt-rebuild Stop hooks are gone; logging, memory
+        # extraction, and the rate-limited prompt-consolidation service remain.
+        self.assertEqual(len(stop_hooks), 3)
         self.assertIn("hooks/log_event.py", stop_hooks[0]["command"])
         self.assertIn("--client codex", stop_hooks[0]["command"])
         self.assertIn("hooks/process_project.py", stop_hooks[1]["command"])
         self.assertIn("--mode turn --background", stop_hooks[1]["command"])
+        self.assertIn("hooks/consolidate_system_prompt.py", stop_hooks[2]["command"])
+        self.assertIn("--background", stop_hooks[2]["command"])
         joined = "\n".join(hook["command"] for hook in stop_hooks)
         self.assertNotIn("apply_system_prompt.py", joined)
         self.assertNotIn("apply_memory_extraction_prompt.py", joined)

@@ -2,8 +2,9 @@
 """Seed or update a ``(:SystemPrompt {name})`` node in Neo4j.
 
 The prompt is frozen at runtime — the SessionStart hook only reads it — so this
-seed script (and the future consolidation service) are the writers. Re-seeding
-identical content is a no-op; a content change bumps the version counter.
+seed script and the consolidation service (``consolidate_system_prompt.py``) are
+its writers. Re-seeding identical content is a no-op; a content change bumps the
+version counter.
 
 Usage:
     python hooks/seed_system_prompt.py            # seed 'default' from DEFAULT_PROMPT

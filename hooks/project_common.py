@@ -137,6 +137,10 @@ def ensure_project_schema(tx) -> None:
         "REQUIRE p.id IS UNIQUE"
     )
     tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (v:SystemPromptVersion) "
+        "REQUIRE v.id IS UNIQUE"
+    )
+    tx.run(
         "CREATE FULLTEXT INDEX project_learning_fulltext IF NOT EXISTS "
         "FOR (l:Learning) ON EACH [l.text, l.task_pattern, l.summary]"
     )
@@ -234,8 +238,10 @@ def upsert_prompt_node(tx, label: str, name: str, content: str, now: str) -> dic
 
     The prompts no longer rewrite themselves at runtime, so this only sets the
     content and bumps a version counter when it actually changes; it keeps no
-    version-history snapshot. Seed scripts and the future consolidation service
-    are the only writers. Returns the action taken and the resulting version.
+    version-history snapshot. The seed scripts use this for plain (re)seeds; the
+    system-prompt consolidation service instead goes through
+    ``snapshot_and_update_system_prompt`` so it can preserve history. Returns the
+    action taken and the resulting version.
     """
     if label not in PROMPT_LABELS:
         raise ValueError(f"unknown prompt label: {label!r}")
@@ -266,6 +272,190 @@ def upsert_prompt_node(tx, label: str, name: str, content: str, now: str) -> dic
     if not record:
         return {"action": "created", "version": 1}
     return {"action": str(record["action"]), "version": int(record["version"])}
+
+
+# --- System-prompt consolidation -------------------------------------------
+#
+# A rate-limited service (hooks/consolidate_system_prompt.py) folds durable
+# user-profile facts into the persisted (:SystemPrompt) when enough of them have
+# piled up unreviewed. "In need of review" means a user-scoped :Learning still
+# sitting in the candidate queue that has not yet been folded into the prompt.
+# Default threshold is "more than 5"; the cooldown keeps it from re-firing on
+# every Stop/SessionEnd.
+USER_PROFILE_REVIEW_THRESHOLD = 5
+PROMPT_CONSOLIDATION_INTERVAL_HOURS = 24.0
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def consolidation_threshold() -> int:
+    return int(_env_float("MKG_PROMPT_CONSOLIDATION_THRESHOLD", USER_PROFILE_REVIEW_THRESHOLD))
+
+
+def consolidation_interval_hours() -> float:
+    return _env_float(
+        "MKG_PROMPT_CONSOLIDATION_INTERVAL_HOURS", PROMPT_CONSOLIDATION_INTERVAL_HOURS
+    )
+
+
+def count_user_profile_memories_pending(session) -> int:
+    """Count user-scoped candidate learnings still awaiting consolidation.
+
+    A learning counts as pending when it has never been folded into the prompt
+    (``consolidated_at`` unset) or has been edited since it last was, so a fact
+    that changes after consolidation re-enters the review backlog.
+    """
+    record = session.run(
+        """
+        MATCH (l:Learning {scope: 'user', status: 'candidate'})
+        WHERE l.consolidated_at IS NULL
+           OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
+        RETURN count(l) AS pending
+        """
+    ).single()
+    return int(record["pending"]) if record else 0
+
+
+def fetch_user_profile_memories_pending(session, limit: int = 40) -> list[dict[str, Any]]:
+    """Fetch the user-scoped candidate learnings the consolidation should fold in."""
+    records = session.run(
+        """
+        MATCH (l:Learning {scope: 'user', status: 'candidate'})
+        WHERE l.consolidated_at IS NULL
+           OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
+        RETURN l.id AS id,
+               l.text AS text,
+               l.confidence AS confidence,
+               l.task_pattern AS task_pattern,
+               coalesce(l.updated_at, l.created_at) AS updated_at
+        ORDER BY coalesce(l.confidence, 0.0) DESC,
+                 coalesce(l.updated_at, l.created_at) DESC
+        LIMIT $limit
+        """,
+        limit=limit,
+    )
+    return [dict(record) for record in records]
+
+
+def read_system_prompt_state(session, name: str) -> dict[str, Any]:
+    """Read the active prompt's content, version, and last consolidation time.
+
+    ``last_consolidated_at`` is stored as an ISO string (unlike the node's
+    datetime-typed created_at/updated_at) so the rate-limit math can stay in
+    Python on the hook side."""
+    record = session.run(
+        """
+        MATCH (sp:SystemPrompt {name: $name})
+        RETURN sp.content AS content,
+               coalesce(sp.version, 1) AS version,
+               sp.last_consolidated_at AS last_consolidated_at
+        """,
+        name=name,
+    ).single()
+    if not record:
+        return {"content": None, "version": 0, "last_consolidated_at": None}
+    return {
+        "content": record["content"],
+        "version": int(record["version"]),
+        "last_consolidated_at": record["last_consolidated_at"],
+    }
+
+
+def snapshot_and_update_system_prompt(
+    tx,
+    name: str,
+    new_content: str,
+    folded_learning_ids: list[str],
+    model: str,
+    session_id: str | None,
+    now: str,
+) -> dict[str, Any]:
+    """Archive the outgoing prompt as a ``:SystemPromptVersion`` and write the new one.
+
+    Unlike ``upsert_prompt_node`` (which only bumps a counter), this keeps a
+    full history snapshot: every superseded prompt is preserved as its own
+    ``:SystemPromptVersion`` node, and the new active content is mirrored onto a
+    fresh version node flagged ``is_current``. The folded learnings are stamped
+    ``consolidated_at`` so they drop out of the review backlog; their status is
+    left untouched, so the human promotion gate still owns ``candidate ->
+    approved``.
+    """
+    record = tx.run(
+        """
+        MERGE (sp:SystemPrompt {name: $name})
+        ON CREATE SET sp.created_at = datetime($now), sp.version = 0
+        WITH sp, sp.content AS old_content, coalesce(sp.version, 0) AS old_version
+        // Archive the outgoing version as history (skip when there was no content).
+        FOREACH (_ IN CASE WHEN old_content IS NULL THEN [] ELSE [1] END |
+            MERGE (ov:SystemPromptVersion {id: $name + ':v' + toString(old_version)})
+            ON CREATE SET ov.name = $name,
+                          ov.version = old_version,
+                          ov.content = old_content,
+                          ov.source = coalesce(sp.last_source, 'seed'),
+                          ov.created_at = coalesce(sp.updated_at, sp.created_at, datetime($now))
+            SET ov.is_current = false,
+                ov.archived_at = datetime($now)
+            MERGE (sp)-[:HAS_VERSION]->(ov)
+        )
+        WITH sp, old_version
+        SET sp.content = $new_content,
+            sp.version = old_version + 1,
+            sp.updated_at = datetime($now),
+            sp.last_consolidated_at = $now,
+            sp.last_source = 'consolidation',
+            sp.last_consolidation_model = $model
+        MERGE (nv:SystemPromptVersion {id: $name + ':v' + toString(old_version + 1)})
+        ON CREATE SET nv.created_at = datetime($now)
+        SET nv.name = $name,
+            nv.version = old_version + 1,
+            nv.content = $new_content,
+            nv.source = 'consolidation',
+            nv.model = $model,
+            nv.session_id = $session_id,
+            nv.folded_learning_count = size($folded_ids),
+            nv.supersedes_version = old_version,
+            nv.is_current = true
+        MERGE (sp)-[:HAS_VERSION]->(nv)
+        RETURN old_version AS old_version, old_version + 1 AS new_version
+        """,
+        name=name,
+        new_content=new_content,
+        model=model,
+        session_id=session_id,
+        folded_ids=folded_learning_ids,
+        now=now,
+    ).single()
+
+    old_version = int(record["old_version"]) if record else 0
+    new_version = int(record["new_version"]) if record else 1
+
+    if folded_learning_ids:
+        tx.run(
+            """
+            MATCH (sp:SystemPrompt {name: $name})
+            MATCH (nv:SystemPromptVersion {id: $name + ':v' + toString($new_version)})
+            UNWIND $folded_ids AS lid
+            MATCH (l:Learning {id: lid})
+            SET l.consolidated_at = $now,
+                l.consolidated_prompt_version = $new_version
+            MERGE (nv)-[:FOLDED_LEARNING]->(l)
+            MERGE (sp)-[:CONSOLIDATED]->(l)
+            """,
+            name=name,
+            new_version=new_version,
+            folded_ids=folded_learning_ids,
+            now=now,
+        )
+
+    return {"old_version": old_version, "new_version": new_version}
 
 
 def truncate(value: str, limit: int = MAX_LEARNING_TEXT) -> str:
@@ -368,6 +558,8 @@ def fetch_user_learnings(
                 YIELD node, score
                 WHERE node.scope = 'user'
                   AND node.status IN $statuses
+                  AND (node.consolidated_at IS NULL
+                       OR coalesce(node.updated_at, node.created_at) > node.consolidated_at)
                   AND ($session_id IS NULL OR (
                        NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                        AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -397,6 +589,8 @@ def fetch_user_learnings(
         """
         MATCH (l:Learning {scope: 'user'})
         WHERE l.status IN $statuses
+          AND (l.consolidated_at IS NULL
+               OR coalesce(l.updated_at, l.created_at) > l.consolidated_at)
           AND ($session_id IS NULL OR (
                NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                AND NOT (l)-[:FROM_SESSION]->(:Session {session_id: $session_id})))

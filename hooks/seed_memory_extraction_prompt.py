@@ -2,9 +2,8 @@
 """Seed or update a ``(:MemoryExtractionPrompt {name})`` node in Neo4j.
 
 The template is frozen at runtime — ``process_project.py`` only reads it — so
-this seed script (and the future consolidation service) are the writers.
-Re-seeding identical content is a no-op; a content change bumps the version
-counter.
+this seed script is its writer. Re-seeding identical content is a no-op; a
+content change bumps the version counter.
 
 Usage:
     python hooks/seed_memory_extraction_prompt.py            # seed 'default'
