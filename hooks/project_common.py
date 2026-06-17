@@ -94,6 +94,7 @@ def agent_context_props(
         ("parent_agent_id", "parent_agent_path"),
     )
     explicit_agent_kind = (_non_empty_text(payload.get("agent_kind")) or "").lower()
+    explicit_agent_type = _first_payload_text(payload, ("agent_type", "subagent_type"))
 
     transcript_is_child = bool(
         transcript_id and session_id_text and transcript_id != session_id_text
@@ -111,6 +112,8 @@ def agent_context_props(
     }
     if transcript_id:
         props["agent_transcript_id"] = transcript_id
+    if explicit_agent_type:
+        props["agent_type"] = explicit_agent_type
 
     if is_subagent:
         agent_id = explicit_agent_id or (transcript_id if transcript_is_child else None)

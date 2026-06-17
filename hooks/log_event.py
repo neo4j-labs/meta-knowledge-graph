@@ -92,6 +92,7 @@ def _session_props(
         "agent_kind": event_props.get("agent_kind"),
         "agent_id": event_props.get("agent_id") or event_session_id,
         "agent_transcript_id": event_props.get("agent_transcript_id"),
+        "agent_type": event_props.get("agent_type"),
     }
     if event_session_id != parent_session_id:
         props.update(

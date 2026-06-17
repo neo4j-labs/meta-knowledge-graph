@@ -103,6 +103,16 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/.claude/hooks/log_event.py --client claude_code"
+          }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "hooks": [
