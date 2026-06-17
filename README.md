@@ -34,6 +34,177 @@ A complete end-to-end demo — a B2B sales / customer-success assistant for an
 enterprise car-rental provider — ships in the repo; see
 [Sales agent use case](#sales-agent-use-case) for setup.
 
+## Running MKG
+
+MKG is **harness-agnostic**, and there are two ways to run it:
+
+- **Claude Code** — install the packaged **plugin** (below). This is the quickest
+  path and the one most users want.
+- **Codex and other harnesses** — they run today straight from a **repo
+  checkout**: the `.codex/` wiring is committed, so opening this repo Just Works,
+  and any harness with lifecycle hooks can drive the same scripts. Dedicated
+  plugins for Codex and other harnesses are on the roadmap.
+
+Either way MKG is two halves — lifecycle **hooks** (capture + recall) and an
+**MCP server** (Neo4j / BigQuery / neocarta tools) — and the only host
+prerequisites are [`uv`](https://docs.astral.sh/uv/) and a reachable Neo4j
+instance; both halves execute through `uv`.
+
+### Claude Code (plugin)
+
+```
+claude plugin marketplace add neo4j-labs/meta-knowledge-graph
+claude plugin install meta-knowledge-graph@mkg
+```
+
+- The marketplace is named `mkg`; the qualified plugin id is `meta-knowledge-graph@mkg`.
+- On the **first session** after install, the `SessionStart` hook bootstraps a
+  `uv` virtualenv (one-time; that session is slower). Later sessions reuse it.
+- Verify: `claude plugin list` shows `meta-knowledge-graph@mkg` *enabled*; inside
+  a session the MKG system prompt is injected and `mcp__meta-knowledge-graph__*`
+  tools are available.
+
+```
+claude plugin disable meta-knowledge-graph@mkg
+claude plugin enable  meta-knowledge-graph@mkg
+claude plugin details meta-knowledge-graph@mkg     # component inventory + token cost
+```
+
+### Configuring
+
+Credentials live in one user-global file, **`~/.config/meta-knowledge-graph/.env`**
+(mode `600`), read by both the hooks and the MCP server. It survives plugin
+updates and is never written into the ephemeral plugin cache.
+
+> MKG deliberately does **not** use `/plugin configure` — there is no
+> `userConfig`/keychain schema, so credentials stay file-based and portable
+> across harnesses (Codex, etc.).
+
+Run the wizard in your own terminal (it prompts for secrets):
+
+```
+uv run --project ~/.claude/plugins/marketplaces/mkg meta-knowledge-graph setup
+```
+
+…or write the file by hand:
+
+```
+mkdir -p ~/.config/meta-knowledge-graph
+cat > ~/.config/meta-knowledge-graph/.env <<'EOF'
+NEO4J_URI=neo4j+s://xxxx.databases.neo4j.io
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=change-me
+NEO4J_DATABASE=neo4j
+OPENAI_API_KEY=sk-...          # optional: memory extraction + embeddings
+# ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY / DIFFBOT_TOKEN also honored
+EOF
+chmod 600 ~/.config/meta-knowledge-graph/.env
+```
+
+Resolution order (first existing wins): `MKG_ENV_FILE` → `<project>/.env`
+(repo/demo) → `~/.config/meta-knowledge-graph/.env` (installed/ambient). Override
+the dir with `MKG_CONFIG_DIR` or `XDG_CONFIG_HOME`. Start a new session after
+changing credentials.
+
+### Codex
+
+Open this repo in Codex and it works out of the box —
+[`.codex/config.toml`](.codex/config.toml) wires the same MCP server (with
+approval gates on the query and write tools) and
+[`.codex/hooks.json`](.codex/hooks.json) wires the recall, capture, and
+Stop-time extraction events:
+
+```toml
+[mcp_servers.meta-knowledge-graph]
+command = "uv"
+args = ["run", "--no-sync", "meta-knowledge-graph"]
+
+[mcp_servers.meta-knowledge-graph.tools.bigquery_execute_query]
+approval_mode = "approve"
+
+[mcp_servers.meta-knowledge-graph.tools.project_add_learning]
+approval_mode = "approve"
+```
+
+Credentials are read from `~/.config/meta-knowledge-graph/.env` exactly as for
+Claude Code. Codex doesn't currently document a `SessionEnd` hook, so the
+session-level processor is only wired where a harness exposes it. A dedicated
+Codex *plugin* (like the Claude Code one above) is planned.
+
+### Claude Desktop & other harnesses
+
+Plugins are a Claude *Code* feature, so **Claude Desktop** registers the MCP
+server manually in `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "meta-knowledge-graph": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/meta-knowledge-graph", "run", "meta-knowledge-graph"]
+    }
+  }
+}
+```
+
+Credentials come from `~/.config/meta-knowledge-graph/.env` (or set them inline
+under `env`). For **any other harness**, point it at the same two surfaces:
+spawn `uv run meta-knowledge-graph` as an MCP server, and call the `hooks/`
+scripts from its lifecycle events (JSON payload on stdin, `--client <name>` for
+attribution). The graph and memory-extraction loop are identical regardless of
+which harness produced the events — and packaged plugins for more harnesses will
+follow.
+
+### Developing
+
+Iterate against your working tree without touching the marketplace or cache:
+
+```
+claude --plugin-dir /path/to/meta-knowledge-graph     # loads from the repo, this session only
+```
+
+In a repo checkout the project-local `.env` takes precedence, so demo creds stay
+scoped to the repo. Exercise a hook directly with a simulated payload:
+
+```
+echo '{"session_id":"dev","hook_event_name":"SessionStart","source":"startup","cwd":"'"$PWD"'"}' \
+  | uv run --project . python hooks/inject_system_prompt.py
+```
+
+Tests and manifest validation:
+
+```
+uv run python -m pytest tests/ -v
+claude plugin validate .
+```
+
+**Publishing a release** (so `claude plugin update` surfaces it — a version bump
+is required):
+
+```
+# bump "version" in .claude-plugin/plugin.json, then:
+git commit -am "release 0.2.0" && git push
+claude plugin tag                                  # creates meta-knowledge-graph--v0.2.0, validates manifest agreement
+```
+
+Consumers pull it with:
+
+```
+claude plugin marketplace update mkg
+claude plugin update meta-knowledge-graph@mkg      # use the qualified id; restart to apply
+```
+
+With `autoUpdate: true` on the `mkg` marketplace, the catalog refresh is
+automatic — but the version bump is still what makes a new release visible.
+
+**Where code runs from** — two directories back the install:
+
+- `~/.claude/plugins/marketplaces/mkg/` — git clone of the repo (the catalog),
+  refreshed by `marketplace update`.
+- `~/.claude/plugins/cache/mkg/meta-knowledge-graph/<version>/` — the
+  version-pinned copy that `$CLAUDE_PLUGIN_ROOT` resolves to at runtime, with its
+  own `.venv` (re-synced on the first session after each update).
+
 ## Architecture
 
 ### MCP server
@@ -133,67 +304,6 @@ user-profile memory into the persona and keeps every superseded prompt as a
 `:SystemPromptVersion`. It and the seed scripts are the only writers of those
 nodes.
 
-## Quick Start
-
-### Claude Code / Claude Desktop
-
-Add to your Claude Desktop `claude_desktop_config.json` or `.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "meta-knowledge-graph": {
-      "command": "uv",
-      "args": ["--directory", "/path/to/meta-knowledge-graph", "run", "meta-knowledge-graph"],
-      "env": {
-        "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USERNAME": "neo4j",
-        "NEO4J_PASSWORD": "<your-password>",
-        "NEO4J_DATABASE": "neo4j",
-        "OPENAI_API_KEY": "<your-openai-api-key>"
-      }
-    }
-  }
-}
-```
-
-Then register the hook scripts in `.claude/settings.json` under their
-corresponding `hooks.*` events — this repo's own
-[`.claude/settings.json`](.claude/settings.json) shows the full wiring.
-
-### Codex
-
-[`.codex/config.toml`](.codex/config.toml) wires the same MCP server into
-Codex, with approval gates on the query and write tools:
-
-```toml
-[mcp_servers.meta-knowledge-graph]
-command = "uv"
-args = ["run", "--no-sync", "meta-knowledge-graph"]
-
-[mcp_servers.meta-knowledge-graph.tools.bigquery_execute_query]
-approval_mode = "approve"
-
-[mcp_servers.meta-knowledge-graph.tools.project_add_learning]
-approval_mode = "approve"
-```
-
-The hook scripts work under any harness with lifecycle events; pass
-`--client codex` (or your harness's name) to `log_event.py` so captured
-sessions are tagged with their origin.
-This repo's [`.codex/hooks.json`](.codex/hooks.json) wires the documented Codex
-events for recall, capture, and Stop-time extraction. Codex
-does not currently document a `SessionEnd` hook, so that session-level processor
-is only configured for harnesses that expose it.
-
-### Other harnesses
-
-Point the harness at the same two surfaces: spawn `uv run meta-knowledge-graph`
-as an MCP server, and call the `hooks/` scripts from the harness's lifecycle
-events (JSON payload on stdin, `--client <name>` for attribution). The graph
-and memory extraction loop are identical regardless of which
-harness produced the events.
-
 ## Sales agent use case
 
 The repo ships a complete demo persona in [`import/sales_agent/`](import/sales_agent/):
@@ -288,9 +398,8 @@ To preview the generated dataset without touching any database:
 
 ### 3. Register the MCP server and hooks
 
-Follow the Quick Start above for your harness — Claude Code via
-[`.claude/settings.json`](.claude/settings.json), Codex via
-[`.codex/config.toml`](.codex/config.toml) and
+See [Running MKG](#running-mkg) above for your harness — Claude Code via the
+plugin, Codex via [`.codex/config.toml`](.codex/config.toml) and
 [`.codex/hooks.json`](.codex/hooks.json), or any custom harness that can spawn
 an MCP server and fire lifecycle hooks.
 The Neo4j-backed memory and graph tools mount in the minimum setup. With
