@@ -36,6 +36,7 @@ if str(HOOK_DIR) not in sys.path:
 
 from project_common import (  # noqa: E402
     ProjectRef,
+    agent_context_props,
     ensure_project_schema,
     load_dotenv,
     merge_project_and_session,
@@ -289,6 +290,10 @@ def _call_node_id(session_id: str, event: dict[str, Any]) -> str:
     )
 
 
+def _agent_fields(event: dict[str, Any], session_id: str) -> dict[str, Any]:
+    return agent_context_props(event, session_id, _event_text(event, "event_name"))
+
+
 def build_event_enrichment_projection(
     project: ProjectRef,
     session_id: str,
@@ -310,6 +315,7 @@ def build_event_enrichment_projection(
             "prompt_event_id": _event_text(event, "event_id"),
             "timestamp": _event_time(event),
         }
+        prompt_ref.update(_agent_fields(event, session_id))
         turn_prompts[event.get("turn_id")] = prompt_ref
         last_prompt = prompt_ref
 
@@ -362,12 +368,24 @@ def build_event_enrichment_projection(
         turn_id = pre_event.get("turn_id") or (post_event or {}).get("turn_id")
         prompt_ref = turn_prompts.get(turn_id) or last_prompt or {}
         prompt = prompt_ref.get("prompt", "")
+        agent_fields = _agent_fields(pre_event, session_id)
+        if not agent_fields.get("agent_id") and prompt_ref.get("agent_id"):
+            agent_fields["agent_id"] = prompt_ref.get("agent_id")
+        if not agent_fields.get("agent_transcript_id") and prompt_ref.get("agent_transcript_id"):
+            agent_fields["agent_transcript_id"] = prompt_ref.get("agent_transcript_id")
+        if not agent_fields.get("parent_session_id") and prompt_ref.get("parent_session_id"):
+            agent_fields["parent_session_id"] = prompt_ref.get("parent_session_id")
         turn_node_id = _turn_node_id(session_id, str(turn_id) if turn_id else None)
         if turn_node_id not in turn_rows:
             turn_rows[turn_node_id] = {
                 "id": turn_node_id,
                 "session_id": session_id,
                 "turn_id": str(turn_id) if turn_id else None,
+                "agent_kind": agent_fields.get("agent_kind"),
+                "agent_id": agent_fields.get("agent_id"),
+                "agent_transcript_id": agent_fields.get("agent_transcript_id"),
+                "parent_session_id": agent_fields.get("parent_session_id"),
+                "is_subagent": agent_fields.get("is_subagent", False),
                 "prompt": truncate(prompt, MAX_TEXT) if prompt else None,
                 "prompt_event_id": prompt_ref.get("prompt_event_id"),
                 "first_seen_at": prompt_ref.get("timestamp") or _event_time(pre_event),
@@ -388,6 +406,11 @@ def build_event_enrichment_projection(
             "session_id": session_id,
             "turn_node_id": turn_node_id,
             "turn_id": str(turn_id) if turn_id else None,
+            "agent_kind": agent_fields.get("agent_kind"),
+            "agent_id": agent_fields.get("agent_id"),
+            "agent_transcript_id": agent_fields.get("agent_transcript_id"),
+            "parent_session_id": agent_fields.get("parent_session_id"),
+            "is_subagent": agent_fields.get("is_subagent", False),
             "tool_id": tool_id,
             "tool_name": tool_name,
             "tool_namespace": _tool_namespace(tool_name),
@@ -538,7 +561,13 @@ def _fetch_unprocessed_events(
 ) -> list[dict[str, Any]]:
     result = driver.execute_query(
         """
-        MATCH (s:Session {session_id: $session_id})-[:HAS_EVENT]->(e:SessionEvent)
+        MATCH (s:Session {session_id: $session_id})
+        OPTIONAL MATCH (s)-[:HAS_SUBAGENT*1..]->(sub:Session)
+        WITH [s] + collect(DISTINCT sub) AS sessions
+        UNWIND sessions AS scoped_session
+        WITH DISTINCT scoped_session
+        WHERE scoped_session IS NOT NULL
+        MATCH (scoped_session)-[:HAS_EVENT]->(e:SessionEvent)
         WHERE NOT EXISTS {
             MATCH (:EventEnrichment {project_id: $project_id, mode: $mode})
                   -[:PROCESSED_EVENT]->(e)
@@ -614,6 +643,11 @@ def _write_event_enrichment(
             ON CREATE SET t.created_at = $timestamp
             SET t.session_id = row.session_id,
                 t.turn_id = row.turn_id,
+                t.agent_kind = row.agent_kind,
+                t.agent_id = row.agent_id,
+                t.agent_transcript_id = row.agent_transcript_id,
+                t.parent_session_id = row.parent_session_id,
+                t.is_subagent = row.is_subagent,
                 t.prompt = row.prompt,
                 t.first_seen_at = row.first_seen_at,
                 t.updated_at = $timestamp
@@ -647,6 +681,11 @@ def _write_event_enrichment(
             ON CREATE SET call.created_at = $timestamp
             SET call.session_id = row.session_id,
                 call.turn_id = row.turn_id,
+                call.agent_kind = row.agent_kind,
+                call.agent_id = row.agent_id,
+                call.agent_transcript_id = row.agent_transcript_id,
+                call.parent_session_id = row.parent_session_id,
+                call.is_subagent = row.is_subagent,
                 call.tool_use_id = row.tool_use_id,
                 call.tool_name = row.tool_name,
                 call.tool_kind = row.tool_kind,

@@ -460,7 +460,13 @@ def _fetch_unprocessed_events(
 ) -> list[dict[str, Any]]:
     result = driver.execute_query(
         """
-        MATCH (s:Session {session_id: $session_id})-[:HAS_EVENT]->(e:SessionEvent)
+        MATCH (s:Session {session_id: $session_id})
+        OPTIONAL MATCH (s)-[:HAS_SUBAGENT*1..]->(sub:Session)
+        WITH [s] + collect(DISTINCT sub) AS sessions
+        UNWIND sessions AS scoped_session
+        WITH DISTINCT scoped_session
+        WHERE scoped_session IS NOT NULL
+        MATCH (scoped_session)-[:HAS_EVENT]->(e:SessionEvent)
         WHERE NOT EXISTS {
             MATCH (:ProjectProcessing {project_id: $project_id, mode: $mode})
                   -[:PROCESSED_EVENT]->(e)

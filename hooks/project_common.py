@@ -29,12 +29,104 @@ OAUTH_EXPIRY_GRACE_SECONDS = 60
 # considered the same hook firing. Inject and log hooks run in parallel, so the
 # INJECTED_AT link is attempted from both sides within this window.
 INJECTION_EVENT_WINDOW_SECONDS = 120
+SUBAGENT_HOOK_EVENTS = frozenset({"SubagentStart", "SubagentStop"})
+ROLLOUT_TRANSCRIPT_ID_RE = re.compile(
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$",
+    re.IGNORECASE,
+)
 
 
 def injection_window_start() -> str:
     return (
         datetime.now(timezone.utc) - timedelta(seconds=INJECTION_EVENT_WINDOW_SECONDS)
     ).isoformat()
+
+
+def _non_empty_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _first_payload_text(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = _non_empty_text(payload.get(key))
+        if value:
+            return value
+    return None
+
+
+def extract_rollout_transcript_id(transcript_path: str | None) -> str | None:
+    """Return the Codex rollout id embedded in a transcript filename, if present."""
+    if not transcript_path:
+        return None
+    match = ROLLOUT_TRANSCRIPT_ID_RE.search(Path(transcript_path).name)
+    return match.group(1) if match else None
+
+
+def agent_context_props(
+    payload: dict[str, Any],
+    session_id: str | None,
+    event_name: str | None,
+) -> dict[str, Any]:
+    """Normalize actor provenance for main-agent vs subagent hook events.
+
+    Codex currently stores subagent hook events under the parent session id. For
+    subagent internals, the active rollout transcript id is the subagent id; for
+    SubagentStart/SubagentStop, the event name itself is the reliable signal.
+    """
+    session_id_text = _non_empty_text(session_id)
+    event_name_text = _non_empty_text(event_name) or "unknown"
+    transcript_id = extract_rollout_transcript_id(
+        _non_empty_text(payload.get("transcript_path"))
+    )
+    explicit_agent_id = _first_payload_text(
+        payload,
+        ("agent_id", "agent_path", "subagent_id", "subagent_path"),
+    )
+    explicit_parent_session_id = _first_payload_text(
+        payload,
+        ("parent_session_id", "main_session_id"),
+    )
+    explicit_parent_agent_id = _first_payload_text(
+        payload,
+        ("parent_agent_id", "parent_agent_path"),
+    )
+    explicit_agent_kind = (_non_empty_text(payload.get("agent_kind")) or "").lower()
+
+    transcript_is_child = bool(
+        transcript_id and session_id_text and transcript_id != session_id_text
+    )
+    is_subagent = (
+        event_name_text in SUBAGENT_HOOK_EVENTS
+        or transcript_is_child
+        or explicit_agent_kind == "subagent"
+        or payload.get("is_subagent") is True
+    )
+
+    props: dict[str, Any] = {
+        "agent_kind": "subagent" if is_subagent else "main",
+        "is_subagent": is_subagent,
+    }
+    if transcript_id:
+        props["agent_transcript_id"] = transcript_id
+
+    if is_subagent:
+        agent_id = explicit_agent_id or (transcript_id if transcript_is_child else None)
+        parent_session_id = explicit_parent_session_id or session_id_text
+        if agent_id:
+            props["agent_id"] = agent_id
+        if parent_session_id and parent_session_id != "unknown":
+            props["parent_session_id"] = parent_session_id
+    else:
+        agent_id = explicit_agent_id or transcript_id or session_id_text
+        if agent_id:
+            props["agent_id"] = agent_id
+
+    if explicit_parent_agent_id:
+        props["parent_agent_id"] = explicit_parent_agent_id
+    return props
 
 
 def llm_model(client: str | None = None) -> str:

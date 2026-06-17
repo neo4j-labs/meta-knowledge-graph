@@ -29,6 +29,7 @@ project_common = load_hook_module("project_common")
 process_project = load_hook_module("process_project")
 log_event = load_hook_module("log_event")
 inject_project_context = load_hook_module("inject_project_context")
+enrich_events = load_hook_module("enrich_events")
 
 
 class ProjectHookTests(unittest.TestCase):
@@ -226,6 +227,239 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("FOR (i:SystemPromptInjection)", joined)
         self.assertNotIn("m:Memory", joined)
         self.assertNotIn(":Event", joined)
+
+    def test_agent_context_marks_main_agent_from_parent_transcript(self) -> None:
+        session_id = "019ed509-16e5-7321-8d67-461f857b944a"
+        props = project_common.agent_context_props(
+            {
+                "transcript_path": (
+                    "/Users/test/.codex/sessions/rollout-2026-06-17T12-03-23-"
+                    f"{session_id}.jsonl"
+                )
+            },
+            session_id,
+            "PreToolUse",
+        )
+
+        self.assertEqual(props["agent_kind"], "main")
+        self.assertFalse(props["is_subagent"])
+        self.assertEqual(props["agent_id"], session_id)
+        self.assertEqual(props["agent_transcript_id"], session_id)
+        self.assertNotIn("parent_session_id", props)
+
+    def test_agent_context_marks_subagent_from_child_transcript(self) -> None:
+        parent_session_id = "019ed509-16e5-7321-8d67-461f857b944a"
+        subagent_id = "019ed50c-cd1b-7480-a143-6a5ee9401ed5"
+        props = project_common.agent_context_props(
+            {
+                "transcript_path": (
+                    "/Users/test/.codex/sessions/rollout-2026-06-17T12-07-26-"
+                    f"{subagent_id}.jsonl"
+                )
+            },
+            parent_session_id,
+            "PostToolUse",
+        )
+
+        self.assertEqual(props["agent_kind"], "subagent")
+        self.assertTrue(props["is_subagent"])
+        self.assertEqual(props["agent_id"], subagent_id)
+        self.assertEqual(props["agent_transcript_id"], subagent_id)
+        self.assertEqual(props["parent_session_id"], parent_session_id)
+
+    def test_agent_context_marks_subagent_stop_from_event_name(self) -> None:
+        parent_session_id = "019ed509-16e5-7321-8d67-461f857b944a"
+        subagent_id = "019ed50c-cd1b-7480-a143-6a5ee9401ed5"
+        props = project_common.agent_context_props(
+            {"agent_path": subagent_id},
+            parent_session_id,
+            "SubagentStop",
+        )
+
+        self.assertEqual(props["agent_kind"], "subagent")
+        self.assertTrue(props["is_subagent"])
+        self.assertEqual(props["agent_id"], subagent_id)
+        self.assertEqual(props["parent_session_id"], parent_session_id)
+
+    def test_log_event_uses_subagent_session_for_subagent_events(self) -> None:
+        parent_session_id = "019ed509-16e5-7321-8d67-461f857b944a"
+        subagent_id = "019ed50c-cd1b-7480-a143-6a5ee9401ed5"
+        captured: list[tuple[str, dict]] = []
+
+        class FakeTx:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+
+        log_event._append_event(
+            FakeTx(),
+            parent_session_id,
+            "codex",
+            {
+                "event_id": "event-start",
+                "event_name": "SubagentStart",
+                "timestamp": "2026-06-17T10:07:34+00:00",
+                "agent_kind": "subagent",
+                "is_subagent": True,
+                "agent_id": subagent_id,
+                "agent_transcript_id": subagent_id,
+                "parent_session_id": parent_session_id,
+            },
+        )
+
+        append_query, append_params = captured[0]
+        linked_query, linked_params = captured[1]
+        self.assertIn("MERGE (s:Session {session_id: $event_session_id})", append_query)
+        self.assertEqual(append_params["event_session_id"], subagent_id)
+        self.assertEqual(append_params["session_props"]["agent_kind"], "subagent")
+        self.assertEqual(append_params["session_props"]["parent_session_id"], parent_session_id)
+        self.assertIn("MERGE (parent)-[has:HAS_SUBAGENT]->(child)", linked_query)
+        self.assertIn("MERGE (child)-[of:SUBAGENT_OF]->(parent)", linked_query)
+        self.assertIn("MERGE (child)-[:STARTED_AT]->(e)", linked_query)
+        self.assertEqual(linked_params["parent_session_id"], parent_session_id)
+        self.assertEqual(linked_params["subagent_session_id"], subagent_id)
+
+    def test_log_event_does_not_store_parent_transcript_on_subagent_session(self) -> None:
+        parent_session_id = "019ed509-16e5-7321-8d67-461f857b944a"
+        subagent_id = "019ed50c-cd1b-7480-a143-6a5ee9401ed5"
+
+        session_props = log_event._session_props(
+            subagent_id,
+            parent_session_id,
+            "codex",
+            {
+                "agent_kind": "subagent",
+                "is_subagent": True,
+                "agent_id": subagent_id,
+                "agent_transcript_id": parent_session_id,
+                "parent_session_id": parent_session_id,
+            },
+        )
+
+        self.assertEqual(session_props["agent_id"], subagent_id)
+        self.assertEqual(session_props["parent_session_id"], parent_session_id)
+        self.assertNotIn("agent_transcript_id", session_props)
+
+    def test_log_event_links_spawn_response_to_subagent_session(self) -> None:
+        parent_session_id = "019ed509-16e5-7321-8d67-461f857b944a"
+        subagent_id = "019ed50c-cd1b-7480-a143-6a5ee9401ed5"
+        captured: list[tuple[str, dict]] = []
+
+        class FakeTx:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+
+        self.assertEqual(
+            log_event._spawned_subagent_id(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "spawn_agent",
+                    "tool_response": {"agent_id": subagent_id, "nickname": "Hubble"},
+                },
+                "PostToolUse",
+            ),
+            subagent_id,
+        )
+
+        log_event._append_event(
+            FakeTx(),
+            parent_session_id,
+            "codex",
+            {
+                "event_id": "event-spawn",
+                "event_name": "PostToolUse",
+                "timestamp": "2026-06-17T10:07:30+00:00",
+                "agent_kind": "main",
+                "is_subagent": False,
+                "agent_id": parent_session_id,
+                "spawned_subagent_id": subagent_id,
+            },
+        )
+
+        trigger_query, trigger_params = captured[1]
+        self.assertIn("MERGE (child:Session {session_id: $subagent_session_id})", trigger_query)
+        self.assertIn("MERGE (child)-[:TRIGGERED_BY]->(e)", trigger_query)
+        self.assertEqual(trigger_params["parent_session_id"], parent_session_id)
+        self.assertEqual(trigger_params["subagent_session_id"], subagent_id)
+
+    def test_event_enrichment_preserves_subagent_actor_fields(self) -> None:
+        parent_session_id = "019ed509-16e5-7321-8d67-461f857b944a"
+        subagent_id = "019ed50c-cd1b-7480-a143-6a5ee9401ed5"
+        transcript_path = (
+            "/Users/test/.codex/sessions/rollout-2026-06-17T12-07-26-"
+            f"{subagent_id}.jsonl"
+        )
+        events = [
+            {
+                "event_id": "event-prompt",
+                "event_name": "UserPromptSubmit",
+                "timestamp": "2026-06-17T10:07:34Z",
+                "turn_id": "turn-subagent",
+                "prompt": "Run a diagnostic command.",
+                "transcript_path": transcript_path,
+            },
+            {
+                "event_id": "event-pre",
+                "event_name": "PreToolUse",
+                "timestamp": "2026-06-17T10:07:47Z",
+                "turn_id": "turn-subagent",
+                "tool_name": "Bash",
+                "tool_use_id": "call-1",
+                "tool_input": json.dumps({"command": "pwd"}),
+                "transcript_path": transcript_path,
+            },
+            {
+                "event_id": "event-post",
+                "event_name": "PostToolUse",
+                "timestamp": "2026-06-17T10:07:48Z",
+                "turn_id": "turn-subagent",
+                "tool_name": "Bash",
+                "tool_use_id": "call-1",
+                "tool_input": json.dumps({"command": "pwd"}),
+                "tool_response": "/Users/test/project\n",
+                "transcript_path": transcript_path,
+            },
+        ]
+
+        projection = enrich_events.build_event_enrichment_projection(
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            parent_session_id,
+            "turn",
+            events,
+        )
+
+        self.assertEqual(len(projection["turns"]), 1)
+        self.assertEqual(len(projection["tool_calls"]), 1)
+        turn = projection["turns"][0]
+        call = projection["tool_calls"][0]
+        for row in (turn, call):
+            self.assertEqual(row["agent_kind"], "subagent")
+            self.assertTrue(row["is_subagent"])
+            self.assertEqual(row["agent_id"], subagent_id)
+            self.assertEqual(row["agent_transcript_id"], subagent_id)
+            self.assertEqual(row["parent_session_id"], parent_session_id)
+
+    def test_parent_session_processors_include_subagent_sessions(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeResult:
+            records: list[dict] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return FakeResult()
+
+        process_project._fetch_unprocessed_events(
+            FakeDriver(), "neo4j", "mkg", "parent-session", "turn", 50
+        )
+        enrich_events._fetch_unprocessed_events(
+            FakeDriver(), "neo4j", "mkg", "parent-session", "turn", 50
+        )
+
+        for query, params in captured:
+            self.assertIn("OPTIONAL MATCH (s)-[:HAS_SUBAGENT*1..]->(sub:Session)", query)
+            self.assertIn("MATCH (scoped_session)-[:HAS_EVENT]->(e:SessionEvent)", query)
+            self.assertEqual(params["session_id"], "parent-session")
 
     def test_memory_prompt_includes_similar_existing_memory(self) -> None:
         events = [

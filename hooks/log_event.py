@@ -9,6 +9,8 @@ Graph shape::
 
     (Session)-[:FIRST_EVENT]->(SessionEvent)-[:NEXT]->(SessionEvent)->...
     (Session)-[:LATEST_EVENT]->(latest SessionEvent)
+    (Session)-[:HAS_SUBAGENT]->(Session)
+    (SubagentSession)-[:TRIGGERED_BY|STARTED_AT|ENDED_AT]->(SessionEvent)
     (Learning|Decision)-[:INJECTED_AT]->(SessionEvent)  # back-filled for
         SessionStart / UserPromptSubmit events whose parallel inject hook
         already marked memory as injected in this session.
@@ -32,6 +34,7 @@ if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
 from project_common import (  # noqa: E402
+    agent_context_props,
     ensure_project_schema,
     in_extraction_subprocess,
     injection_window_start,
@@ -44,6 +47,7 @@ MAX_RESPONSE_CHARS = 4000
 # Hook events that inject_project_context.py uses to inject memory; only these
 # events can be the target of an INJECTED_AT back-fill.
 INJECTION_CONTEXT_EVENTS = {"SessionStart", "UserPromptSubmit"}
+SPAWN_AGENT_TOOL_NAMES = {"spawn_agent", "multi_agent_v1.spawn_agent"}
 
 
 def _neo4j_config() -> tuple[str, str, str, str]:
@@ -71,18 +75,75 @@ def _read_transcript(path: str | None) -> str | None:
         return None
 
 
+def _event_session_id(parent_session_id: str, event_props: dict) -> str:
+    if event_props.get("is_subagent") and event_props.get("agent_id"):
+        return str(event_props["agent_id"])
+    return parent_session_id
+
+
+def _session_props(
+    event_session_id: str,
+    parent_session_id: str,
+    client: str,
+    event_props: dict,
+) -> dict:
+    props = {
+        "client": client,
+        "agent_kind": event_props.get("agent_kind"),
+        "agent_id": event_props.get("agent_id") or event_session_id,
+        "agent_transcript_id": event_props.get("agent_transcript_id"),
+    }
+    if event_session_id != parent_session_id:
+        props.update(
+            {
+                "agent_kind": "subagent",
+                "agent_id": event_session_id,
+                "parent_session_id": parent_session_id,
+                "parent_agent_id": event_props.get("parent_agent_id")
+                or parent_session_id,
+            }
+        )
+        if event_props.get("agent_transcript_id") != event_session_id:
+            props.pop("agent_transcript_id", None)
+    return {k: v for k, v in props.items() if v is not None}
+
+
+def _json_dict(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _spawned_subagent_id(data: dict, event_name: str) -> str | None:
+    if event_name != "PostToolUse":
+        return None
+    tool_name = str(data.get("tool_name") or "")
+    if tool_name not in SPAWN_AGENT_TOOL_NAMES and not tool_name.endswith("spawn_agent"):
+        return None
+    agent_id = _json_dict(data.get("tool_response")).get("agent_id")
+    return agent_id.strip() if isinstance(agent_id, str) and agent_id.strip() else None
+
+
 def _ensure_constraints(tx) -> None:
     ensure_project_schema(tx)
 
 
 def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
+    event_session_id = _event_session_id(session_id, event_props)
+    session_props = _session_props(event_session_id, session_id, client, event_props)
     tx.run(
         """
-        MERGE (s:Session {session_id: $session_id})
-        ON CREATE SET s.created_at = datetime($timestamp), s.client = $client
-        SET s.client = coalesce(s.client, $client)
+        MERGE (s:Session {session_id: $event_session_id})
+        ON CREATE SET s.created_at = datetime($timestamp)
+        SET s += $session_props
         WITH s
-        OPTIONAL MATCH (s)-[:HAS_EVENT]->(dup:SessionEvent {event_id: $event_id})
+        OPTIONAL MATCH (dup:SessionEvent {event_id: $event_id})
         WITH s, dup
         WHERE dup IS NULL
         CREATE (e:SessionEvent $event_props)
@@ -100,10 +161,115 @@ def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
         )
         CREATE (s)-[:LATEST_EVENT]->(e)
         """,
-        session_id=session_id,
-        client=client,
+        event_session_id=event_session_id,
+        session_props=session_props,
         timestamp=event_props.get("timestamp"),
         event_props=event_props,
+        event_id=event_props.get("event_id"),
+    )
+    if event_session_id != session_id:
+        _link_subagent_session(
+            tx,
+            parent_session_id=session_id,
+            subagent_session_id=event_session_id,
+            client=client,
+            event_props=event_props,
+        )
+    spawned_subagent_id = event_props.get("spawned_subagent_id")
+    if spawned_subagent_id:
+        _link_spawned_subagent_session(
+            tx,
+            parent_session_id=session_id,
+            subagent_session_id=str(spawned_subagent_id),
+            client=client,
+            event_props=event_props,
+        )
+
+
+def _link_subagent_session(
+    tx,
+    parent_session_id: str,
+    subagent_session_id: str,
+    client: str,
+    event_props: dict,
+) -> None:
+    parent_agent_id = event_props.get("parent_agent_id") or parent_session_id
+    tx.run(
+        """
+        MATCH (child:Session {session_id: $subagent_session_id})
+        MERGE (parent:Session {session_id: $parent_session_id})
+        ON CREATE SET parent.created_at = datetime($timestamp)
+        SET parent.client = coalesce(parent.client, $client),
+            parent.agent_kind = coalesce(parent.agent_kind, 'main'),
+            parent.agent_id = coalesce(parent.agent_id, $parent_agent_id)
+        MERGE (parent)-[has:HAS_SUBAGENT]->(child)
+        ON CREATE SET has.created_at = datetime($timestamp)
+        SET has.updated_at = datetime($timestamp),
+            has.agent_id = $subagent_session_id,
+            has.parent_agent_id = $parent_agent_id
+        MERGE (child)-[of:SUBAGENT_OF]->(parent)
+        ON CREATE SET of.created_at = datetime($timestamp)
+        SET of.updated_at = datetime($timestamp),
+            of.parent_agent_id = $parent_agent_id
+        WITH child
+        MATCH (e:SessionEvent {event_id: $event_id})
+        FOREACH (_ IN CASE WHEN $event_name = 'SubagentStart' THEN [1] ELSE [] END |
+            MERGE (child)-[:STARTED_AT]->(e)
+        )
+        FOREACH (_ IN CASE WHEN $event_name = 'SubagentStop' THEN [1] ELSE [] END |
+            MERGE (child)-[:ENDED_AT]->(e)
+        )
+        """,
+        parent_session_id=parent_session_id,
+        subagent_session_id=subagent_session_id,
+        parent_agent_id=parent_agent_id,
+        client=client,
+        timestamp=event_props.get("timestamp"),
+        event_id=event_props.get("event_id"),
+        event_name=event_props.get("event_name"),
+    )
+
+
+def _link_spawned_subagent_session(
+    tx,
+    parent_session_id: str,
+    subagent_session_id: str,
+    client: str,
+    event_props: dict,
+) -> None:
+    parent_agent_id = event_props.get("agent_id") or parent_session_id
+    tx.run(
+        """
+        MERGE (parent:Session {session_id: $parent_session_id})
+        ON CREATE SET parent.created_at = datetime($timestamp)
+        SET parent.client = coalesce(parent.client, $client),
+            parent.agent_kind = coalesce(parent.agent_kind, 'main'),
+            parent.agent_id = coalesce(parent.agent_id, $parent_agent_id)
+        MERGE (child:Session {session_id: $subagent_session_id})
+        ON CREATE SET child.created_at = datetime($timestamp)
+        SET child.client = coalesce(child.client, $client),
+            child.agent_kind = 'subagent',
+            child.agent_id = $subagent_session_id,
+            child.parent_session_id = $parent_session_id,
+            child.parent_agent_id = $parent_agent_id
+        MERGE (parent)-[has:HAS_SUBAGENT]->(child)
+        ON CREATE SET has.created_at = datetime($timestamp)
+        SET has.updated_at = datetime($timestamp),
+            has.agent_id = $subagent_session_id,
+            has.parent_agent_id = $parent_agent_id
+        MERGE (child)-[of:SUBAGENT_OF]->(parent)
+        ON CREATE SET of.created_at = datetime($timestamp)
+        SET of.updated_at = datetime($timestamp),
+            of.parent_agent_id = $parent_agent_id
+        WITH child
+        MATCH (e:SessionEvent {event_id: $event_id})
+        MERGE (child)-[:TRIGGERED_BY]->(e)
+        """,
+        parent_session_id=parent_session_id,
+        subagent_session_id=subagent_session_id,
+        parent_agent_id=parent_agent_id,
+        client=client,
+        timestamp=event_props.get("timestamp"),
         event_id=event_props.get("event_id"),
     )
 
@@ -114,8 +280,8 @@ def _link_injected_memory(tx, session_id: str, event_id: str, event_name: str) -
     since = injection_window_start()
     tx.run(
         """
+        MATCH (e:SessionEvent {event_id: $event_id})
         MATCH (s:Session {session_id: $session_id})
-              -[:HAS_EVENT]->(e:SessionEvent {event_id: $event_id})
         MATCH (m)-[inj:INJECTED_IN]->(s)
         WHERE (m:Learning OR m:Decision)
           AND inj.hook_event = $event_name
@@ -137,8 +303,8 @@ def _link_injected_memory(tx, session_id: str, event_id: str, event_name: str) -
 def log_event(data: dict, client: str) -> None:
     from neo4j import GraphDatabase
 
-    session_id = data.get("session_id", "unknown")
-    event_name = data.get("hook_event_name", "unknown")
+    session_id = str(data.get("session_id") or "unknown")
+    event_name = str(data.get("hook_event_name") or "unknown")
     timestamp = datetime.now(timezone.utc).isoformat()
     # Deterministic identity: the *same* lifecycle event delivered to two hook
     # configs at once (e.g. the repo's .claude/settings.json and an installed
@@ -178,7 +344,12 @@ def log_event(data: dict, client: str) -> None:
         "transcript_path": data.get("transcript_path"),
         "transcript": _read_transcript(data.get("transcript_path")),
     }
+    event_props.update(agent_context_props(data, session_id, event_name))
+    spawned_subagent_id = _spawned_subagent_id(data, event_name)
+    if spawned_subagent_id:
+        event_props["spawned_subagent_id"] = spawned_subagent_id
     event_props = {k: v for k, v in event_props.items() if v is not None}
+    event_session_id = _event_session_id(session_id, event_props)
 
     uri, user, password, database = _neo4j_config()
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
@@ -187,8 +358,12 @@ def log_event(data: dict, client: str) -> None:
             session.execute_write(_append_event, session_id, client, event_props)
             if event_name in INJECTION_CONTEXT_EVENTS and session_id != "unknown":
                 session.execute_write(
-                    _link_injected_memory, session_id, event_id, event_name
+                    _link_injected_memory, event_session_id, event_id, event_name
                 )
+                if event_session_id != session_id:
+                    session.execute_write(
+                        _link_injected_memory, session_id, event_id, event_name
+                    )
             if project:
                 session.execute_write(
                     link_event_to_project,
@@ -197,6 +372,22 @@ def log_event(data: dict, client: str) -> None:
                     event_id,
                     timestamp,
                 )
+                if event_session_id != session_id:
+                    session.execute_write(
+                        link_event_to_project,
+                        project,
+                        event_session_id,
+                        event_id,
+                        timestamp,
+                    )
+                if spawned_subagent_id:
+                    session.execute_write(
+                        link_event_to_project,
+                        project,
+                        spawned_subagent_id,
+                        event_id,
+                        timestamp,
+                    )
 
 
 def main() -> int:
