@@ -34,6 +34,7 @@ if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
 from project_common import (  # noqa: E402
+    SUBAGENT_HOOK_EVENTS,
     agent_context_props,
     ensure_project_schema,
     in_extraction_subprocess,
@@ -76,6 +77,14 @@ def _read_transcript(path: str | None) -> str | None:
 
 
 def _event_session_id(parent_session_id: str, event_props: dict) -> str:
+    # SubagentStart/SubagentStop are markers on the *parent* timeline: the start
+    # is where the parent triggered the subagent and the stop is where control
+    # returned. They stay owned by the parent session even though they describe a
+    # subagent (the subagent id is preserved on the event + via HAS_SUBAGENT).
+    if event_props.get("event_name") in SUBAGENT_HOOK_EVENTS:
+        return parent_session_id
+    # A subagent's own internal events (tool calls, prompts, etc.) are owned by
+    # the subagent session so "what did subagent X do" is answerable directly.
     if event_props.get("is_subagent") and event_props.get("agent_id"):
         return str(event_props["agent_id"])
     return parent_session_id
@@ -136,8 +145,19 @@ def _ensure_constraints(tx) -> None:
 
 
 def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
+    event_name = event_props.get("event_name")
+    is_lifecycle = event_name in SUBAGENT_HOOK_EVENTS
+    raw_subagent_id = event_props.get("agent_id")
+    subagent_id = str(raw_subagent_id) if raw_subagent_id else None
     event_session_id = _event_session_id(session_id, event_props)
-    session_props = _session_props(event_session_id, session_id, client, event_props)
+    if is_lifecycle:
+        # The marker is owned by the parent timeline, so it must not stamp the
+        # subagent's actor identity (agent_kind=subagent, agent_id, ...) onto the
+        # parent Session node. The subagent session is described by
+        # _link_subagent_session instead.
+        session_props = {"client": client}
+    else:
+        session_props = _session_props(event_session_id, session_id, client, event_props)
     tx.run(
         """
         MERGE (s:Session {session_id: $event_session_id})
@@ -168,7 +188,18 @@ def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
         event_props=event_props,
         event_id=event_props.get("event_id"),
     )
-    if event_session_id != session_id:
+    if is_lifecycle and subagent_id and subagent_id != session_id:
+        # Lifecycle marker lives on the parent timeline but still links to the
+        # subagent session it describes (HAS_SUBAGENT + STARTED_AT/ENDED_AT).
+        _link_subagent_session(
+            tx,
+            parent_session_id=session_id,
+            subagent_session_id=subagent_id,
+            client=client,
+            event_props=event_props,
+        )
+    elif event_session_id != session_id:
+        # Subagent-internal event owned by the subagent session.
         _link_subagent_session(
             tx,
             parent_session_id=session_id,
@@ -197,7 +228,14 @@ def _link_subagent_session(
     parent_agent_id = event_props.get("parent_agent_id") or parent_session_id
     tx.run(
         """
-        MATCH (child:Session {session_id: $subagent_session_id})
+        MERGE (child:Session {session_id: $subagent_session_id})
+        ON CREATE SET child.created_at = datetime($timestamp)
+        SET child.client = coalesce(child.client, $client),
+            child.agent_kind = 'subagent',
+            child.agent_id = coalesce(child.agent_id, $subagent_session_id),
+            child.parent_session_id = coalesce(child.parent_session_id, $parent_session_id),
+            child.parent_agent_id = coalesce(child.parent_agent_id, $parent_agent_id),
+            child.agent_type = coalesce(child.agent_type, $agent_type)
         MERGE (parent:Session {session_id: $parent_session_id})
         ON CREATE SET parent.created_at = datetime($timestamp)
         SET parent.client = coalesce(parent.client, $client),
@@ -225,6 +263,7 @@ def _link_subagent_session(
         subagent_session_id=subagent_session_id,
         parent_agent_id=parent_agent_id,
         client=client,
+        agent_type=event_props.get("agent_type"),
         timestamp=event_props.get("timestamp"),
         event_id=event_props.get("event_id"),
         event_name=event_props.get("event_name"),
@@ -378,6 +417,21 @@ def log_event(data: dict, client: str) -> None:
                         link_event_to_project,
                         project,
                         event_session_id,
+                        event_id,
+                        timestamp,
+                    )
+                # SubagentStart/Stop are owned by the parent, so the subagent
+                # session they describe still needs its own project link.
+                lifecycle_subagent_id = (
+                    str(event_props.get("agent_id"))
+                    if event_name in SUBAGENT_HOOK_EVENTS and event_props.get("agent_id")
+                    else None
+                )
+                if lifecycle_subagent_id and lifecycle_subagent_id != session_id:
+                    session.execute_write(
+                        link_event_to_project,
+                        project,
+                        lifecycle_subagent_id,
                         event_id,
                         timestamp,
                     )

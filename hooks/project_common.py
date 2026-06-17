@@ -99,9 +99,19 @@ def agent_context_props(
     transcript_is_child = bool(
         transcript_id and session_id_text and transcript_id != session_id_text
     )
+    # Claude Code delivers a subagent's *internal* hooks (PreToolUse, PostToolUse,
+    # ...) under the parent session id and the parent transcript, signalling the
+    # subagent only through an explicit agent id field. Codex instead gives the
+    # subagent its own transcript (caught by transcript_is_child above). Treat an
+    # explicit agent id that differs from the session id as the Claude Code
+    # subagent signal so those internals are owned by the subagent session.
+    explicit_is_child_agent = bool(
+        explicit_agent_id and session_id_text and explicit_agent_id != session_id_text
+    )
     is_subagent = (
         event_name_text in SUBAGENT_HOOK_EVENTS
         or transcript_is_child
+        or explicit_is_child_agent
         or explicit_agent_kind == "subagent"
         or payload.get("is_subagent") is True
     )

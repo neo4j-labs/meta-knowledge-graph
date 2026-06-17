@@ -281,7 +281,48 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(props["agent_id"], subagent_id)
         self.assertEqual(props["parent_session_id"], parent_session_id)
 
-    def test_log_event_uses_subagent_session_for_subagent_events(self) -> None:
+    def test_agent_context_marks_subagent_from_explicit_agent_id(self) -> None:
+        # Claude Code internal subagent tool hook: parent session id + parent
+        # transcript, subagent identified only by an explicit agent id field.
+        parent_session_id = "3344fd58-f279-4e4c-9b82-de7616d7c3aa"
+        subagent_id = "a72a9fb53032168f1"
+        props = project_common.agent_context_props(
+            {
+                "agent_id": subagent_id,
+                "transcript_path": (
+                    "/Users/test/.claude/projects/mkg/"
+                    f"{parent_session_id}.jsonl"
+                ),
+            },
+            parent_session_id,
+            "PreToolUse",
+        )
+
+        self.assertEqual(props["agent_kind"], "subagent")
+        self.assertTrue(props["is_subagent"])
+        self.assertEqual(props["agent_id"], subagent_id)
+        self.assertEqual(props["parent_session_id"], parent_session_id)
+
+    def test_agent_context_keeps_main_agent_when_agent_id_matches_session(self) -> None:
+        # A main-agent tool hook may echo agent_id == session_id; it must stay
+        # classified as the main agent.
+        session_id = "3344fd58-f279-4e4c-9b82-de7616d7c3aa"
+        props = project_common.agent_context_props(
+            {
+                "agent_id": session_id,
+                "transcript_path": (
+                    f"/Users/test/.claude/projects/mkg/{session_id}.jsonl"
+                ),
+            },
+            session_id,
+            "PreToolUse",
+        )
+
+        self.assertEqual(props["agent_kind"], "main")
+        self.assertFalse(props["is_subagent"])
+        self.assertEqual(props["agent_id"], session_id)
+
+    def test_log_event_routes_subagent_lifecycle_to_parent_timeline(self) -> None:
         parent_session_id = "019ed509-16e5-7321-8d67-461f857b944a"
         subagent_id = "019ed50c-cd1b-7480-a143-6a5ee9401ed5"
         captured: list[tuple[str, dict]] = []
@@ -302,19 +343,63 @@ class ProjectHookTests(unittest.TestCase):
                 "is_subagent": True,
                 "agent_id": subagent_id,
                 "agent_transcript_id": subagent_id,
+                "agent_type": "general-purpose",
                 "parent_session_id": parent_session_id,
             },
         )
 
         append_query, append_params = captured[0]
         linked_query, linked_params = captured[1]
+        # SubagentStart is a marker on the parent timeline (trigger point), so it
+        # is owned by the parent session, not the subagent.
         self.assertIn("MERGE (s:Session {session_id: $event_session_id})", append_query)
-        self.assertEqual(append_params["event_session_id"], subagent_id)
-        self.assertEqual(append_params["session_props"]["agent_kind"], "subagent")
-        self.assertEqual(append_params["session_props"]["parent_session_id"], parent_session_id)
+        self.assertEqual(append_params["event_session_id"], parent_session_id)
+        # The parent Session node must not be mislabeled with the subagent's
+        # actor identity.
+        self.assertEqual(append_params["session_props"], {"client": "codex"})
+        # ...but the subagent session it describes is still linked + marked.
+        self.assertIn("MERGE (child:Session {session_id: $subagent_session_id})", linked_query)
         self.assertIn("MERGE (parent)-[has:HAS_SUBAGENT]->(child)", linked_query)
         self.assertIn("MERGE (child)-[of:SUBAGENT_OF]->(parent)", linked_query)
         self.assertIn("MERGE (child)-[:STARTED_AT]->(e)", linked_query)
+        self.assertEqual(linked_params["parent_session_id"], parent_session_id)
+        self.assertEqual(linked_params["subagent_session_id"], subagent_id)
+        self.assertEqual(linked_params["agent_type"], "general-purpose")
+
+    def test_log_event_routes_subagent_internal_event_to_subagent_session(self) -> None:
+        # Claude Code delivers a subagent's internal tool hooks under the parent
+        # session id, flagged only by an explicit agent id (is_subagent below is
+        # what agent_context_props derives from that). Those events must be owned
+        # by the subagent session, with HAS_SUBAGENT wired to the parent.
+        parent_session_id = "019ed509-16e5-7321-8d67-461f857b944a"
+        subagent_id = "a72a9fb53032168f1"
+        captured: list[tuple[str, dict]] = []
+
+        class FakeTx:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+
+        log_event._append_event(
+            FakeTx(),
+            parent_session_id,
+            "claude_code",
+            {
+                "event_id": "event-pre",
+                "event_name": "PreToolUse",
+                "timestamp": "2026-06-17T10:07:40+00:00",
+                "agent_kind": "subagent",
+                "is_subagent": True,
+                "agent_id": subagent_id,
+                "tool_name": "Bash",
+            },
+        )
+
+        append_query, append_params = captured[0]
+        linked_query, linked_params = captured[1]
+        self.assertEqual(append_params["event_session_id"], subagent_id)
+        self.assertEqual(append_params["session_props"]["agent_kind"], "subagent")
+        self.assertIn("MERGE (parent)-[has:HAS_SUBAGENT]->(child)", linked_query)
+        # An internal event is not a lifecycle marker, so no STARTED_AT/ENDED_AT.
         self.assertEqual(linked_params["parent_session_id"], parent_session_id)
         self.assertEqual(linked_params["subagent_session_id"], subagent_id)
 
