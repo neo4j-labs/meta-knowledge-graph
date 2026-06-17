@@ -12,11 +12,16 @@ Customize the active prompt by editing the node in Neo4j
 from __future__ import annotations
 
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
+
+HOOK_DIR = Path(__file__).resolve().parent
+if str(HOOK_DIR) not in sys.path:
+    sys.path.insert(0, str(HOOK_DIR))
+
+from project_common import load_mkg_env, neo4j_config  # noqa: E402
 
 DEFAULT_PROMPT = """You are the Intelligence Agent for the Meta Knowledge Graph (MKG).
 
@@ -84,27 +89,6 @@ in project context):
 """
 
 
-def load_dotenv(env_path: Path) -> None:
-    if not env_path.exists():
-        return
-    for raw in env_path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
-
-
-def _neo4j_config() -> tuple[str, str, str, str]:
-    uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    user = os.getenv("NEO4J_USERNAME", "neo4j")
-    password = os.getenv("NEO4J_PASSWORD", "password")
-    database = os.getenv("NEO4J_DATABASE", "neo4j")
-    return uri, user, password, database
-
-
 def _first_record(result):
     records = getattr(result, "records", result) or []
     return records[0] if records else None
@@ -116,7 +100,7 @@ def fetch_prompt_from_neo4j(name: str) -> str | None:
     except ImportError:
         return None
 
-    uri, user, password, database = _neo4j_config()
+    uri, user, password, database = neo4j_config()
 
     try:
         with GraphDatabase.driver(uri, auth=(user, password)) as driver:
@@ -174,7 +158,7 @@ def record_injection(
     except ImportError:
         return True
 
-    uri, user, password, database = _neo4j_config()
+    uri, user, password, database = neo4j_config()
     timestamp = datetime.now(timezone.utc).isoformat()
     injection_id = f"{session_id}_{timestamp}_{hook_event}_{target}"
     content_summary = summarize_injection_content(prompt_name, content, source)
@@ -231,7 +215,7 @@ def record_injection(
 
 def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env")
+    load_mkg_env(project_root)
 
     try:
         raw = sys.stdin.read()

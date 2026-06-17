@@ -22,9 +22,10 @@ HOOK_DIR = Path(__file__).resolve().parent
 if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
-from inject_system_prompt import DEFAULT_PROMPT, load_dotenv  # noqa: E402
+from inject_system_prompt import DEFAULT_PROMPT  # noqa: E402
 from project_common import (  # noqa: E402
     ensure_project_schema,
+    load_mkg_env,
     neo4j_config,
     upsert_prompt_node,
 )
@@ -38,7 +39,7 @@ def main(argv: list[str]) -> int:
         content = DEFAULT_PROMPT
 
     project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env")
+    load_mkg_env(project_root)
 
     from neo4j import GraphDatabase
 

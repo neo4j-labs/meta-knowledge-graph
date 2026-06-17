@@ -38,7 +38,7 @@ from project_common import (  # noqa: E402
     ProjectRef,
     agent_context_props,
     ensure_project_schema,
-    load_dotenv,
+    load_mkg_env,
     merge_project_and_session,
     neo4j_config,
     resolve_project,
@@ -887,7 +887,7 @@ def main() -> int:
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env")
+    load_mkg_env(project_root)
     payload = _read_payload()
     if args.session_id:
         payload["session_id"] = args.session_id

@@ -28,7 +28,7 @@ from process_project import (  # noqa: E402
 )
 from project_common import (  # noqa: E402
     ensure_project_schema,
-    load_dotenv,
+    load_mkg_env,
     neo4j_config,
     upsert_prompt_node,
 )
@@ -49,7 +49,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env")
+    load_mkg_env(project_root)
 
     from neo4j import GraphDatabase
 

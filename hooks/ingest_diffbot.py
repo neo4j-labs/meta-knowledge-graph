@@ -43,7 +43,7 @@ HOOK_DIR = Path(__file__).resolve().parent
 if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
-from project_common import load_dotenv, neo4j_config  # noqa: E402
+from project_common import load_mkg_env, neo4j_config  # noqa: E402
 
 ENHANCE_SUFFIX = "enhance_entity"
 NEWS_SUFFIX = "search_news"
@@ -568,7 +568,7 @@ def ingest(data: dict[str, Any]) -> None:
 
 def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env")
+    load_mkg_env(project_root)
 
     try:
         raw = sys.stdin.read()

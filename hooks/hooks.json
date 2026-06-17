@@ -1,0 +1,156 @@
+{
+  "description": "MKG capture/recall hooks. Resolves its own root: ${CLAUDE_PLUGIN_ROOT} when installed as a plugin, else ${CLAUDE_PROJECT_DIR} when committed in-repo. The first SessionStart command omits --no-sync so a fresh plugin install bootstraps its uv venv once; all other commands assume the venv is ready.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" python \"$ROOT/hooks/inject_system_prompt.py\""
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/inject_project_context.py\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/inject_project_context.py\""
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*__(enhance_entity|search_news)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/ingest_diffbot.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*__(bigquery_execute_query|neo4j_read_cypher)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/capture_query_failures.py\""
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/log_event.py\" --client claude_code"
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/process_project.py\" --mode turn --background"
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/consolidate_system_prompt.py\" --background"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/log_event.py\" --client claude_code"
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/process_project.py\" --mode session --background"
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --project \"$ROOT\" --no-sync python \"$ROOT/hooks/consolidate_system_prompt.py\" --background"
+          }
+        ]
+      }
+    ]
+  }
+}

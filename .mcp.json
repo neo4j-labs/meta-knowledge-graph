@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "meta-knowledge-graph": {
-      "command": "uv",
-      "args": ["run", "--no-sync", "meta-knowledge-graph"]
+      "command": "bash",
+      "args": [
+        "-c",
+        "ROOT=\"${CLAUDE_PLUGIN_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; exec uv run --project \"$ROOT\" meta-knowledge-graph"
+      ]
     }
   }
 }

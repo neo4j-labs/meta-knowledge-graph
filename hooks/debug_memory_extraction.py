@@ -30,7 +30,7 @@ from project_common import (  # noqa: E402
     fetch_project_learnings,
     llm_model,
     llm_ready,
-    load_dotenv,
+    load_mkg_env,
     neo4j_config,
 )
 
@@ -78,7 +78,7 @@ def main() -> int:
         parser.error("provide --session-id or --processing-id")
 
     project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env")
+    load_mkg_env(project_root)
 
     from neo4j import GraphDatabase
 

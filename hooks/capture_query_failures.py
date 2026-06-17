@@ -28,7 +28,7 @@ if str(HOOK_DIR) not in sys.path:
 
 from project_common import (  # noqa: E402
     ensure_project_schema,
-    load_dotenv,
+    load_mkg_env,
     merge_project_and_session,
     neo4j_config,
     resolve_project,
@@ -797,7 +797,7 @@ def capture_transcript(
 
 def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env")
+    load_mkg_env(project_root)
 
     try:
         raw = sys.stdin.read()

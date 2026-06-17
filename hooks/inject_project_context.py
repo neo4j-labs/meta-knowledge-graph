@@ -18,7 +18,7 @@ from project_common import (  # noqa: E402
     fetch_user_decisions,
     fetch_user_learnings,
     format_learning_context,
-    load_dotenv,
+    load_mkg_env,
     mark_injected_in_session,
     mark_learnings_used,
     neo4j_config,
@@ -43,7 +43,7 @@ def context_scope_for_hook(hook_event: str) -> str:
 
 def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env")
+    load_mkg_env(project_root)
 
     payload = _read_payload()
     hook_event = payload.get("hook_event_name", "UserPromptSubmit")

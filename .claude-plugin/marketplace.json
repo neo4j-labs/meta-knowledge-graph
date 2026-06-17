@@ -1,0 +1,12 @@
+{
+  "name": "mkg",
+  "owner": { "name": "Tomaz Bratanic" },
+  "metadata": { "description": "Meta Knowledge Graph plugin by neo4j-labs" },
+  "plugins": [
+    {
+      "name": "meta-knowledge-graph",
+      "source": "./",
+      "description": "Neo4j-backed agent memory: capture/recall hooks + MCP server."
+    }
+  ]
+}

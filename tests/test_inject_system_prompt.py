@@ -73,7 +73,7 @@ class InjectSystemPromptTests(unittest.TestCase):
         with patch.dict(sys.modules, {"neo4j": fake_neo4j}):
             with patch.object(
                 inject_system_prompt,
-                "_neo4j_config",
+                "neo4j_config",
                 return_value=("bolt://example", "neo4j", "password", "neo4j"),
             ):
                 return inject_system_prompt.record_injection(
