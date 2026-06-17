@@ -65,7 +65,7 @@ exposed under `.claude/hooks/` as symlinks back to the canonical versions in
 | `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and capture user/project facts as scoped learnings. The injection log keeps only a content hash + summary on the `:SystemPromptInjection` node and links it to its source via `[:OF_PROMPT]→(:SystemPrompt)` instead of copying the prompt text. If the same prompt content was already injected into the same session, the hook skips the duplicate (unless the context was wiped by `clear`/`compact`). |
 | `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits: project-scoped learnings/decisions for the current project, plus durable user-scoped learnings that follow the user across every project. Every injected item is linked to the session via `[:INJECTED_IN]`; items already injected earlier in the same session — or first produced during it (`[:FROM_SESSION]`) — are excluded from retrieval, so a conversation never receives the same learning or decision twice, nor has its own freshly-extracted memory echoed back. Marks served learnings as used. |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | `hooks/log_event.py` | Persists each event as a `:SessionEvent` node under the current `:Session`, threaded by `:NEXT`. This is the corpus the memory extraction processor later reads. |
-| `Stop` (`--mode turn`), `SessionEnd` (`--mode session`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions for two buckets: `:Decision` nodes and `:Learning` nodes. Each learning is classified `project` (a fact about the project/environment) or `user` (a durable fact about the person that holds across projects); user-scoped learnings are keyed on a project-independent namespace so the same fact dedupes everywhere. Writes new nodes with status `candidate`. |
+| `Stop` (`--mode turn`), `SessionEnd` (`--mode session`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions for two buckets: `:Decision` nodes and `:Learning` nodes. Each learning is classified `project` (a fact about the project/environment) or `user` (a durable fact about the person that holds across projects); user-scoped learnings are keyed on a project-independent namespace so the same fact dedupes everywhere. Writes new nodes with status `candidate`, and stores the model used plus `llm_status` (`called`, `skipped`, or `error`) and skip/error reason on `:ProjectProcessing` and prompt-usage provenance. |
 | `Stop`, `SessionEnd` | `hooks/consolidate_system_prompt.py` | Runs in the background, rate-limited. The system-prompt consolidation service: it only does work when **more than 5** user-profile memories are in need of review — user-scoped `candidate` learnings not yet folded into the prompt (`MKG_PROMPT_CONSOLIDATION_THRESHOLD`) — and not more than once per cooldown window (`MKG_PROMPT_CONSOLIDATION_INTERVAL_HOURS`, default 24h, tracked via `last_consolidated_at` on the node). When both gates pass, it sends the current `(:SystemPrompt {name: 'default'})` plus the pending user facts to the LLM, which folds those facts into the persona, then archives the outgoing prompt as a `(:SystemPromptVersion)` history node before overwriting the active one and bumping its version. The folded learnings are stamped `consolidated_at` so they drop out of the backlog; their `candidate` status is left untouched, so the human promotion gate still owns `candidate → approved`. |
 | `PostToolUse` (matcher on the Diffbot tools `enhance_entity` / `search_news`) | `hooks/ingest_diffbot.py` | Builds Diffbot tool results back into the graph instead of letting them evaporate with the conversation. `enhance_entity` firmographics become `(:Account)-[:HAS_ENRICHMENT]→(:DiffbotOrganization)` or `(:DiffbotPerson)` (matched on domain, name/`allNames`, and employer hints); `search_news` articles become `(:NewsArticle)-[:MENTIONS]→(:Account)` plus `[:MENTIONS]→(:DiffbotOrganization)` when organization tags or account matches identify companies, and `[:TAGGED]→(:NewsTag)`. Only entities carrying a real Diffbot id are stored — references without one are dropped instead of being keyed on synthetic hashes. Diffbot entities and articles link `[:CAPTURED_IN]→(:Session)` for provenance. Handles the harness's response wrappers, including oversized results that arrive as a saved-to-file notice. |
 | `PostToolUse` (matcher on the query tools `bigquery_execute_query` / `neo4j_read_cypher`) | `hooks/capture_query_failures.py` | Captures failed or suspicious query outputs as structured `(:QueryExecution)-[:HAS_ISSUE]→(:QueryIssue)` artifacts. The first pass records issues visible in PostToolUse payloads: empty result sets, parser/schema/permission/resource/capability errors, malformed outputs, and Neo4j serialization cases such as temporal values returned as `{}`. Clean successful query results are ignored. |
@@ -76,10 +76,13 @@ exposed under `.claude/hooks/` as symlinks back to the canonical versions in
 (:Project {id})
    ├─[:HAS_SESSION]→ (:Session)─[:HAS_EVENT]→ (:SessionEvent)─[:NEXT]→ ...
    │                            ─[:INJECTED]→ (:SystemPromptInjection {content_sha})─[:OF_PROMPT]→ (:SystemPrompt)
-   ├─[:HAS_LEARNING]→ (:Learning {scope: 'project'|'user', status: 'candidate'|'approved', confidence})
+   ├─[:HAS_LEARNING]→ (:Learning {scope, status, confidence, created_by_model, last_llm_model})
    │                      ─[:INJECTED_IN]→ (:Session)   ─[:FROM_SESSION]→ (:Session)
-   ├─[:HAS_DECISION]→ (:Decision)─[:INJECTED_IN]→ (:Session)   ─[:FROM_SESSION]→ (:Session)
-   └─[:HAS_PROCESSING]→ (:ProjectProcessing)─[:PROCESSED_EVENT]→ (:SessionEvent)
+   ├─[:HAS_DECISION]→ (:Decision {created_by_model, last_llm_model})
+   │                      ─[:INJECTED_IN]→ (:Session)   ─[:FROM_SESSION]→ (:Session)
+   └─[:HAS_PROCESSING]→ (:ProjectProcessing {llm_model, llm_status, llm_skip_reason, llm_error})
+                                            ─[:PROCESSED_EVENT]→ (:SessionEvent)
+                                            ─[:USED_MEMORY_EXTRACTION_PROMPT]→ (:MemoryExtractionPrompt)
                                             ─[:PRODUCED_LEARNING]→ (:Learning)
                                             ─[:UPDATED_LEARNING]→ (:Learning)
                                             ─[:PRODUCED_DECISION]→ (:Decision)
@@ -88,7 +91,7 @@ exposed under `.claude/hooks/` as symlinks back to the canonical versions in
 (:SystemPrompt {name, version, content, last_consolidated_at})
    ─[:HAS_VERSION]→ (:SystemPromptVersion {name, version, content, is_current})  # prompt history
    ─[:CONSOLIDATED]→ (:Learning {scope: 'user'})                                # folded-in user facts
-(:MemoryExtractionPrompt {name, version, content})
+(:MemoryExtractionPrompt {name, version, content, last_used_model})
 
 # Produced by hooks/enrich_events.py (on demand):
 (:Session)─[:HAS_TURN]→ (:Turn)─[:ISSUED]→ (:ToolCall)─[:USES_TOOL]→ (:Tool)
@@ -208,11 +211,15 @@ NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=<your-password>
 NEO4J_DATABASE=neo4j
 
-# Required: LLM calls for memory extraction. Calls route
-# through litellm; the default model is OpenAI's, so set OPENAI_API_KEY. To use
-# another provider, set LLM_MODEL (e.g. anthropic/claude-haiku-4-5) and supply
-# that provider's key instead.
+# Required: LLM calls for memory extraction. Calls route through litellm.
+# Codex/dev runs default to OpenAI's model, so set OPENAI_API_KEY. Claude Code
+# hook batches default to an Anthropic/Claude model when LLM_MODEL is unset, and
+# can reuse a logged-in Claude Code subscription if Anthropic key vars are unset;
+# MKG reads a fresh Claude OAuth token from the platform credential store at call
+# time.
 OPENAI_API_KEY=<your-openai-api-key>
+# Optional explicit model override for every harness:
+# LLM_MODEL=anthropic/claude-haiku-4-5
 
 # Optional: Diffbot live news / firmographic enrichment
 DIFFBOT_TOKEN=<your-diffbot-token>
@@ -313,9 +320,11 @@ injected.
 | `NEO4J_PASSWORD` | `--password` | `password` | |
 | `NEO4J_DATABASE` | `--database` | `neo4j` | |
 | `NEO4J_TRANSPORT` | `--transport` | `stdio` | |
-| `OPENAI_API_KEY` | — | — | Default provider key: the hooks call `LLM_MODEL` and Neocarta embeds with `EMBEDDING_MODEL`, both via litellm, and both default to OpenAI models. For another provider, set the relevant model var and supply that provider's key instead. |
+| `OPENAI_API_KEY` | — | — | Default provider key for Codex/dev runs: the hooks call `LLM_MODEL` and Neocarta embeds with `EMBEDDING_MODEL`, both via litellm, and both default to OpenAI models outside Claude Code. Claude Code hook batches can default to Claude subscription OAuth when `LLM_MODEL` is unset. For other providers, set the relevant model var and supply that provider's key. |
 | `DIFFBOT_TOKEN` | — | — | Enables `search_news` and `enhance_entity` when set. |
-| `LLM_MODEL` | — | `gpt-5.4-mini` | The single model knob for every LLM call (memory extraction), resolved through litellm — any litellm model string works (e.g. `anthropic/claude-haiku-4-5`, `gemini/gemini-2.5-flash`); supply the matching provider's key. |
+| `LLM_MODEL` | — | client-aware | The single model knob for every LLM call (memory extraction), resolved through litellm. Explicit values always win. When unset, Codex/dev runs use `gpt-5.4-mini`; Claude Code hook batches use `anthropic/claude-haiku-4-5`. Any litellm model string works (e.g. `anthropic/claude-haiku-4-5`, `gemini/gemini-2.5-flash`). For Anthropic/Claude models, explicit `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `ANTHROPIC_BASE_URL` wins; otherwise MKG tries the Claude Code platform credential store, then `CLAUDE_CODE_OAUTH_TOKEN` as a headless fallback. |
+| `MKG_DEFAULT_LLM_MODEL` | — | — | Optional fallback override used only when `LLM_MODEL` is unset. |
+| `MKG_LLM_BACKEND` | — | `auto` | `auto` uses litellm. Set `claude_cli` only to force the older headless `claude -p` backend. |
 | `EMBEDDING_MODEL` | — | `text-embedding-3-small` | litellm embedding model for the optional Neocarta catalog (seed + runtime). Any litellm embedding model works (e.g. `cohere/embed-english-v3.0`, `gemini/text-embedding-004`); supply the matching provider's key. |
 | `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID` | — | — | Optional BigQuery/Neocarta settings. Required, with the `EMBEDDING_MODEL` provider key, to mount the Neocarta catalog tools; `GCP_PROJECT_ID` is also the project queried by `bigquery_execute_query`. |
 | `BIGQUERY_MCP_URL` | — | — | Optional. Mounts `bigquery_execute_query` when set, e.g. `https://bigquery.googleapis.com/mcp`. For `googleapis.com` URLs a Google ADC bearer token is fetched automatically. |

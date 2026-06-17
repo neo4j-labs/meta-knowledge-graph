@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import getpass
+import json
 import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha1
@@ -11,6 +20,11 @@ from typing import Any
 
 MAX_LEARNING_TEXT = 500
 DEFAULT_LLM_MODEL = "gpt-5.4-mini"
+DEFAULT_CLAUDE_LLM_MODEL = "anthropic/claude-haiku-4-5"
+ANTHROPIC_OAUTH_TOKEN_PREFIX = "sk-ant-oat"
+CLAUDE_CODE_CREDENTIAL_SERVICE = "Claude Code-credentials"
+OAUTH_READ_TIMEOUT_SECONDS = 5
+OAUTH_EXPIRY_GRACE_SECONDS = 60
 # How far back an injection and its hook SessionEvent may be apart and still be
 # considered the same hook firing. Inject and log hooks run in parallel, so the
 # INJECTED_AT link is attempted from both sides within this window.
@@ -23,26 +37,105 @@ def injection_window_start() -> str:
     ).isoformat()
 
 
-def llm_model() -> str:
+def llm_model(client: str | None = None) -> str:
     """Single model knob for every LLM call made by the hooks.
 
     The value is a litellm model string, so any provider works: ``gpt-5.4-mini``
     routes to OpenAI, ``anthropic/claude-...`` to Anthropic, etc."""
-    return os.environ.get("LLM_MODEL") or DEFAULT_LLM_MODEL
+    configured = os.environ.get("LLM_MODEL")
+    if configured:
+        return configured
+    default_override = os.environ.get("MKG_DEFAULT_LLM_MODEL")
+    if default_override:
+        return default_override
+    if _should_default_to_claude(client):
+        return DEFAULT_CLAUDE_LLM_MODEL
+    return DEFAULT_LLM_MODEL
 
 
-def llm_ready() -> bool:
-    """True when the environment holds the credentials litellm needs for the
-    configured model, so hooks gate on whatever provider is in use rather than
-    assuming OpenAI."""
+def _should_default_to_claude(client: str | None = None) -> bool:
+    client_name = (client or os.environ.get("MKG_HOOK_CLIENT") or "").strip().lower()
+    if client_name in {"claude", "claude_code", "claude_desktop"}:
+        return True
+    return bool(os.environ.get("CLAUDE_PROJECT_DIR"))
+
+
+DEFAULT_CLAUDE_CLI_TIMEOUT = 300.0
+
+
+def llm_backend() -> str:
+    """Which engine runs the background extraction/consolidation LLM call.
+
+    ``MKG_LLM_BACKEND`` forces a choice (``litellm`` or ``claude_cli``). Default
+    ``auto`` uses litellm. For Anthropic/Claude litellm calls, MKG can inject a
+    fresh Claude Code OAuth token from the platform credential store at call
+    time. ``claude_cli`` remains available for environments that explicitly want
+    a headless ``claude -p`` subprocess.
+    """
+    explicit = (os.environ.get("MKG_LLM_BACKEND") or "auto").strip().lower()
+    if explicit in ("litellm", "claude_cli"):
+        return explicit
+    return "litellm"
+
+
+def claude_cli_model() -> str | None:
+    """Model alias for the ``claude -p`` backend, if pinned. litellm model
+    strings (``anthropic/claude-...``, ``gpt-...``) don't map to ``--model``, so
+    this is a separate knob; unset means the subscription's default model."""
+    model = os.environ.get("MKG_CLAUDE_CLI_MODEL")
+    return model.strip() if model else None
+
+
+def in_extraction_subprocess() -> bool:
+    """True inside a ``claude -p`` spawned by the claude_cli backend. MKG hooks
+    must no-op when this is set: the nested session loads MKG's own hooks
+    (non-bare mode is required for OAuth), and its Stop hook would otherwise
+    spawn another extraction — infinite recursion."""
+    return bool(os.environ.get("MKG_IN_EXTRACTION"))
+
+
+def llm_ready(model: str | None = None) -> bool:
+    """True when the configured backend can make an LLM call.
+
+    For ``claude_cli`` that means the CLI is installed — auth comes from the
+    Claude Code subscription token / keychain, so there is no key to validate.
+    For ``litellm`` it means the configured model's provider credentials are
+    present in the environment, or that a fresh Claude OAuth token can be read
+    for an Anthropic/Claude model.
+    """
+    ready, _ = llm_readiness_status(model)
+    return ready
+
+
+def llm_readiness_status(model: str | None = None) -> tuple[bool, str | None]:
+    """Return whether the LLM can be called, plus a non-secret reason if not."""
+    if llm_backend() == "claude_cli":
+        if shutil.which("claude") is not None:
+            return True, None
+        return False, "claude_cli backend selected, but claude is not on PATH"
+    model_name = model or llm_model()
+
+    oauth_reason: str | None = None
+    if _is_anthropic_litellm_model(model_name) and not _has_explicit_anthropic_litellm_auth():
+        credential = _read_claude_oauth_token()
+        if credential:
+            return True, None
+        oauth_reason = (
+            "Claude/Anthropic model selected, but no explicit Anthropic auth is "
+            "configured and no valid Claude Code OAuth token was readable from "
+            "the platform credential store or CLAUDE_CODE_OAUTH_TOKEN"
+        )
+    elif _litellm_api_key_for_model(model_name):
+        return True, None
+
     # litellm auto-loads a .env on its first import in the default DEV mode,
     # which would silently repopulate a key the caller deliberately unset; pin
     # PRODUCTION so the gate reflects the environment the hooks already loaded.
     os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
     try:
         import litellm
-    except Exception:
-        return False
+    except Exception as exc:
+        return False, f"litellm import failed: {type(exc).__name__}: {str(exc)[:200]}"
     # litellm.validate_environment checks key *presence*, but a present-but-empty
     # var (e.g. ``OPENAI_API_KEY=``) means "no credentials" — hide those so the
     # gate matches plain truthiness for whichever provider's key is required.
@@ -50,12 +143,288 @@ def llm_ready() -> bool:
     for key in blanked:
         del os.environ[key]
     try:
-        result = litellm.validate_environment(model=llm_model())
-    except Exception:
-        return False
+        result = litellm.validate_environment(model=model_name)
+    except Exception as exc:
+        return (
+            False,
+            f"litellm.validate_environment failed for {model_name}: "
+            f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
     finally:
         os.environ.update(blanked)
-    return bool(result.get("keys_in_environment"))
+    if bool(result.get("keys_in_environment")):
+        return True, None
+    return False, oauth_reason or f"provider credentials unavailable for {model_name}"
+
+
+def _claude_cli_env() -> dict[str, str]:
+    """Environment for the spawned ``claude -p``.
+
+    Sets the recursion sentinel so MKG's own hooks no-op in the nested session,
+    and clears competing Anthropic creds so the Claude Code subscription token /
+    keychain wins the auth-precedence chain — ``ANTHROPIC_API_KEY`` would
+    otherwise take priority in ``-p`` mode. ``CLAUDE_CODE_OAUTH_TOKEN`` is kept.
+    """
+    env = os.environ.copy()
+    env["MKG_IN_EXTRACTION"] = "1"
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        env.pop(key, None)
+    return env
+
+
+def _complete_claude_cli(messages: list[dict[str, str]]) -> str:
+    """Run one extraction turn through the harness's headless agent.
+
+    System messages replace the default Claude Code prompt (we don't want its
+    coding-agent persona); the rest is piped via stdin (robust for large
+    corpora — arg length is capped, stdin is not). Returns the ``result`` text
+    from the ``--output-format json`` envelope. Not run with ``--bare``: bare
+    mode never reads OAuth or the keychain, which would defeat subscription auth.
+    """
+    system = "\n\n".join(
+        m["content"]
+        for m in messages
+        if m.get("role") == "system" and m.get("content")
+    )
+    user = "\n\n".join(
+        m["content"]
+        for m in messages
+        if m.get("role") != "system" and m.get("content")
+    )
+    cmd = ["claude", "-p", "--output-format", "json"]
+    if system:
+        cmd += ["--system-prompt", system]
+    model = claude_cli_model()
+    if model:
+        cmd += ["--model", model]
+    timeout = float(
+        os.environ.get("MKG_CLAUDE_CLI_TIMEOUT") or DEFAULT_CLAUDE_CLI_TIMEOUT
+    )
+    proc = subprocess.run(
+        cmd,
+        input=user,
+        capture_output=True,
+        text=True,
+        env=_claude_cli_env(),
+        cwd=tempfile.gettempdir(),
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"claude -p exited {proc.returncode}: {(proc.stderr or '').strip()[:300]}"
+        )
+    envelope = json.loads(proc.stdout)
+    return envelope.get("result") or ""
+
+
+def _complete_litellm(messages: list[dict[str, str]], model: str | None) -> str:
+    import litellm
+
+    model_name = model or llm_model()
+    api_key = _litellm_api_key_for_model(model_name)
+    kwargs: dict[str, Any] = {"model": model_name, "messages": messages}
+    if api_key:
+        kwargs["api_key"] = api_key
+    response = litellm.completion(**kwargs)
+    return response.choices[0].message.content or ""
+
+
+def llm_complete(messages: list[dict[str, str]], *, model: str | None = None) -> str:
+    """Single entry point for the background LLM call. Dispatches to the
+    configured backend (see :func:`llm_backend`) and returns the response text;
+    callers keep their own JSON/text post-processing."""
+    if llm_backend() == "claude_cli":
+        return _complete_claude_cli(messages)
+    return _complete_litellm(messages, model)
+
+
+def extraction_model_label(model: str | None = None) -> str:
+    """Provenance label for the engine that ran the extraction/consolidation,
+    for recording on memory/prompt artifacts. Reflects the active backend rather
+    than always reporting the litellm model string."""
+    if llm_backend() == "claude_cli":
+        return claude_cli_model() or "claude-code-subscription"
+    return model or llm_model()
+
+
+@dataclass(frozen=True)
+class ClaudeOAuthCredential:
+    token: str
+    source: str
+    expires_at: float | None = None
+
+
+def _is_anthropic_litellm_model(model: str) -> bool:
+    normalized = model.strip().lower()
+    return normalized.startswith(("anthropic/", "anthropic_text/", "claude-"))
+
+
+def _has_explicit_anthropic_litellm_auth() -> bool:
+    return any(
+        os.environ.get(key)
+        for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
+    )
+
+
+def _litellm_api_key_for_model(model: str) -> str | None:
+    """Return a call-scoped LiteLLM API key override, if MKG should supply one.
+
+    For Claude/Anthropic models, LiteLLM accepts Claude Code OAuth tokens via
+    the ``api_key`` parameter. Its Anthropic adapter detects ``sk-ant-oat...``
+    tokens and sends them as ``Authorization: Bearer`` with the required OAuth
+    beta header. Explicit MKG-owned Anthropic key/token/base-url settings win, so
+    we never send a subscription OAuth token to a configured gateway.
+    """
+    if not _is_anthropic_litellm_model(model):
+        return None
+    if _has_explicit_anthropic_litellm_auth():
+        return None
+    credential = _read_claude_oauth_token()
+    return credential.token if credential else None
+
+
+def _read_claude_oauth_token() -> ClaudeOAuthCredential | None:
+    """Read a fresh Claude Code OAuth token for LiteLLM Anthropic calls.
+
+    The platform credential store is authoritative because Claude refreshes it
+    in place. ``CLAUDE_CODE_OAUTH_TOKEN`` remains a fallback for headless/CI
+    setups where no keychain/libsecret entry exists.
+    """
+    credential = _read_platform_claude_oauth_token()
+    if credential:
+        return credential
+
+    env_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if env_token:
+        return _parse_claude_oauth_payload(env_token, source="env-fallback")
+    return None
+
+
+def _read_platform_claude_oauth_token() -> ClaudeOAuthCredential | None:
+    if sys.platform == "darwin":
+        return _read_macos_claude_oauth_token()
+    if sys.platform.startswith("linux"):
+        return _read_linux_claude_oauth_token()
+    return None
+
+
+def _read_macos_claude_oauth_token() -> ClaudeOAuthCredential | None:
+    account = getpass.getuser()
+    commands = [
+        [
+            "security",
+            "find-generic-password",
+            "-s",
+            CLAUDE_CODE_CREDENTIAL_SERVICE,
+            "-a",
+            account,
+            "-w",
+        ],
+        ["security", "find-generic-password", "-s", CLAUDE_CODE_CREDENTIAL_SERVICE, "-w"],
+    ]
+    for cmd in commands:
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=OAUTH_READ_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode == 0 and proc.stdout.strip():
+            credential = _parse_claude_oauth_payload(proc.stdout, source="keychain")
+            if credential:
+                return credential
+    return None
+
+
+def _read_linux_claude_oauth_token() -> ClaudeOAuthCredential | None:
+    if not shutil.which("secret-tool"):
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "secret-tool",
+                "lookup",
+                "service",
+                CLAUDE_CODE_CREDENTIAL_SERVICE,
+                "account",
+                getpass.getuser(),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=OAUTH_READ_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return _parse_claude_oauth_payload(proc.stdout, source="libsecret")
+
+
+def _parse_claude_oauth_payload(
+    raw: str, *, source: str
+) -> ClaudeOAuthCredential | None:
+    value = raw.strip()
+    if not value:
+        return None
+
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        token = value.removeprefix("Bearer ").strip()
+        if not _looks_like_claude_oauth_token(token):
+            return None
+        expires_at = _decode_jwt_exp_seconds(token)
+        if _is_expired(expires_at):
+            return None
+        return ClaudeOAuthCredential(token=token, source=source, expires_at=expires_at)
+
+    oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
+    if not isinstance(oauth, dict):
+        return None
+    token = oauth.get("accessToken")
+    if not isinstance(token, str) or not _looks_like_claude_oauth_token(token):
+        return None
+    expires_at = _coerce_expires_at_seconds(oauth.get("expiresAt"))
+    if expires_at is None:
+        expires_at = _decode_jwt_exp_seconds(token)
+    if _is_expired(expires_at):
+        return None
+    return ClaudeOAuthCredential(token=token, source=source, expires_at=expires_at)
+
+
+def _looks_like_claude_oauth_token(token: str) -> bool:
+    return token.startswith(ANTHROPIC_OAUTH_TOKEN_PREFIX) or len(token.split(".")) == 3
+
+
+def _coerce_expires_at_seconds(value: Any) -> float | None:
+    if not isinstance(value, (int, float)):
+        return None
+    # Claude credential JSON stores milliseconds; JWT exp stores seconds.
+    return float(value) / 1000 if value > 10_000_000_000 else float(value)
+
+
+def _decode_jwt_exp_seconds(token: str) -> float | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload.encode("ascii"))
+        data = json.loads(decoded.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    exp = data.get("exp") if isinstance(data, dict) else None
+    return float(exp) if isinstance(exp, (int, float)) else None
+
+
+def _is_expired(expires_at: float | None) -> bool:
+    return expires_at is not None and expires_at + OAUTH_EXPIRY_GRACE_SECONDS < time.time()
 
 
 @dataclass(frozen=True)
@@ -68,7 +437,30 @@ class ProjectRef:
     source: str = "auto"
 
 
-def load_dotenv(env_path: Path) -> None:
+APP_DIR_NAME = "meta-knowledge-graph"
+
+# Credentials the background hooks consume. When MKG's own .env defines one of
+# these, it is loaded authoritatively (override=True) so the configured value
+# wins over whatever leaked in from the harness's ambient shell — the equivalent
+# of claude-mem's BLOCKED_ENV_VARS for its background worker, which authenticates
+# only from its own ~/.claude-mem/.env and never reuses the parent process auth.
+# The background LLM/Neo4j credentials must come from MKG config, not the
+# ambient session, because Stop/SessionEnd hooks run detached from the model's
+# auth context.
+CREDENTIAL_ENV_VARS = (
+    "NEO4J_PASSWORD",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",   # litellm/proxy gateway token (gateway mode)
+    "ANTHROPIC_BASE_URL",     # litellm/proxy gateway URL (gateway mode)
+    "CLAUDE_CODE_OAUTH_TOKEN",  # Claude subscription token (LiteLLM fallback/CLI)
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "DIFFBOT_TOKEN",
+)
+
+
+def load_dotenv(env_path: Path, *, override: bool = False) -> None:
     if not env_path.exists():
         return
     for raw in env_path.read_text().splitlines():
@@ -76,7 +468,82 @@ def load_dotenv(env_path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if override:
+            os.environ[key] = value
+        else:
+            os.environ.setdefault(key, value)
+
+
+def mkg_config_dir() -> Path:
+    """User-global config directory for installed (plugin/CLI) mode.
+
+    Precedence: ``MKG_CONFIG_DIR`` override, then ``XDG_CONFIG_HOME``, else
+    ``~/.config``. This is where the install wizard writes the user-owned
+    ``.env`` so secrets never live in the plugin cache (``${CLAUDE_PLUGIN_ROOT}``
+    is replaced on every plugin update) or the repo.
+    """
+    override = os.environ.get("MKG_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser()
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    return base / APP_DIR_NAME
+
+
+def resolve_env_file(project_root: Path | None = None) -> Path:
+    """Pick which ``.env`` to load. First existing file wins:
+
+    1. ``MKG_ENV_FILE`` explicit override
+    2. project-local ``<project_root>/.env`` — repo-checkout / demo mode
+    3. user-global ``<mkg_config_dir>/.env`` — installed plugin/CLI mode
+
+    Keeping project-local ahead of user-global is what lets the same machine run
+    the in-repo RoadFlex demo (repo ``.env``) and ambient memory on other
+    projects (global ``.env``) without collision. If none exist, the user-global
+    path is returned so callers/doctor have a stable place to point users at.
+    """
+    candidates: list[Path] = []
+    override = os.environ.get("MKG_ENV_FILE")
+    if override:
+        candidates.append(Path(override).expanduser())
+    if project_root is not None:
+        candidates.append(project_root / ".env")
+    candidates.append(mkg_config_dir() / ".env")
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[-1]
+
+
+def load_mkg_env(project_root: Path | None = None) -> Path:
+    """Resolve and load MKG's ``.env`` (see :func:`resolve_env_file`).
+
+    Credential vars are loaded authoritatively so the MKG-owned ``.env`` is the
+    single source of truth for the background agent's Neo4j/LLM auth; everything
+    else keeps ``setdefault`` semantics so explicitly-exported, non-secret env
+    still flows through. Returns the resolved path for doctor/reporting.
+    """
+    env_path = resolve_env_file(project_root)
+    # Two-pass load: non-secrets as defaults (so exported env still flows),
+    # then credentials authoritatively so the MKG-owned value wins.
+    load_dotenv(env_path, override=False)
+    _override_credentials_from(env_path)
+    return env_path
+
+
+def _override_credentials_from(env_path: Path) -> None:
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key in CREDENTIAL_ENV_VARS:
+            os.environ[key] = value.strip().strip('"').strip("'")
 
 
 def neo4j_config() -> tuple[str, str, str, str]:
@@ -475,13 +942,15 @@ def snapshot_and_update_system_prompt(
             UNWIND $folded_ids AS lid
             MATCH (l:Learning {id: lid})
             SET l.consolidated_at = $now,
-                l.consolidated_prompt_version = $new_version
+                l.consolidated_prompt_version = $new_version,
+                l.last_consolidated_model = $model
             MERGE (nv)-[:FOLDED_LEARNING]->(l)
             MERGE (sp)-[:CONSOLIDATED]->(l)
             """,
             name=name,
             new_version=new_version,
             folded_ids=folded_learning_ids,
+            model=model,
             now=now,
         )
 

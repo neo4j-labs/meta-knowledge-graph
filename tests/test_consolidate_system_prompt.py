@@ -174,9 +174,11 @@ class SnapshotHistoryTests(unittest.TestCase):
         # The folded learnings are stamped consolidated (status left untouched).
         fold_query = queries[1]
         self.assertIn("l.consolidated_at = $now", fold_query)
+        self.assertIn("l.last_consolidated_model = $model", fold_query)
         self.assertIn("FOLDED_LEARNING", fold_query)
         self.assertNotIn("l.status", fold_query)
         self.assertEqual(params[1]["folded_ids"], ["learning:user:abc", "learning:user:def"])
+        self.assertEqual(params[1]["model"], "gpt-5.4-mini")
 
     def test_no_folded_ids_skips_the_fold_query(self) -> None:
         queries: list[str] = []

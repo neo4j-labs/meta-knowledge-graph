@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -38,6 +39,169 @@ class ProjectHookTests(unittest.TestCase):
         assert project is not None
         self.assertEqual(project.id, "meta-knowledge-graph")
         self.assertEqual(project.name, "Meta Knowledge Graph")
+
+    def test_llm_backend_auto_defaults_to_litellm(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"MKG_LLM_BACKEND": "auto", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-test"},
+            clear=False,
+        ):
+            self.assertEqual(project_common.llm_backend(), "litellm")
+
+    def test_llm_model_defaults_to_claude_for_claude_client(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "",
+                "MKG_DEFAULT_LLM_MODEL": "",
+                "CLAUDE_PROJECT_DIR": "",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                project_common.llm_model(client="claude_code"),
+                "anthropic/claude-haiku-4-5",
+            )
+
+    def test_llm_model_keeps_openai_default_for_codex_client(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "",
+                "MKG_DEFAULT_LLM_MODEL": "",
+                "CLAUDE_PROJECT_DIR": "",
+            },
+            clear=False,
+        ):
+            self.assertEqual(project_common.llm_model(client="codex"), "gpt-5.4-mini")
+
+    def test_litellm_claude_model_uses_oauth_token_when_no_explicit_auth(self) -> None:
+        credential = project_common.ClaudeOAuthCredential(
+            token="sk-ant-oat01-test",
+            source="test",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "ANTHROPIC_API_KEY": "",
+                "ANTHROPIC_AUTH_TOKEN": "",
+                "ANTHROPIC_BASE_URL": "",
+            },
+            clear=False,
+        ):
+            with patch.object(
+                project_common,
+                "_read_claude_oauth_token",
+                return_value=credential,
+            ):
+                token = project_common._litellm_api_key_for_model(
+                    "anthropic/claude-haiku-4-5"
+                )
+
+        self.assertEqual(token, "sk-ant-oat01-test")
+
+    def test_litellm_claude_oauth_does_not_override_explicit_auth(self) -> None:
+        credential = project_common.ClaudeOAuthCredential(
+            token="sk-ant-oat01-test",
+            source="test",
+        )
+        for key, value in (
+            ("ANTHROPIC_API_KEY", "sk-ant-api03-explicit"),
+            ("ANTHROPIC_AUTH_TOKEN", "gateway-token"),
+            ("ANTHROPIC_BASE_URL", "https://gateway.example"),
+        ):
+            with self.subTest(key=key):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "ANTHROPIC_API_KEY": "",
+                        "ANTHROPIC_AUTH_TOKEN": "",
+                        "ANTHROPIC_BASE_URL": "",
+                        key: value,
+                    },
+                    clear=False,
+                ):
+                    with patch.object(
+                        project_common,
+                        "_read_claude_oauth_token",
+                        return_value=credential,
+                    ):
+                        token = project_common._litellm_api_key_for_model(
+                            "anthropic/claude-haiku-4-5"
+                        )
+                self.assertIsNone(token)
+
+    def test_litellm_non_claude_model_does_not_read_oauth(self) -> None:
+        with patch.object(
+            project_common,
+            "_read_claude_oauth_token",
+            side_effect=AssertionError("should not read Claude OAuth"),
+        ):
+            token = project_common._litellm_api_key_for_model("gpt-5.4-mini")
+
+        self.assertIsNone(token)
+
+    def test_parse_claude_oauth_payload_rejects_expired_jwt(self) -> None:
+        header = "eyJhbGciOiAibm9uZSJ9"
+        payload = "eyJleHAiOiAxfQ"
+        expired = f"{header}.{payload}.sig"
+
+        credential = project_common._parse_claude_oauth_payload(
+            expired,
+            source="test",
+        )
+
+        self.assertIsNone(credential)
+
+    def test_memory_action_extraction_returns_model_used(self) -> None:
+        completion = '{"learnings": [], "decisions": []}'
+        with (
+            patch.object(
+                process_project,
+                "llm_readiness_status",
+                return_value=(True, None),
+            ) as readiness,
+            patch.object(process_project, "llm_complete", return_value=completion) as complete,
+        ):
+            actions, model, meta = process_project.ask_llm_for_memory_actions_with_model(
+                "extract memory",
+                model="anthropic/claude-haiku-4-5",
+            )
+
+        self.assertEqual(actions, {"learnings": [], "decisions": []})
+        self.assertEqual(model, "anthropic/claude-haiku-4-5")
+        self.assertEqual(meta, {"status": "called", "skip_reason": None, "error": None})
+        readiness.assert_called_once_with("anthropic/claude-haiku-4-5")
+        self.assertEqual(complete.call_args.kwargs["model"], "anthropic/claude-haiku-4-5")
+
+    def test_memory_action_extraction_records_model_when_not_ready(self) -> None:
+        with (
+            patch.object(
+                process_project,
+                "llm_readiness_status",
+                return_value=(False, "Claude OAuth token unavailable"),
+            ),
+            patch.object(
+                process_project,
+                "llm_complete",
+                side_effect=AssertionError("should not call LLM when unavailable"),
+            ),
+        ):
+            actions, model, meta = process_project.ask_llm_for_memory_actions_with_model(
+                "extract memory",
+                model="anthropic/claude-haiku-4-5",
+            )
+
+        self.assertEqual(actions, {"learnings": [], "decisions": []})
+        self.assertEqual(model, "anthropic/claude-haiku-4-5")
+        self.assertEqual(
+            meta,
+            {
+                "status": "skipped",
+                "skip_reason": "Claude OAuth token unavailable",
+                "error": None,
+            },
+        )
 
     def test_event_hook_uses_session_event_label(self) -> None:
         captured: list[str] = []
@@ -163,6 +327,159 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(len(decision_rows), 1)
         self.assertEqual(decision_rows[0]["action"], "create")
         self.assertEqual(decision_rows[0]["scope"], "project")
+
+    def test_llm_action_rows_include_model_provenance(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        actions = {
+            "learnings": [
+                {
+                    "action": "create",
+                    "text": "MKG stores model provenance.",
+                    "confidence": 0.8,
+                }
+            ],
+            "decisions": [
+                {
+                    "action": "create",
+                    "text": "Store extraction model on produced memory.",
+                    "confidence": 0.9,
+                }
+            ],
+        }
+
+        learning_rows, decision_rows = process_project._memory_rows_from_actions(
+            project,
+            "turn",
+            actions,
+            llm_model="anthropic/claude-haiku-4-5",
+        )
+
+        self.assertEqual(learning_rows[0]["llm_model"], "anthropic/claude-haiku-4-5")
+        self.assertEqual(decision_rows[0]["llm_model"], "anthropic/claude-haiku-4-5")
+
+    def test_processing_events_default_to_claude_model_for_claude_client(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "",
+                "MKG_DEFAULT_LLM_MODEL": "",
+                "CLAUDE_PROJECT_DIR": "",
+            },
+            clear=False,
+        ):
+            model = process_project._llm_model_for_processing_events(
+                [
+                    {"event_name": "UserPromptSubmit", "client": "claude_code"},
+                    {"event_name": "Stop", "client": "claude_code"},
+                ]
+            )
+
+        self.assertEqual(model, "anthropic/claude-haiku-4-5")
+
+    def test_write_processing_stores_llm_model_provenance(self) -> None:
+        queries: list[str] = []
+        params: list[dict] = []
+
+        class FakeTx:
+            def run(self, query: str, **kwargs):
+                queries.append(query)
+                params.append(kwargs)
+
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        model = "anthropic/claude-haiku-4-5"
+        learning_rows = [
+            {
+                "id": "learning:mkg:a",
+                "action": "create",
+                "text": "MKG stores model provenance.",
+                "task_pattern": "model provenance",
+                "confidence": 0.8,
+                "status": "candidate",
+                "scope": "project",
+                "source": "project_turn_llm",
+                "summary": "MKG stores model provenance.",
+                "reason": "Reusable implementation fact.",
+                "llm_model": model,
+            }
+        ]
+        decision_rows = [
+            {
+                "id": "decision:mkg:a",
+                "action": "create",
+                "text": "Store extraction model on produced memory.",
+                "rationale": "It makes processing provenance queryable.",
+                "task_pattern": "model provenance",
+                "confidence": 0.9,
+                "scope": "project",
+                "source": "project_turn_llm",
+                "summary": "Store extraction model on produced memory.",
+                "related_learning_id": None,
+                "reason": "Implementation decision.",
+                "llm_model": model,
+            }
+        ]
+
+        process_project._write_processing(
+            FakeTx(),
+            project,
+            "session-1",
+            "turn",
+            [{"event_id": "event-1"}],
+            learning_rows,
+            decision_rows,
+            "default",
+            3,
+            model,
+            "called",
+            None,
+            None,
+            "2026-06-17T12:00:00+00:00",
+        )
+
+        joined = "\n".join(queries)
+        self.assertIn("pp.llm_model = $llm_model", queries[0])
+        self.assertIn("pp.llm_status = $llm_status", queries[0])
+        self.assertEqual(params[0]["llm_model"], model)
+        self.assertEqual(params[0]["llm_status"], "called")
+        self.assertIn("USED_MEMORY_EXTRACTION_PROMPT", queries[1])
+        self.assertIn("mep.last_used_model", queries[1])
+        self.assertIn("r.llm_status = $llm_status", queries[1])
+        self.assertIn("l.created_by_model = row.llm_model", joined)
+        self.assertIn("l.last_llm_model", joined)
+        self.assertIn("d.created_by_model = row.llm_model", joined)
+        self.assertIn("d.last_llm_model", joined)
+        self.assertIn("produced.llm_model = row.llm_model", joined)
+
+    def test_write_processing_stores_llm_skip_reason(self) -> None:
+        queries: list[str] = []
+        params: list[dict] = []
+
+        class FakeTx:
+            def run(self, query: str, **kwargs):
+                queries.append(query)
+                params.append(kwargs)
+
+        process_project._write_processing(
+            FakeTx(),
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "session-1",
+            "turn",
+            [{"event_id": "event-1"}],
+            [],
+            [],
+            "default",
+            3,
+            "anthropic/claude-haiku-4-5",
+            "skipped",
+            "Claude OAuth token unavailable",
+            None,
+            "2026-06-17T12:00:00+00:00",
+        )
+
+        self.assertEqual(params[0]["llm_status"], "skipped")
+        self.assertEqual(params[0]["llm_skip_reason"], "Claude OAuth token unavailable")
+        self.assertEqual(params[1]["llm_status"], "skipped")
+        self.assertEqual(params[1]["llm_skip_reason"], "Claude OAuth token unavailable")
 
     def test_user_scoped_learning_is_namespaced_above_the_project(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")

@@ -46,10 +46,12 @@ from project_common import (  # noqa: E402
     consolidation_threshold,
     count_user_profile_memories_pending,
     ensure_project_schema,
+    extraction_model_label,
     fetch_user_profile_memories_pending,
-    llm_model,
+    in_extraction_subprocess,
+    llm_complete,
     llm_ready,
-    load_dotenv,
+    load_mkg_env,
     neo4j_config,
     read_system_prompt_state,
     snapshot_and_update_system_prompt,
@@ -158,11 +160,8 @@ def ask_llm_for_consolidated_prompt(prompt: str) -> str | None:
     if not llm_ready():
         return None
 
-    import litellm
-
-    response = litellm.completion(
-        model=llm_model(),
-        messages=[
+    content = llm_complete(
+        [
             {
                 "role": "system",
                 "content": (
@@ -171,9 +170,8 @@ def ask_llm_for_consolidated_prompt(prompt: str) -> str | None:
                 ),
             },
             {"role": "user", "content": prompt},
-        ],
+        ]
     )
-    content = response.choices[0].message.content or ""
     cleaned = _clean_llm_prompt(content)
     if len(cleaned) < MIN_CONSOLIDATED_PROMPT_CHARS:
         return None
@@ -238,7 +236,7 @@ def consolidate(payload: dict[str, Any]) -> None:
                 name=PROMPT_NAME,
                 new_content=new_content,
                 folded_learning_ids=folded_ids,
-                model=llm_model(),
+                model=extraction_model_label(),
                 session_id=session_id,
                 now=timestamp,
             )
@@ -289,8 +287,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # No-op inside a claude_cli extraction subprocess (see process_project).
+    if in_extraction_subprocess():
+        return 0
+
     project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env")
+    load_mkg_env(project_root)
     payload = _read_payload()
     if args.session_id:
         payload["session_id"] = args.session_id

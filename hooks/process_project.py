@@ -27,13 +27,16 @@ from project_common import (  # noqa: E402
     decision_id,
     decision_namespace,
     ensure_project_schema,
+    extraction_model_label,
     fetch_project_decisions,
     fetch_project_learnings,
+    in_extraction_subprocess,
     learning_id,
     learning_namespace,
+    llm_complete,
+    llm_readiness_status,
     llm_model,
-    llm_ready,
-    load_dotenv,
+    load_mkg_env,
     merge_project_and_session,
     neo4j_config,
     normalize_scope,
@@ -304,23 +307,48 @@ def _json_from_llm_text(text: str) -> dict[str, Any]:
 
 
 def ask_llm_for_memory_actions(prompt: str) -> dict[str, Any]:
-    if not llm_ready():
-        return {"learnings": [], "decisions": []}
+    actions, _, _ = ask_llm_for_memory_actions_with_model(prompt)
+    return actions
 
-    import litellm
 
-    response = litellm.completion(
-        model=llm_model(),
-        messages=[
+def ask_llm_for_memory_actions_with_model(
+    prompt: str,
+    model: str | None = None,
+) -> tuple[dict[str, Any], str | None, dict[str, str | None]]:
+    model_name = model or llm_model()
+    model_label = extraction_model_label(model_name)
+    ready, reason = llm_readiness_status(model_name)
+    if not ready:
+        return (
+            {"learnings": [], "decisions": []},
+            model_label,
+            {"status": "skipped", "skip_reason": reason, "error": None},
+        )
+
+    content = llm_complete(
+        [
             {
                 "role": "system",
                 "content": "You extract durable project memory for an agent. Return strict JSON only.",
             },
             {"role": "user", "content": prompt},
         ],
+        model=model_name,
     )
-    content = response.choices[0].message.content or ""
-    return _json_from_llm_text(content)
+    return (
+        _json_from_llm_text(content),
+        model_label,
+        {"status": "called", "skip_reason": None, "error": None},
+    )
+
+
+def _llm_model_for_processing_events(events: list[dict[str, Any]]) -> str:
+    clients = [str(event.get("client") or "").strip().lower() for event in events]
+    client = "claude_code" if "claude_code" in clients else next(
+        (value for value in clients if value),
+        None,
+    )
+    return llm_model(client=client)
 
 
 def _confidence(value: object, default: float = 0.6) -> float:
@@ -344,6 +372,7 @@ def _memory_rows_from_actions(
     project: ProjectRef,
     mode: str,
     actions: dict[str, Any],
+    llm_model: str | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -379,6 +408,7 @@ def _memory_rows_from_actions(
                 "source": f"project_{mode}_llm",
                 "summary": text or item.get("reason"),
                 "reason": item.get("reason"),
+                "llm_model": llm_model,
             }
         )
 
@@ -414,6 +444,7 @@ def _memory_rows_from_actions(
                 "summary": text or item.get("reason"),
                 "related_learning_id": item.get("related_learning_id"),
                 "reason": item.get("reason"),
+                "llm_model": llm_model,
             }
         )
     return learning_rows[:3], decision_rows[:5]
@@ -457,6 +488,10 @@ def _write_processing(
     decision_rows: list[dict[str, Any]],
     memory_extraction_prompt_name: str,
     memory_extraction_prompt_version: int,
+    llm_model: str | None,
+    llm_status: str | None,
+    llm_skip_reason: str | None,
+    llm_error: str | None,
     timestamp: str,
 ) -> None:
     event_ids = [event["event_id"] for event in events if event.get("event_id")]
@@ -488,6 +523,10 @@ def _write_processing(
             pp.decision_count = $decision_count,
             pp.memory_extraction_prompt_name = $memory_extraction_prompt_name,
             pp.memory_extraction_prompt_version = $memory_extraction_prompt_version,
+            pp.llm_model = $llm_model,
+            pp.llm_status = $llm_status,
+            pp.llm_skip_reason = $llm_skip_reason,
+            pp.llm_error = $llm_error,
             pp.summary = $summary,
             pp.updated_at = datetime($timestamp)
         MERGE (p)-[:HAS_PROCESSING]->(pp)
@@ -506,8 +545,44 @@ def _write_processing(
         decision_count=len(decision_rows),
         memory_extraction_prompt_name=memory_extraction_prompt_name,
         memory_extraction_prompt_version=memory_extraction_prompt_version,
+        llm_model=llm_model,
+        llm_status=llm_status,
+        llm_skip_reason=truncate(str(llm_skip_reason or ""), 1000) or None,
+        llm_error=truncate(str(llm_error or ""), 1000) or None,
         summary=summary,
         event_ids=event_ids,
+        timestamp=timestamp,
+    )
+
+    tx.run(
+        """
+        MATCH (pp:ProjectProcessing {id: $processing_id})
+        MATCH (mep:MemoryExtractionPrompt {name: $memory_extraction_prompt_name})
+        SET mep.last_used_at = datetime($timestamp),
+            mep.last_used_project_id = $project_id,
+            mep.last_used_session_id = $session_id,
+            mep.last_used_version = $memory_extraction_prompt_version,
+            mep.last_used_model = coalesce($llm_model, mep.last_used_model),
+            mep.last_used_llm_status = $llm_status,
+            mep.last_used_llm_skip_reason = $llm_skip_reason,
+            mep.last_used_llm_error = $llm_error
+        MERGE (pp)-[r:USED_MEMORY_EXTRACTION_PROMPT]->(mep)
+        SET r.version = $memory_extraction_prompt_version,
+            r.llm_model = $llm_model,
+            r.llm_status = $llm_status,
+            r.llm_skip_reason = $llm_skip_reason,
+            r.llm_error = $llm_error,
+            r.used_at = datetime($timestamp)
+        """,
+        project_id=project.id,
+        session_id=session_id,
+        processing_id=processing_id,
+        memory_extraction_prompt_name=memory_extraction_prompt_name,
+        memory_extraction_prompt_version=memory_extraction_prompt_version,
+        llm_model=llm_model,
+        llm_status=llm_status,
+        llm_skip_reason=truncate(str(llm_skip_reason or ""), 1000) or None,
+        llm_error=truncate(str(llm_error or ""), 1000) or None,
         timestamp=timestamp,
     )
 
@@ -529,6 +604,7 @@ def _write_processing(
                           l.task_pattern = row.task_pattern,
                           l.summary = row.summary,
                           l.source = row.source,
+                          l.created_by_model = row.llm_model,
                           l.status = row.status,
                           l.scope = row.scope,
                           l.use_count = 0,
@@ -539,6 +615,7 @@ def _write_processing(
                 l.last_source = row.source,
                 l.last_source_session_id = $session_id,
                 l.last_reason = row.reason,
+                l.last_llm_model = coalesce(row.llm_model, l.last_llm_model),
                 l.project_id = $project_id,
                 l.updated_at = datetime($timestamp),
                 l.support_count = coalesce(l.support_count, 0) + 1,
@@ -548,7 +625,9 @@ def _write_processing(
                 END
             MERGE (p)-[:HAS_LEARNING]->(l)
             MERGE (l)-[:FROM_SESSION]->(s)
-            MERGE (pp)-[:PRODUCED_LEARNING]->(l)
+            MERGE (pp)-[produced:PRODUCED_LEARNING]->(l)
+            SET produced.llm_model = row.llm_model,
+                produced.created_at = datetime($timestamp)
             """,
             project_id=project.id,
             session_id=session_id,
@@ -571,6 +650,7 @@ def _write_processing(
                 l.last_source = row.source,
                 l.last_source_session_id = $session_id,
                 l.last_reason = row.reason,
+                l.last_llm_model = coalesce(row.llm_model, l.last_llm_model),
                 l.project_id = $project_id,
                 l.updated_at = datetime($timestamp),
                 l.support_count = coalesce(l.support_count, 0) + 1,
@@ -580,7 +660,9 @@ def _write_processing(
                 END
             MERGE (p)-[:HAS_LEARNING]->(l)
             MERGE (l)-[:FROM_SESSION]->(s)
-            MERGE (pp)-[:UPDATED_LEARNING]->(l)
+            MERGE (pp)-[updated:UPDATED_LEARNING]->(l)
+            SET updated.llm_model = row.llm_model,
+                updated.updated_at = datetime($timestamp)
             """,
             project_id=project.id,
             session_id=session_id,
@@ -603,6 +685,7 @@ def _write_processing(
                           d.task_pattern = row.task_pattern,
                           d.summary = row.summary,
                           d.source = row.source,
+                          d.created_by_model = row.llm_model,
                           d.scope = row.scope,
                           d.support_count = 0
             SET d.text = row.text,
@@ -613,6 +696,7 @@ def _write_processing(
                 d.last_source = row.source,
                 d.last_source_session_id = $session_id,
                 d.last_reason = row.reason,
+                d.last_llm_model = coalesce(row.llm_model, d.last_llm_model),
                 d.project_id = $project_id,
                 d.updated_at = datetime($timestamp),
                 d.support_count = coalesce(d.support_count, 0) + 1,
@@ -622,7 +706,9 @@ def _write_processing(
                 END
             MERGE (p)-[:HAS_DECISION]->(d)
             MERGE (d)-[:FROM_SESSION]->(s)
-            MERGE (pp)-[:PRODUCED_DECISION]->(d)
+            MERGE (pp)-[produced:PRODUCED_DECISION]->(d)
+            SET produced.llm_model = row.llm_model,
+                produced.created_at = datetime($timestamp)
             """,
             project_id=project.id,
             session_id=session_id,
@@ -647,6 +733,7 @@ def _write_processing(
                 d.last_source = row.source,
                 d.last_source_session_id = $session_id,
                 d.last_reason = row.reason,
+                d.last_llm_model = coalesce(row.llm_model, d.last_llm_model),
                 d.project_id = $project_id,
                 d.updated_at = datetime($timestamp),
                 d.support_count = coalesce(d.support_count, 0) + 1,
@@ -656,7 +743,9 @@ def _write_processing(
                 END
             MERGE (p)-[:HAS_DECISION]->(d)
             MERGE (d)-[:FROM_SESSION]->(s)
-            MERGE (pp)-[:UPDATED_DECISION]->(d)
+            MERGE (pp)-[updated:UPDATED_DECISION]->(d)
+            SET updated.llm_model = row.llm_model,
+                updated.updated_at = datetime($timestamp)
             """,
             project_id=project.id,
             session_id=session_id,
@@ -689,6 +778,10 @@ def _write_processing_error(
     mode: str,
     events: list[dict[str, Any]],
     error_text: str,
+    llm_model: str | None,
+    llm_status: str | None,
+    llm_skip_reason: str | None,
+    llm_error: str | None,
     timestamp: str,
 ) -> None:
     """Record a failed processing run as a :ProjectProcessing {status:'error'} node.
@@ -726,6 +819,10 @@ def _write_processing_error(
             pp.event_count = $event_count,
             pp.learning_count = 0,
             pp.decision_count = 0,
+            pp.llm_model = $llm_model,
+            pp.llm_status = $llm_status,
+            pp.llm_skip_reason = $llm_skip_reason,
+            pp.llm_error = $llm_error,
             pp.error = $error_text,
             pp.summary = $summary,
             pp.attempt_count = coalesce(pp.attempt_count, 0) + 1,
@@ -739,6 +836,10 @@ def _write_processing_error(
         processing_id=processing_id,
         mode=mode,
         event_count=len(event_ids),
+        llm_model=llm_model,
+        llm_status=llm_status,
+        llm_skip_reason=truncate(str(llm_skip_reason or ""), 1000) or None,
+        llm_error=truncate(str(llm_error or ""), 1000) or None,
         error_text=truncate(error_text, 1000),
         summary=summary,
         timestamp=timestamp,
@@ -774,6 +875,10 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
             )
             if not events:
                 return
+            llm_model_used: str | None = None
+            llm_status: str | None = None
+            llm_skip_reason: str | None = None
+            llm_error: str | None = None
             try:
                 prompt_name = DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
                 prompt_record = session.execute_write(
@@ -816,11 +921,20 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     similar_decisions,
                     template=prompt_template,
                 )
-                actions = ask_llm_for_memory_actions(prompt)
+                model_name = _llm_model_for_processing_events(events)
+                llm_model_used = extraction_model_label(model_name)
+                actions, llm_model_used, llm_meta = ask_llm_for_memory_actions_with_model(
+                    prompt,
+                    model=model_name,
+                )
+                llm_status = llm_meta.get("status")
+                llm_skip_reason = llm_meta.get("skip_reason")
+                llm_error = llm_meta.get("error")
                 learning_rows, decision_rows = _memory_rows_from_actions(
                     project,
                     mode,
                     actions,
+                    llm_model=llm_model_used,
                 )
                 session.execute_write(
                     _write_processing,
@@ -832,10 +946,17 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     decision_rows,
                     prompt_name,
                     prompt_version,
+                    llm_model_used,
+                    llm_status,
+                    llm_skip_reason,
+                    llm_error,
                     timestamp,
                 )
             except Exception as exc:
                 error_text = f"{type(exc).__name__}: {exc}"
+                if llm_model_used and llm_status is None:
+                    llm_status = "error"
+                    llm_error = error_text
                 print(
                     f"[process_project] memory extraction failed; recording error node: {error_text}",
                     file=sys.stderr,
@@ -849,6 +970,10 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                         mode,
                         events,
                         error_text,
+                        llm_model_used,
+                        llm_status,
+                        llm_skip_reason,
+                        llm_error,
                         error_timestamp,
                     )
                 except Exception as write_exc:
@@ -898,8 +1023,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # No-op inside a claude_cli extraction subprocess: the nested `claude -p`
+    # loads MKG's hooks, and re-running the processor here would spawn another
+    # extraction (infinite recursion).
+    if in_extraction_subprocess():
+        return 0
+
     project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env")
+    load_mkg_env(project_root)
     payload = _read_payload()
     if args.session_id:
         payload["session_id"] = args.session_id

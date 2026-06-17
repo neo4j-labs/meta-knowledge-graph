@@ -24,6 +24,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from hashlib import sha1
 from pathlib import Path
 
 HOOK_DIR = Path(__file__).resolve().parent
@@ -32,9 +33,10 @@ if str(HOOK_DIR) not in sys.path:
 
 from project_common import (  # noqa: E402
     ensure_project_schema,
+    in_extraction_subprocess,
     injection_window_start,
     link_event_to_project,
-    load_dotenv,
+    load_mkg_env,
     resolve_project,
 )
 
@@ -80,6 +82,9 @@ def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
         ON CREATE SET s.created_at = datetime($timestamp), s.client = $client
         SET s.client = coalesce(s.client, $client)
         WITH s
+        OPTIONAL MATCH (s)-[:HAS_EVENT]->(dup:SessionEvent {event_id: $event_id})
+        WITH s, dup
+        WHERE dup IS NULL
         CREATE (e:SessionEvent $event_props)
         SET e.timestamp = datetime($timestamp)
         CREATE (s)-[:HAS_EVENT]->(e)
@@ -99,6 +104,7 @@ def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
         client=client,
         timestamp=event_props.get("timestamp"),
         event_props=event_props,
+        event_id=event_props.get("event_id"),
     )
 
 
@@ -134,7 +140,17 @@ def log_event(data: dict, client: str) -> None:
     session_id = data.get("session_id", "unknown")
     event_name = data.get("hook_event_name", "unknown")
     timestamp = datetime.now(timezone.utc).isoformat()
-    event_id = f"{client}_{session_id}_{timestamp}_{event_name}"
+    # Deterministic identity: the *same* lifecycle event delivered to two hook
+    # configs at once (e.g. the repo's .claude/settings.json and an installed
+    # plugin both active) collapses to one node instead of double-logging.
+    # Claude Code hands each matching hook the identical stdin payload, so
+    # hashing it yields the same id from both firings; the SessionEvent.event_id
+    # uniqueness constraint makes the dedupe atomic under the race, and
+    # _append_event skips the insert when the id already exists in the session.
+    payload_sig = sha1(
+        json.dumps(data, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    event_id = f"{client}:{session_id}:{event_name}:{payload_sig}"
     project_root = Path(__file__).resolve().parents[1]
     project = resolve_project(data, project_root)
 
@@ -188,8 +204,12 @@ def main() -> int:
     parser.add_argument("--client", default="claude_code")
     args = parser.parse_args()
 
+    # Don't record the nested claude_cli extraction session's own events.
+    if in_extraction_subprocess():
+        return 0
+
     project_root = Path(__file__).resolve().parents[1]
-    load_dotenv(project_root / ".env")
+    load_mkg_env(project_root)
 
     try:
         raw = sys.stdin.read()
