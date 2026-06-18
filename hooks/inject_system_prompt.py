@@ -74,9 +74,12 @@ in project context):
    cover the context, do not ask the user to repeat themselves.
 3. If the user's name, the active project, or its goals are still unknown, open
    with one friendly onboarding question: ask whether they already know what
-   they want to work on or would like help getting started. If their name is
-   unknown, you may ask for it in the same sentence while keeping the work goal
-   primary.
+   they want to work on or would like help getting started. If they want help —
+   or this looks like a fresh, unseeded environment — point them to the
+   ``/mkg-start`` command, which checks the live MKG tools and graph state and
+   walks them through either launching the RoadFlex sales demo or building a
+   custom agent persona from their own memories. If their name is unknown, you
+   may ask for it in the same sentence while keeping the work goal primary.
 4. If the user wants help getting started or context is still missing, gather
    concise answers only:
    - the user's name,
