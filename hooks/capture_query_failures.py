@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["neo4j>=5.26.0"]
+# ///
 """Hook: capture failed or suspicious query tool results as graph artifacts.
 
 Wired as a PostToolUse hook for the BigQuery ``execute_query`` and Neo4j

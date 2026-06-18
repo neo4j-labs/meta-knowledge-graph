@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["neo4j>=5.26.0", "litellm>=1.40.0"]
+# ///
 """Seed or update a ``(:MemoryExtractionPrompt {name})`` node in Neo4j.
 
 The template is frozen at runtime — ``process_project.py`` only reads it — so

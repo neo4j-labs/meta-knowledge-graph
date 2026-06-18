@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["neo4j>=5.26.0", "litellm>=1.40.0"]
+# ///
 """One-shot diagnostic: rebuild and inspect a process_project extraction call.
 
 Usage: python hooks/debug_memory_extraction.py --mode session --session-id <id>

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["neo4j>=5.26.0"]
+# ///
 """Hook: log every Claude Code lifecycle event to Neo4j as a linked list.
 
 Wired in .claude/settings.json for SessionStart, UserPromptSubmit, PreToolUse,

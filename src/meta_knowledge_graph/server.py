@@ -395,6 +395,15 @@ async def _diffbot_get_json(path: str, params: dict[str, Any]) -> str:
 logger = logging.getLogger(__name__)
 
 
+def _neocarta_transport(env: dict[str, str]) -> StdioTransport:
+    """Run the Neocarta MCP entry point from MKG's own uv-managed environment."""
+    return StdioTransport(
+        command="neocarta-mcp",
+        args=[],
+        env=env,
+    )
+
+
 def create_mcp_server(
     neo4j_driver: AsyncDriver,
     database: str = "neo4j",
@@ -515,11 +524,7 @@ def create_mcp_server(
             logger.info(f"Wrote GCP_SERVICE_ACCOUNT_JSON to {sa_path}")
 
         neocarta_proxy = FastMCP.as_proxy(
-            StdioTransport(
-                command="uvx",
-                args=["--from", "neocarta[mcp]", "neocarta-mcp"],
-                env=neocarta_env,
-            )
+            _neocarta_transport(neocarta_env)
         )
         mcp.mount(neocarta_proxy, prefix="neocarta")
         logger.info("Mounted Neocarta MCP proxy")

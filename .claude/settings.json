@@ -6,11 +6,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/.claude/hooks/inject_system_prompt.py"
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} python ${CLAUDE_PROJECT_DIR}/.claude/hooks/inject_system_prompt.py"
           },
           {
             "type": "command",
-            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/inject_project_context.py"
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} python ${CLAUDE_PROJECT_DIR}/hooks/inject_project_context.py"
           }
         ]
       },
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/.claude/hooks/log_event.py --client claude_code"
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} python ${CLAUDE_PROJECT_DIR}/.claude/hooks/log_event.py --client claude_code"
           }
         ]
       }

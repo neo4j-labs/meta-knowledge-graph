@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["neo4j>=5.26.0", "litellm>=1.40.0"]
+# ///
 """Stop / SessionEnd hook: rate-limited system-prompt consolidation service.
 
 This is the consolidation service the README and the Part 2 write-up leave as a

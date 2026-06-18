@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["neo4j>=5.26.0", "litellm>=1.40.0"]
+# ///
 """Process completed project work into compact candidate learnings.
 
 The raw hook stream remains append-only. This processor runs at Stop and

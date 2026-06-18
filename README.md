@@ -58,8 +58,10 @@ claude plugin install meta-knowledge-graph@mkg
 ```
 
 - The marketplace is named `mkg`; the qualified plugin id is `meta-knowledge-graph@mkg`.
-- On the **first session** after install, the `SessionStart` hook bootstraps a
-  `uv` virtualenv (one-time; that session is slower). Later sessions reuse it.
+- On the **first session** after install, the `SessionStart` hooks bootstrap a
+  `uv` virtualenv for the plugin cache (one-time; that session is slower).
+  Later sessions reuse it, and optional MCP subprocesses run from that same
+  environment instead of doing their own `uvx` startup install.
 - Verify: `claude plugin list` shows `meta-knowledge-graph@mkg` *enabled*; inside
   a session the MKG system prompt is injected and `mcp__meta-knowledge-graph__*`
   tools are available.

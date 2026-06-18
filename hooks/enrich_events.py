@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["neo4j>=5.26.0"]
+# ///
 """Project hook: derive a typed tool-call graph from raw session events.
 
 The raw ``:SessionEvent`` stream remains append-only provenance. This processor reads

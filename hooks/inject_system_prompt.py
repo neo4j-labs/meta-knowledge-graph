@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["neo4j>=5.26.0"]
+# ///
 """SessionStart / UserPromptSubmit hook.
 
 Injects a system prompt fetched from a Neo4j ``(:SystemPrompt {name})`` node into

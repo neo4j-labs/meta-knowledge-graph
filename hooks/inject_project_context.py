@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["neo4j>=5.26.0"]
+# ///
 """Inject scoped memory for the current prompt/session."""
 
 from __future__ import annotations

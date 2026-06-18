@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["neo4j>=5.26.0"]
+# ///
 """Hook: build Diffbot tool results back into the Neo4j graph.
 
 Wired in .claude/settings.json as a PostToolUse hook matched on the

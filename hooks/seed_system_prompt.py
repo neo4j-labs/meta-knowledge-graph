@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["neo4j>=5.26.0"]
+# ///
 """Seed or update a ``(:SystemPrompt {name})`` node in Neo4j.
 
 The prompt is frozen at runtime — the SessionStart hook only reads it — so this
