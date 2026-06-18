@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
 from google.cloud import bigquery
 from neo4j import GraphDatabase
 
@@ -22,8 +22,9 @@ from neocarta import NodeLabel as nl
 from neocarta.connectors.bigquery import BigQuerySchemaConnector
 from neocarta.enrichment.embeddings import LiteLLMEmbeddingsConnector
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _env import load_seed_env  # noqa: E402
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
@@ -45,7 +46,7 @@ async def populate_embeddings(neo4j_db: str, embedding_model: str) -> None:
 
 
 def main() -> None:
-    load_dotenv(REPO_ROOT / ".env")
+    load_seed_env()
 
     neo4j_db = os.getenv("NEO4J_DATABASE", "neo4j")
     embedding_model = os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)

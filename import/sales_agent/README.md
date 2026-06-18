@@ -23,13 +23,22 @@ optional add-ons.
 
 ## Seed it
 
-Requires the **repo-root `./.env`**. Do not edit `.env.example` as the active
-config; copy it first if needed:
+The seeders resolve env the same way the MCP server does: the current
+directory's `.env` first, then `~/.config/meta-knowledge-graph/.env`
+authoritatively (`override=True`). So either works — a repo-root `./.env` for
+checkout/dev, or the user-global config env for an installed plugin. From a
+checkout, do not edit `.env.example` as the active config; copy it first if
+needed:
 
 ```bash
 cp .env.example .env
 chmod 600 .env
 ```
+
+When installed as a Claude Code plugin (no checkout), put the same vars in
+`~/.config/meta-knowledge-graph/.env` and run the seeders from the plugin cache
+dir via `uv run --project "$ROOT" python "$ROOT/import/sales_agent/<seeder>.py"`
+(see the `/sales_agent_demo` command for resolving `$ROOT`).
 
 Neo4j and OpenAI are the only mandatory settings for the minimum sales-agent
 experience:

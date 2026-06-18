@@ -18,19 +18,21 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
 HOOKS_DIR = Path(__file__).resolve().parents[2] / "hooks"
 if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _env import load_seed_env  # noqa: E402
 from project_common import ensure_project_schema, upsert_prompt_node  # noqa: E402
 
 PROMPT_NAME = "default"
 PROMPT_FILE = Path(__file__).resolve().parent / "system_prompt.md"
 
-load_dotenv()
+load_seed_env()
 
 
 def _seed(session, name: str, content: str, now: str) -> None:

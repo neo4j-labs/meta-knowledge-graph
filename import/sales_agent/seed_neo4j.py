@@ -25,13 +25,13 @@ import os
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _env import load_seed_env  # noqa: E402
 from seed_data import build_seed_dataset, latest_usage_by_account  # noqa: E402
 
-load_dotenv()
+load_seed_env()
 
 
 SCHEMA_STATEMENTS = [

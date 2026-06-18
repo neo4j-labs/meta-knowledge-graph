@@ -19,12 +19,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from _env import load_seed_env  # noqa: E402
 
 REQUIRED_ENV = (
     "NEO4J_URI",
@@ -132,7 +131,7 @@ def _run_step(name: str) -> int:
 
 
 def main(_argv: list[str]) -> int:
-    load_dotenv(REPO_ROOT / ".env")
+    load_seed_env()
     temp_credentials = None
     try:
         _require_baseline_env()

@@ -144,18 +144,22 @@ creates/replaces tables in `GCP_PROJECT_ID.BIGQUERY_DATASET_ID`.
 
 ## Step 5 - Confirm, then seed the demo
 
-The seed scripts read from the **repo-root `.env`** (`<mkg-checkout>/.env`), not
-the global config. Before running seeds, make sure the repo `.env` has the same
-vars as `~/.config/meta-knowledge-graph/.env`, or sync them:
+The seed scripts and their dependencies ship inside the plugin, so seeding works
+from an installed plugin with **no repo checkout**. They read env the same way
+the MCP server does: the current directory's `.env` first, then
+`~/.config/meta-knowledge-graph/.env` authoritatively. So if you configured the
+global config env in Steps 2-4, the seeders pick it up automatically — no repo
+`.env` and no syncing required.
+
+Resolve the plugin install dir (the same fallback chain the MCP server uses),
+then run every `uv`/seed command against it so the bundled scripts and venv
+resolve regardless of your current directory:
 
 ```bash
-# Sync global config vars into the repo .env (safe - does not overwrite existing lines)
-grep -E "^(NEO4J_|OPENAI_API_KEY|GCP_|BIGQUERY_|DIFFBOT_TOKEN|GOOGLE_APPLICATION_CREDENTIALS)" \
-  ~/.config/meta-knowledge-graph/.env >> .env
+ROOT="${CLAUDE_PLUGIN_ROOT}"
+[ -f "$ROOT/pyproject.toml" ] || ROOT="$(ls -d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/meta-knowledge-graph/*/ 2>/dev/null | sort -V | tail -1)"
+[ -f "$ROOT/pyproject.toml" ] || ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
 ```
-
-Before running the sync command above, ask for confirmation because it changes
-the repo `.env`.
 
 Before running any seed/import command, ask for confirmation and name the exact
 targets. The orchestrator always runs the mandatory Neo4j seeders and only runs
@@ -164,24 +168,48 @@ the confirmation in concrete terms, for example:
 
 > This will seed/update the RoadFlex demo in Neo4j and, if GCP env/auth is
 > available, create or replace the BigQuery demo tables and rebuild the Neocarta
-> catalog. Should I run `uv run python import/sales_agent/seed_all.py` now?
+> catalog. Should I run `uv run --project "$ROOT" python "$ROOT/import/sales_agent/seed_all.py"` now?
 
 ```bash
-uv run python import/sales_agent/seed_all.py
+uv run --project "$ROOT" python "$ROOT/import/sales_agent/seed_all.py"
 ```
 
 Or run individual seeders:
 
 ```bash
 # Minimum Neo4j-backed demo:
-uv run python import/sales_agent/seed_neo4j.py
-uv run python import/sales_agent/seed_learnings.py
-uv run python import/sales_agent/seed_system_prompt.py
+uv run --project "$ROOT" python "$ROOT/import/sales_agent/seed_neo4j.py"
+uv run --project "$ROOT" python "$ROOT/import/sales_agent/seed_learnings.py"
+uv run --project "$ROOT" python "$ROOT/import/sales_agent/seed_system_prompt.py"
 
 # Optional BigQuery + Neocarta (requires GCP env/auth above):
-uv run python import/sales_agent/seed_bigquery.py
-uv run python import/sales_agent/run_neocarta.py
+uv run --project "$ROOT" python "$ROOT/import/sales_agent/seed_bigquery.py"
+uv run --project "$ROOT" python "$ROOT/import/sales_agent/run_neocarta.py"
 ```
+
+> **Repo checkout?** If you're developing from a git clone, `$ROOT` resolves to
+> the checkout and these commands still work; `uv run python import/sales_agent/seed_all.py`
+> from the repo root remains equivalent.
+
+### Project scoping of bootstrap memory
+
+`seed_learnings.py` attaches its `:Learning` / `:Decision` nodes to the **same
+project the SessionStart hook will scope recall to**, resolved the same way the
+hook does: it honors `MKG_PROJECT_ID` if the hooks have pinned it, otherwise
+derives the project from your active project dir (`CLAUDE_PROJECT_DIR` → nearest
+repo-root name), and falls back to the MKG checkout folder name. Because the
+command runs the seeder with `CLAUDE_PROJECT_DIR` set to your active project,
+the bootstrap memory lands on the project the running agent actually queries —
+not the plugin cache dir.
+
+To target a specific project explicitly, pass `--project`:
+
+```bash
+uv run --project "$ROOT" python "$ROOT/import/sales_agent/seed_learnings.py" --project "my-sales-workspace"
+```
+
+The seeder prints the resolved `(:Project {id: ...})` so you can confirm the
+scope before relying on it.
 
 ## Step 6 - Restart and verify tools
 
@@ -221,6 +249,11 @@ Smoke tests:
   `~/.config/meta-knowledge-graph/.env` and restart.
 - **Neocarta tools mount but searches return nothing:** the catalog was not
   seeded, or it was seeded for a different dataset. Re-run
-  `uv run python import/sales_agent/run_neocarta.py` after confirming the env.
+  `uv run --project "$ROOT" python "$ROOT/import/sales_agent/run_neocarta.py"`
+  after confirming the env.
 - **Auth errors during seed:** ADC/service-account credentials are not reachable
   or lack permission on the dataset.
+- **Seeder can't find env / missing-var errors:** the seeders read the current
+  directory's `.env` then `~/.config/meta-knowledge-graph/.env`. Put the required
+  vars in the global config env (Steps 2-4); a repo `.env` is optional and only
+  used when present in the directory you run from.

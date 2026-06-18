@@ -24,19 +24,22 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOKS_DIR = REPO_ROOT / "hooks"
 if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _env import load_seed_env  # noqa: E402
 from project_common import (  # noqa: E402
     MAX_LEARNING_TEXT,
     decision_id,
     ensure_project_schema,
     learning_id,
+    resolve_project,
     slugify,
 )
 
@@ -185,16 +188,43 @@ SET d.text = row.text,
 MERGE (p)-[:HAS_DECISION]->(d)
 """
 
-load_dotenv()
+load_seed_env()
 
 
-def _resolve_project_id(argv: list[str]) -> str:
+def _titleize(slug: str) -> str:
+    return slug.replace("-", " ").replace("_", " ").title() or "Default"
+
+
+def _resolve_project(argv: list[str]) -> tuple[str, str]:
+    """Resolve the (project_id, project_name) the running agent will use.
+
+    Bootstrap learnings must attach to the SAME project the SessionStart hook
+    scopes recall to — which the hook derives from the user's *active* project
+    dir, not the MKG repo or the plugin cache this seeder runs from. Priority:
+
+    1. explicit ``--project <slug>`` (manual override),
+    2. ``MKG_PROJECT_ID`` pinned in env by the hooks (exact runtime match),
+    3. the same root-based resolution the hook performs via
+       :func:`project_common.resolve_project` (honors ``MKG_PROJECT_ROOT`` /
+       ``CLAUDE_PROJECT_DIR`` / ``PWD`` and skips the installed plugin dir),
+    4. fallback to this checkout's folder name (repo-checkout / demo use).
+    """
     if "--project" in argv:
         idx = argv.index("--project")
         if idx + 1 >= len(argv):
             raise SystemExit("--project requires a value")
-        return slugify(argv[idx + 1])
-    return slugify(REPO_ROOT.name)
+        slug = slugify(argv[idx + 1])
+        return slug, _titleize(slug)
+
+    pinned = os.environ.get("MKG_PROJECT_ID")
+    if pinned:
+        slug = slugify(pinned)
+        return slug, os.environ.get("MKG_PROJECT_NAME") or _titleize(slug)
+
+    project = resolve_project({}, REPO_ROOT)
+    if project:
+        return project.id, project.name
+    return slugify(REPO_ROOT.name), _titleize(REPO_ROOT.name)
 
 
 def _rows(items: list[dict[str, str | float]], id_fn, project_id: str) -> list[dict]:
@@ -211,8 +241,8 @@ def _rows(items: list[dict[str, str | float]], id_fn, project_id: str) -> list[d
 
 
 def main(argv: list[str]) -> int:
-    project_id = _resolve_project_id(argv)
-    project_name = REPO_ROOT.name.replace("-", " ").replace("_", " ").title()
+    project_id, project_name = _resolve_project(argv)
+    print(f"  scoping bootstrap memory to (:Project {{id: '{project_id}'}})")
     learning_rows = _rows(LEARNINGS, learning_id, project_id)
     decision_rows = _rows(DECISIONS, decision_id, project_id)
 
