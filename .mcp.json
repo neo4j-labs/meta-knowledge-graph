@@ -4,7 +4,7 @@
       "command": "bash",
       "args": [
         "-c",
-        "ROOT=\"${CLAUDE_PLUGIN_ROOT}\"; ROOT=\"${ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; exec uv run --project \"$ROOT\" meta-knowledge-graph"
+        "ROOT=\"${CLAUDE_PLUGIN_ROOT}\"; [ -f \"$ROOT/pyproject.toml\" ] || ROOT=\"$(ls -d \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"/plugins/cache/*/meta-knowledge-graph/*/ 2>/dev/null | sort -V | tail -1)\"; [ -f \"$ROOT/pyproject.toml\" ] || ROOT=\"${CLAUDE_PROJECT_DIR:-$PWD}\"; exec uv run --project \"$ROOT\" meta-knowledge-graph"
       ]
     }
   }
