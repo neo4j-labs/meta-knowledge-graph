@@ -23,8 +23,16 @@ optional add-ons.
 
 ## Seed it
 
-Requires the repo `.env`. Neo4j and OpenAI are the only mandatory settings for
-the sales-agent experience:
+Requires the **repo-root `./.env`**. Do not edit `.env.example` as the active
+config; copy it first if needed:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+Neo4j and OpenAI are the only mandatory settings for the minimum sales-agent
+experience:
 
 ```bash
 NEO4J_URI=bolt://localhost:7687
@@ -42,18 +50,29 @@ uv run python import/sales_agent/seed_learnings.py
 uv run python import/sales_agent/seed_system_prompt.py
 ```
 
-Diffbot needs only a token; set `DIFFBOT_TOKEN` and restart the MCP server to
-enable `enhance_entity` and `search_news`.
+Diffbot is optional and has no seed step. Add this to the repo-root `./.env` and
+restart the MCP server to enable `enhance_entity` and `search_news`:
+
+```bash
+DIFFBOT_TOKEN=<your-diffbot-token>
+```
 
 BigQuery needs Google auth plus a warehouse seed. Configure application-default
 credentials, `GOOGLE_APPLICATION_CREDENTIALS`, or `GCP_SERVICE_ACCOUNT_JSON`,
-then set:
+then set these in the repo-root `./.env`:
 
 ```bash
 GCP_PROJECT_ID=<your-gcp-project>
 BIGQUERY_DATASET_ID=acme_corp
 BIGQUERY_MCP_URL=https://bigquery.googleapis.com/mcp
+GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service-account.json
+# or:
+# GCP_SERVICE_ACCOUNT_JSON='{"type":"service_account", ...}'
 ```
+
+Neocarta also needs the embedding provider key. With the default
+`EMBEDDING_MODEL=text-embedding-3-small`, the `OPENAI_API_KEY` above is enough.
+If you change `EMBEDDING_MODEL`, add that provider's key to `./.env`.
 
 Then seed the warehouse and catalog:
 

@@ -317,9 +317,23 @@ database with the RoadFlex graph, persona, and bootstrap learnings, then start a
 session. BigQuery/Neocarta and Diffbot are optional add-ons for warehouse
 queries, catalog search, firmographics, and live news.
 
-### 1. Configure `.env`
+The companion command for walking through this setup is
+[`sales_agent_demo`](commands/sales_agent_demo.md).
 
-Create `.env` at the repo root (both the seeders and the hooks load it):
+### 1. Configure the repo-root `.env`
+
+Create or update **`./.env` at the repo root**. This is the active config for
+the sales-agent demo: both the seeders and the hooks load it, and in a repo
+checkout it takes precedence over the user-global
+`~/.config/meta-knowledge-graph/.env`. Do not edit `.env.example` as the active
+config; copy from it if needed:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+Then edit `./.env` with these values:
 
 ```bash
 # Required: Neo4j graph
@@ -345,7 +359,16 @@ DIFFBOT_TOKEN=<your-diffbot-token>
 GCP_PROJECT_ID=<your-gcp-project>
 BIGQUERY_DATASET_ID=acme_corp
 BIGQUERY_MCP_URL=https://bigquery.googleapis.com/mcp
-GOOGLE_APPLICATION_CREDENTIALS=<path-to-service-account.json>  # or GCP_SERVICE_ACCOUNT_JSON inline
+GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service-account.json
+# or:
+# GCP_SERVICE_ACCOUNT_JSON='{"type":"service_account", ...}'
+
+# Optional: Neocarta embedding overrides. With the default model,
+# OPENAI_API_KEY above is also the embedding provider key.
+# EMBEDDING_MODEL=text-embedding-3-small
+# EMBEDDING_DIMENSIONS=1536
+# GCP_BILLING_PROJECT_ID=<billing-project>  # defaults to GCP_PROJECT_ID
+# BIGQUERY_REGION=US
 ```
 
 ### 2. Seed the minimum graph
@@ -365,11 +388,14 @@ re-run reflects the current deterministic dataset.
 
 Optional add-ons:
 
-- **Diffbot:** set `DIFFBOT_TOKEN` and restart the MCP server. No seeding step
-  is required; `search_news` and `enhance_entity` appear when the token is set.
+- **Diffbot:** set `DIFFBOT_TOKEN` in the repo-root `./.env` and restart the MCP
+  server. No seeding step is required; `search_news` and `enhance_entity` appear
+  when the token is set.
 - **BigQuery + Neocarta:** authenticate to GCP, set `GCP_PROJECT_ID`,
-  `BIGQUERY_DATASET_ID`, and `BIGQUERY_MCP_URL`, then seed the warehouse and
-  catalog:
+  `BIGQUERY_DATASET_ID`, `BIGQUERY_MCP_URL`, and one Google auth method in the
+  repo-root `./.env`, then seed the warehouse and catalog. Neocarta also needs
+  the provider key for `EMBEDDING_MODEL`; the default OpenAI embedding model uses
+  `OPENAI_API_KEY`.
 
 ```bash
 uv run python import/sales_agent/seed_bigquery.py
