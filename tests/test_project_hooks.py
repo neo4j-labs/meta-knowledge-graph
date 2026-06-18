@@ -1284,6 +1284,35 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(env["MKG_PROJECT_NAME"], "Claims Service")
         self.assertEqual(env["MKG_PROJECT_ROOT"], "/Users/test/work/claims-service")
 
+    def test_project_merge_preserves_first_source_and_records_last_source(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeTx:
+            def run(self, query: str, **params):
+                captured.append((query, params))
+
+        project = project_common.ProjectRef(
+            id="claims-service",
+            name="Claims Service",
+            repo_root="/Users/test/work/claims-service",
+            source="env.MKG_PROJECT_ROOT",
+        )
+
+        project_common.merge_project_and_session(
+            FakeTx(),
+            project,
+            "session-1",
+            "2026-06-18T08:52:24+00:00",
+        )
+
+        query, params = captured[0]
+        self.assertIn("p.source = coalesce(p.source, $project_source)", query)
+        self.assertIn("p.last_source = $project_source", query)
+        self.assertIn("SET p += $project_update_props", query)
+        self.assertEqual(params["project_source"], "env.MKG_PROJECT_ROOT")
+        self.assertIn("source", params["project_props"])
+        self.assertNotIn("source", params["project_update_props"])
+
     def test_codex_stop_hook_logs_then_processes_project(self) -> None:
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
         stop_hooks = config["hooks"]["Stop"][0]["hooks"]

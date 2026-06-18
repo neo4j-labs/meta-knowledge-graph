@@ -793,6 +793,12 @@ def project_props(project: ProjectRef) -> dict[str, Any]:
     return {k: v for k, v in props.items() if v is not None}
 
 
+def project_update_props(project: ProjectRef) -> dict[str, Any]:
+    props = project_props(project)
+    props.pop("source", None)
+    return props
+
+
 def _query_records(result: Any) -> list[Any]:
     return list(getattr(result, "records", result) or [])
 
@@ -852,8 +858,11 @@ def merge_project_and_session(
     tx.run(
         """
         MERGE (p:Project {id: $project_id})
-        ON CREATE SET p.created_at = datetime($timestamp)
-        SET p += $project_props,
+        ON CREATE SET p += $project_props,
+                      p.created_at = datetime($timestamp)
+        SET p += $project_update_props,
+            p.source = coalesce(p.source, $project_source),
+            p.last_source = $project_source,
             p.updated_at = datetime($timestamp),
             p.last_activity_at = datetime($timestamp)
         MERGE (s:Session {session_id: $session_id})
@@ -862,6 +871,8 @@ def merge_project_and_session(
         """,
         project_id=project.id,
         project_props=project_props(project),
+        project_update_props=project_update_props(project),
+        project_source=project.source,
         session_id=session_id,
         timestamp=timestamp,
     )
@@ -878,8 +889,11 @@ def link_event_to_project(
     tx.run(
         """
         MERGE (p:Project {id: $project_id})
-        ON CREATE SET p.created_at = datetime($timestamp)
-        SET p += $project_props,
+        ON CREATE SET p += $project_props,
+                      p.created_at = datetime($timestamp)
+        SET p += $project_update_props,
+            p.source = coalesce(p.source, $project_source),
+            p.last_source = $project_source,
             p.updated_at = datetime($timestamp),
             p.last_activity_at = datetime($timestamp)
         MATCH (s:Session {session_id: $session_id})
@@ -887,6 +901,8 @@ def link_event_to_project(
         """,
         project_id=project.id,
         project_props=project_props(project),
+        project_update_props=project_update_props(project),
+        project_source=project.source,
         session_id=session_id,
         timestamp=timestamp,
     )
