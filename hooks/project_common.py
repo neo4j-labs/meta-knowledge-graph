@@ -392,8 +392,8 @@ def _litellm_api_key_for_model(model: str) -> str | None:
     For Claude/Anthropic models, LiteLLM accepts Claude Code OAuth tokens via
     the ``api_key`` parameter. Its Anthropic adapter detects ``sk-ant-oat...``
     tokens and sends them as ``Authorization: Bearer`` with the required OAuth
-    beta header. Explicit MKG-owned Anthropic key/token/base-url settings win, so
-    we never send a subscription OAuth token to a configured gateway.
+    beta header. Explicit MKG-owned Anthropic key/token settings win; base-url
+    routing can still use the Claude Code OAuth token.
     """
     if not _is_anthropic_litellm_model(model):
         return None
