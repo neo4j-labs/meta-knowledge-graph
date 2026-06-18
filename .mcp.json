@@ -4,7 +4,7 @@
       "command": "bash",
       "args": [
         "-c",
-        "ROOT=\"${CLAUDE_PLUGIN_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; exec uv run --project \"$ROOT\" meta-knowledge-graph"
+        "ROOT=\"${CLAUDE_PLUGIN_ROOT}\"; ROOT=\"${ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}}\"; exec uv run --project \"$ROOT\" meta-knowledge-graph"
       ]
     }
   }
