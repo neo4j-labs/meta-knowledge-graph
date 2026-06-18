@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -34,12 +35,93 @@ enrich_events = load_hook_module("enrich_events")
 
 class ProjectHookTests(unittest.TestCase):
     def test_project_id_uses_repo_folder_name(self) -> None:
-        project = project_common.resolve_project({}, ROOT)
+        with patch.dict(
+            os.environ,
+            {
+                "MKG_PROJECT_ROOT": "",
+                "MKG_PROJECT_DIR": "",
+                "CLAUDE_PROJECT_DIR": "",
+                "CODEX_WORKSPACE_ROOT": "",
+                "CLAUDE_PLUGIN_ROOT": "",
+            },
+            clear=False,
+        ):
+            project = project_common.resolve_project({}, ROOT)
 
         self.assertIsNotNone(project)
         assert project is not None
         self.assertEqual(project.id, "meta-knowledge-graph")
         self.assertEqual(project.name, "Meta Knowledge Graph")
+
+    def test_project_id_prefers_payload_cwd_over_hook_root(self) -> None:
+        hook_root = Path("/Users/test/.claude/plugins/cache/mkg/meta-knowledge-graph/0.1.7")
+        project = project_common.resolve_project(
+            {"cwd": "/Users/test/work/customer-portal"},
+            hook_root,
+        )
+
+        self.assertIsNotNone(project)
+        assert project is not None
+        self.assertEqual(project.id, "customer-portal")
+        self.assertEqual(project.name, "Customer Portal")
+        self.assertEqual(project.repo_root, "/Users/test/work/customer-portal")
+        self.assertEqual(project.source, "payload.cwd")
+
+    def test_project_id_uses_nearest_git_root_for_payload_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "billing-api"
+            package_dir = repo / "src" / "billing"
+            package_dir.mkdir(parents=True)
+            (repo / ".git").mkdir()
+
+            project = project_common.resolve_project({"cwd": str(package_dir)}, ROOT)
+
+        self.assertIsNotNone(project)
+        assert project is not None
+        self.assertEqual(project.id, "billing-api")
+        self.assertEqual(project.name, "Billing Api")
+        self.assertEqual(project.repo_root, str(repo))
+        self.assertEqual(project.source, "payload.cwd")
+
+    def test_project_id_uses_claude_project_dir_for_background_plugin_hook(self) -> None:
+        hook_root = Path("/Users/test/.claude/plugins/cache/mkg/meta-knowledge-graph/0.1.7")
+        with patch.dict(
+            os.environ,
+            {
+                "CLAUDE_PLUGIN_ROOT": str(hook_root),
+                "CLAUDE_PROJECT_DIR": "/Users/test/work/claims-service",
+                "MKG_PROJECT_ROOT": "",
+                "MKG_PROJECT_DIR": "",
+            },
+            clear=False,
+        ):
+            project = project_common.resolve_project({"session_id": "session-1"}, hook_root)
+
+        self.assertIsNotNone(project)
+        assert project is not None
+        self.assertEqual(project.id, "claims-service")
+        self.assertEqual(project.repo_root, "/Users/test/work/claims-service")
+        self.assertEqual(project.source, "env.CLAUDE_PROJECT_DIR")
+
+    def test_project_id_skips_installed_plugin_root_candidate(self) -> None:
+        hook_root = Path("/Users/test/.claude/plugins/cache/mkg/meta-knowledge-graph/0.1.7")
+        with patch.dict(
+            os.environ,
+            {
+                "CLAUDE_PLUGIN_ROOT": str(hook_root),
+                "CLAUDE_PROJECT_DIR": "/Users/test/work/claims-service",
+                "MKG_PROJECT_ROOT": "",
+                "MKG_PROJECT_DIR": "",
+            },
+            clear=False,
+        ):
+            project = project_common.resolve_project({"cwd": str(hook_root)}, hook_root)
+
+        self.assertIsNotNone(project)
+        assert project is not None
+        self.assertEqual(project.id, "claims-service")
+        self.assertEqual(project.repo_root, "/Users/test/work/claims-service")
+        self.assertEqual(project.source, "env.CLAUDE_PROJECT_DIR")
 
     def test_llm_backend_auto_defaults_to_litellm(self) -> None:
         with patch.dict(
@@ -1186,6 +1268,21 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("--session-id", command)
         self.assertIn("session-1", command)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_background_processor_pins_resolved_project_env(self) -> None:
+        project = project_common.ProjectRef(
+            id="claims-service",
+            name="Claims Service",
+            repo_root="/Users/test/work/claims-service",
+        )
+
+        with patch.object(process_project.subprocess, "Popen") as popen:
+            process_project._spawn_background("turn", 200, "session-1", project)
+
+        env = popen.call_args.kwargs["env"]
+        self.assertEqual(env["MKG_PROJECT_ID"], "claims-service")
+        self.assertEqual(env["MKG_PROJECT_NAME"], "Claims Service")
+        self.assertEqual(env["MKG_PROJECT_ROOT"], "/Users/test/work/claims-service")
 
     def test_codex_stop_hook_logs_then_processes_project(self) -> None:
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())

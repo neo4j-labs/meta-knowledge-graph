@@ -48,3 +48,19 @@ def test_plugin_session_start_hooks_can_bootstrap_uv_environment() -> None:
 
         assert commands
         assert all("--no-sync" not in command for command in commands)
+
+
+def test_mcp_project_resolver_prefers_explicit_project_env(monkeypatch) -> None:
+    monkeypatch.setenv("MKG_PROJECT_ID", "Claims Service")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/test/work/other-project")
+
+    assert server._resolve_project_id(None) == "claims-service"
+
+
+def test_mcp_project_resolver_uses_claude_project_dir(monkeypatch) -> None:
+    monkeypatch.delenv("MKG_PROJECT_ID", raising=False)
+    monkeypatch.delenv("MKG_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("MKG_PROJECT_DIR", raising=False)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/test/work/claims-service")
+
+    assert server._resolve_project_id(None) == "claims-service"

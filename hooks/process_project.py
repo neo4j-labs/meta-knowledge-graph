@@ -44,6 +44,7 @@ from project_common import (  # noqa: E402
     merge_project_and_session,
     neo4j_config,
     normalize_scope,
+    project_env,
     resolve_project,
     truncate,
 )
@@ -993,7 +994,12 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     )
 
 
-def _spawn_background(mode: str, limit: int, session_id: str) -> None:
+def _spawn_background(
+    mode: str,
+    limit: int,
+    session_id: str,
+    project: ProjectRef | None = None,
+) -> None:
     if not session_id or session_id == "unknown":
         return
 
@@ -1012,7 +1018,7 @@ def _spawn_background(mode: str, limit: int, session_id: str) -> None:
         subprocess.Popen(
             command,
             cwd=str(project_root),
-            env=os.environ.copy(),
+            env=project_env(project),
             stdin=stdin,
             stdout=output,
             stderr=output,
@@ -1044,6 +1050,7 @@ def main() -> int:
     payload = _read_payload()
     if args.session_id:
         payload["session_id"] = args.session_id
+    project = resolve_project(payload, project_root)
 
     # Deterministic query-failure capture runs synchronously in the foreground
     # hook: it is LLM-free, and only the foreground payload carries
@@ -1072,6 +1079,7 @@ def main() -> int:
             mode=args.mode,
             limit=args.limit,
             session_id=str(payload.get("session_id") or "unknown"),
+            project=project,
         )
         return 0
 

@@ -73,9 +73,26 @@ def _slugify_project_id(value: str) -> str:
     return slug or "default"
 
 
+def _project_id_from_path(value: str) -> str:
+    path = Path(value).expanduser()
+    return _slugify_project_id(path.name or value)
+
+
 def _resolve_project_id(explicit: Optional[str]) -> str:
     if explicit and explicit.strip():
         return _slugify_project_id(explicit)
+    env_project_id = os.environ.get("MKG_PROJECT_ID")
+    if env_project_id and env_project_id.strip():
+        return _slugify_project_id(env_project_id)
+    for var in (
+        "MKG_PROJECT_ROOT",
+        "MKG_PROJECT_DIR",
+        "CLAUDE_PROJECT_DIR",
+        "CODEX_WORKSPACE_ROOT",
+    ):
+        value = os.environ.get(var)
+        if value and value.strip():
+            return _project_id_from_path(value)
     return _slugify_project_id(Path(os.getcwd()).name or "default")
 
 

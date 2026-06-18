@@ -543,6 +543,22 @@ class ProjectRef:
 
 
 APP_DIR_NAME = "meta-knowledge-graph"
+PROJECT_ROOT_PAYLOAD_KEYS = (
+    "project_root",
+    "project_dir",
+    "workspace_root",
+    "workspace_dir",
+    "repo_root",
+    "cwd",
+)
+PROJECT_ROOT_ENV_VARS = (
+    "MKG_PROJECT_ROOT",
+    "MKG_PROJECT_DIR",
+    "CLAUDE_PROJECT_DIR",
+    "CODEX_WORKSPACE_ROOT",
+    "PWD",
+)
+HOOK_ROOT_ENV_VARS = ("CLAUDE_PLUGIN_ROOT", "MKG_HOOK_ROOT")
 
 # Credentials the background hooks consume. When MKG's own .env defines one of
 # these, it is loaded authoritatively (override=True) so the configured value
@@ -664,10 +680,70 @@ def slugify(value: str) -> str:
     return slug or "default"
 
 
-def resolve_project(payload: dict[str, Any], project_root: Path) -> ProjectRef | None:
-    del payload
+def _path_from_text(value: Any) -> Path | None:
+    text = _non_empty_text(value)
+    if not text:
+        return None
+    return Path(os.path.expandvars(text)).expanduser()
 
-    folder_name = project_root.name if project_root.name else "default"
+
+def _safe_resolved(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return path.absolute()
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return _safe_resolved(left) == _safe_resolved(right)
+
+
+def _nearest_repo_root(path: Path) -> Path:
+    start = path.parent if path.exists() and path.is_file() else path
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return start
+
+
+def _installed_hook_roots(project_root: Path) -> list[Path]:
+    roots: list[Path] = []
+    for var in HOOK_ROOT_ENV_VARS:
+        path = _path_from_text(os.environ.get(var))
+        if path:
+            roots.append(path)
+    if any(_same_path(root, project_root) for root in roots):
+        roots.append(project_root)
+    return roots
+
+
+def _is_installed_hook_root(path: Path, project_root: Path) -> bool:
+    return any(_same_path(path, root) for root in _installed_hook_roots(project_root))
+
+
+def _project_root_candidates(
+    payload: dict[str, Any],
+    project_root: Path,
+) -> list[tuple[Path, str]]:
+    candidates: list[tuple[Path, str]] = []
+    for key in PROJECT_ROOT_PAYLOAD_KEYS:
+        path = _path_from_text(payload.get(key))
+        if path:
+            candidates.append((path, f"payload.{key}"))
+    for var in PROJECT_ROOT_ENV_VARS:
+        if var == "PWD" and not _installed_hook_roots(project_root):
+            continue
+        path = _path_from_text(os.environ.get(var))
+        if path:
+            candidates.append((path, f"env.{var}"))
+    candidates.append((project_root, "folder"))
+    return candidates
+
+
+def _project_from_root(path: Path, source: str) -> ProjectRef:
+    root = _nearest_repo_root(path)
+
+    folder_name = root.name if root.name else "default"
     project_id = slugify(folder_name)
 
     return ProjectRef(
@@ -675,9 +751,34 @@ def resolve_project(payload: dict[str, Any], project_root: Path) -> ProjectRef |
         name=folder_name.replace("-", " ").replace("_", " ").title() or "Default",
         description=None,
         status="active",
-        repo_root=str(project_root),
-        source="folder",
+        repo_root=str(root),
+        source=source,
     )
+
+
+def project_env(project: ProjectRef | None) -> dict[str, str]:
+    """Return the current environment with the resolved MKG project pinned.
+
+    Foreground hooks receive the harness payload, but background processors are
+    respawned with only a session id. Carry the resolved project in explicit MKG
+    env vars so detached work stays scoped to the user's active project instead
+    of the installed hook/plugin directory.
+    """
+    env = os.environ.copy()
+    if project:
+        env["MKG_PROJECT_ID"] = project.id
+        env["MKG_PROJECT_NAME"] = project.name
+        if project.repo_root:
+            env["MKG_PROJECT_ROOT"] = project.repo_root
+    return env
+
+
+def resolve_project(payload: dict[str, Any], project_root: Path) -> ProjectRef | None:
+    for path, source in _project_root_candidates(payload, project_root):
+        if source != "folder" and _is_installed_hook_root(path, project_root):
+            continue
+        return _project_from_root(path, source)
+    return _project_from_root(project_root, "folder")
 
 
 def project_props(project: ProjectRef) -> dict[str, Any]:

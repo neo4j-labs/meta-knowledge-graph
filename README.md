@@ -233,6 +233,13 @@ own exceptions so a Neo4j outage never blocks the session. A few scripts
 exposed under `.claude/hooks/` as symlinks back to the canonical versions in
 `hooks/`.
 
+For installed Claude Code plugins, the scripts resolve project memory from the
+user's active worktree first (`cwd` / `CLAUDE_PROJECT_DIR`, with a git-root
+walk-up) and treat the plugin cache path as the hook implementation root only.
+Detached background processors carry that resolved project through
+`MKG_PROJECT_ROOT` / `MKG_PROJECT_ID` so Stop/SessionEnd extraction does not
+fall back to the plugin directory.
+
 | Hook event | Script | Behavior |
 |---|---|---|
 | `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and capture user/project facts as scoped learnings. The injection log keeps only a content hash + summary on the `:SystemPromptInjection` node and links it to its source via `[:OF_PROMPT]→(:SystemPrompt)` instead of copying the prompt text. If the same prompt content was already injected into the same session, the hook skips the duplicate (unless the context was wiped by `clear`/`compact`). |
