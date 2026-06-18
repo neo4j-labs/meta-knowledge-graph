@@ -13,6 +13,26 @@ catalog search. Be concrete; never echo secret values back in plaintext.
 Optional argument - a BigQuery dataset to target as `project.dataset`:
 **$ARGUMENTS**
 
+## Mutation confirmation guardrail
+
+This command prepares configuration and can run seed/import scripts that write to
+Neo4j, BigQuery, and the Neocarta catalog. Before making any change that updates
+files or external systems, pause and ask for explicit confirmation. This includes
+editing `~/.config/meta-knowledge-graph/.env`, editing the repo `.env`, syncing
+env values, running `seed_all.py`, running individual seeders, or re-running a
+catalog import.
+
+When confirmation is needed, first summarize:
+
+- Which targets will be changed, e.g. global env, repo `.env`, Neo4j,
+  BigQuery dataset, Neocarta catalog.
+- Which command(s) you intend to run.
+- Whether the action creates/replaces demo data or only reads/verifies state.
+
+Do not proceed until the user replies with an explicit approval such as "yes",
+"approved", or "run it". If the user only asks a question or gives an ambiguous
+answer, clarify before making changes.
+
 ## What this demo includes
 
 - **Required minimum:** Neo4j graph seed, bootstrap learnings, and the RoadFlex
@@ -122,7 +142,7 @@ tools. The user can use either ADC (`gcloud auth application-default login`),
 needs BigQuery read + job-run permissions; the warehouse seeder also
 creates/replaces tables in `GCP_PROJECT_ID.BIGQUERY_DATASET_ID`.
 
-## Step 5 - Seed the demo
+## Step 5 - Confirm, then seed the demo
 
 The seed scripts read from the **repo-root `.env`** (`<mkg-checkout>/.env`), not
 the global config. Before running seeds, make sure the repo `.env` has the same
@@ -134,9 +154,17 @@ grep -E "^(NEO4J_|OPENAI_API_KEY|GCP_|BIGQUERY_|DIFFBOT_TOKEN|GOOGLE_APPLICATION
   ~/.config/meta-knowledge-graph/.env >> .env
 ```
 
-Then run the orchestrator from the MKG repo root — it always runs the mandatory
-Neo4j seeders and only runs the optional warehouse/catalog seeders when GCP
-env/auth is available:
+Before running the sync command above, ask for confirmation because it changes
+the repo `.env`.
+
+Before running any seed/import command, ask for confirmation and name the exact
+targets. The orchestrator always runs the mandatory Neo4j seeders and only runs
+the optional warehouse/catalog seeders when GCP env/auth is available, so phrase
+the confirmation in concrete terms, for example:
+
+> This will seed/update the RoadFlex demo in Neo4j and, if GCP env/auth is
+> available, create or replace the BigQuery demo tables and rebuild the Neocarta
+> catalog. Should I run `uv run python import/sales_agent/seed_all.py` now?
 
 ```bash
 uv run python import/sales_agent/seed_all.py

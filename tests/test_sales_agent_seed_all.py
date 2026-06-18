@@ -27,6 +27,34 @@ BASELINE_ENV = {
 
 
 class SalesAgentSeedAllTests(unittest.TestCase):
+    def test_sales_demo_command_requires_confirmation_before_mutations(self) -> None:
+        command = (ROOT / "commands" / "sales_agent_demo.md").read_text()
+        normalized_command = " ".join(command.split())
+
+        self.assertIn("Mutation confirmation guardrail", command)
+        self.assertIn("Do not proceed until the user replies with an explicit approval", command)
+        self.assertIn("running `seed_all.py`", command)
+        self.assertIn("editing the repo `.env`", command)
+        self.assertIn("Neo4j, BigQuery, and the Neocarta catalog", command)
+        self.assertIn(
+            "Before running any seed/import command, ask for confirmation",
+            normalized_command,
+        )
+
+    def test_mkg_start_handoff_preserves_sales_demo_confirmation_gate(self) -> None:
+        command = (ROOT / "commands" / "mkg-start.md").read_text()
+        normalized_command = " ".join(command.split())
+
+        self.assertIn(
+            "Before running any sales-demo setup step that modifies env files",
+            normalized_command,
+        )
+        self.assertIn(
+            "don't modify env files, seed databases, or rebuild warehouse/catalog data "
+            "without explicit user approval",
+            normalized_command,
+        )
+
     def test_sales_prompt_uses_mkg_memory_contract(self) -> None:
         prompt = (ROOT / "import" / "sales_agent" / "system_prompt.md").read_text()
         normalized_prompt = " ".join(prompt.split())

@@ -97,6 +97,10 @@ optional Diffbot / BigQuery / Neocarta), and verifies the tools mount:
 - Invoke the **`meta-knowledge-graph:sales_agent_demo`** skill, or follow
   [`commands/sales_agent_demo.md`](commands/sales_agent_demo.md).
 
+Before running any sales-demo setup step that modifies env files, seeds Neo4j,
+creates/replaces BigQuery tables, or rebuilds the Neocarta catalog, summarize
+the intended target(s) and command(s), then wait for explicit user approval.
+
 If Step 2 already showed `accounts > 0` and the sales persona is active, don't
 re-seed — confirm it's live and suggest a first query, e.g. *"Which accounts
 renew in the next 90 days and which are at risk?"* Restart the session if the
@@ -176,6 +180,8 @@ Notes:
 
 - Don't re-seed or overwrite an existing persona or sales graph without telling
   the user what's already there and confirming.
+- For the RoadFlex sales demo setup, don't modify env files, seed databases, or
+  rebuild warehouse/catalog data without explicit user approval.
 - Capture only concise, user-provided facts — no raw transcripts or ephemeral
   state. Routine session signal is handled by the auto-capture pipeline; don't
   double-record it here.
