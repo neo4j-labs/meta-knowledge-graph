@@ -25,33 +25,38 @@ Optional argument - a BigQuery dataset to target as `project.dataset`:
   `neocarta_*` tools so the agent can discover tables/columns before writing
   SQL.
 
-## The exact env file to update
+## How env resolution works
 
-For this repo checkout, update the **repo-root `.env` file**:
+There are **two separate env files** that serve different purposes:
+
+| File | Read by | When it matters |
+|------|---------|-----------------|
+| `~/.config/meta-knowledge-graph/.env` | MCP server (plugin mode) | Always — controls which tools mount |
+| `<repo-root>/.env` | Seed scripts | Only when running seeds from the checkout |
+
+When MKG is installed as a Claude Code plugin, the MCP server resolves env as:
+`MKG_ENV_FILE` → `<active-project>/.env` → `~/.config/meta-knowledge-graph/.env`
+(first existing wins). The active project is whichever directory Claude Code is
+open in — **not** the MKG repo checkout. So the repo `.env` is irrelevant to
+the running MCP server unless `MKG_ENV_FILE` points to it.
+
+**Practical consequence:** if Diffbot, BigQuery, or Neocarta vars are only in
+the repo `.env` and not in `~/.config/meta-knowledge-graph/.env`, those tools
+will not mount in the MCP server even after seeding.
+
+## Step 1 - Ensure the global config env exists
+
+Create `~/.config/meta-knowledge-graph/.env` if it does not exist:
 
 ```bash
-./.env
+mkdir -p ~/.config/meta-knowledge-graph
+touch ~/.config/meta-knowledge-graph/.env
+chmod 600 ~/.config/meta-knowledge-graph/.env
 ```
 
-Do **not** edit `.env.example` as the active config. Do **not** put these demo
-settings only in a shell profile. The sales-agent seeders and MKG hooks load the
-repo-root `.env`, and in a repo checkout it takes precedence over the
-user-global MKG env file.
+## Step 2 - Configure required vars (Neo4j + OpenAI)
 
-If `./.env` does not exist yet, create it from the template:
-
-```bash
-cp .env.example .env
-chmod 600 .env
-```
-
-You may offer to write non-secret lines into `./.env` for the user, such as
-`GCP_PROJECT_ID` or `BIGQUERY_DATASET_ID`. Leave secret values for the user to
-fill in, and never print existing secrets.
-
-## Step 1 - Configure the required minimum
-
-Add or update these lines in `./.env`:
+Add or update these lines in `~/.config/meta-knowledge-graph/.env`:
 
 ```bash
 # Required: Neo4j graph used by MKG and the sales-agent demo.
@@ -60,18 +65,17 @@ NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=<your-neo4j-password>
 NEO4J_DATABASE=neo4j
 
-# Required: LLM calls through LiteLLM.
-# The default local/Codex path uses OpenAI unless LLM_MODEL is changed.
+# Required: LLM calls and embeddings (text-embedding-3-small by default).
 OPENAI_API_KEY=<your-openai-api-key>
 
 # Optional model override for memory extraction / prompt consolidation.
 # LLM_MODEL=gpt-5.4-mini
 ```
 
-## Step 2 - Configure optional Diffbot
+## Step 3 - Configure optional Diffbot
 
-To enable live company enrichment and recent-news research, add this to
-`./.env`:
+To enable live company enrichment and recent-news research, add to
+`~/.config/meta-knowledge-graph/.env`:
 
 ```bash
 # Optional: Diffbot live news / firmographic enrichment.
@@ -84,10 +88,10 @@ Diffbot has **no seed step**. After restarting the MCP server/session,
 - `enhance_entity` for company/person firmographics.
 - `search_news` for recent company and trigger-event articles.
 
-## Step 3 - Configure optional BigQuery + Neocarta
+## Step 4 - Configure optional BigQuery + Neocarta
 
-To seed the RoadFlex warehouse and build the Neocarta semantic catalog, add or
-update these lines in `./.env`:
+To seed the RoadFlex warehouse and build the Neocarta semantic catalog, add to
+`~/.config/meta-knowledge-graph/.env`:
 
 ```bash
 # Optional: BigQuery warehouse + Neocarta catalog.
@@ -112,49 +116,49 @@ If `$ARGUMENTS` is `project.dataset`, map it exactly:
 - `GCP_PROJECT_ID=project`
 - `BIGQUERY_DATASET_ID=dataset`
 
-Neocarta also needs credentials for the embedding model provider. With the
-default `EMBEDDING_MODEL=text-embedding-3-small`, the `OPENAI_API_KEY` from the
-required section is enough. If the user changes `EMBEDDING_MODEL` to another
-provider, add that provider's key to `./.env` too.
+Google auth must be reachable by both the seed scripts and the runtime MCP
+tools. The user can use either ADC (`gcloud auth application-default login`),
+`GOOGLE_APPLICATION_CREDENTIALS`, or `GCP_SERVICE_ACCOUNT_JSON`. The principal
+needs BigQuery read + job-run permissions; the warehouse seeder also
+creates/replaces tables in `GCP_PROJECT_ID.BIGQUERY_DATASET_ID`.
 
-Google auth must be reachable by both the seed scripts and runtime tools. The
-user can use either:
+## Step 5 - Seed the demo
 
-- Application Default Credentials: `gcloud auth application-default login`
-- `GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service-account.json`
-- `GCP_SERVICE_ACCOUNT_JSON='{"type":"service_account", ...}'`
-
-The Google principal needs BigQuery read + job-run permissions. The demo
-warehouse seeder also creates/replaces tables in `GCP_PROJECT_ID.BIGQUERY_DATASET_ID`.
-
-## Step 4 - Seed the demo
-
-Minimum Neo4j-backed demo:
+The seed scripts read from the **repo-root `.env`** (`<mkg-checkout>/.env`), not
+the global config. Before running seeds, make sure the repo `.env` has the same
+vars as `~/.config/meta-knowledge-graph/.env`, or sync them:
 
 ```bash
-uv run python import/sales_agent/seed_neo4j.py
-uv run python import/sales_agent/seed_learnings.py
-uv run python import/sales_agent/seed_system_prompt.py
+# Sync global config vars into the repo .env (safe - does not overwrite existing lines)
+grep -E "^(NEO4J_|OPENAI_API_KEY|GCP_|BIGQUERY_|DIFFBOT_TOKEN|GOOGLE_APPLICATION_CREDENTIALS)" \
+  ~/.config/meta-knowledge-graph/.env >> .env
 ```
 
-Optional BigQuery + Neocarta seed, after the BigQuery env/auth above is set:
-
-```bash
-uv run python import/sales_agent/seed_bigquery.py
-uv run python import/sales_agent/run_neocarta.py
-```
-
-Or run the orchestrator, which always runs the mandatory Neo4j seeders and only
-runs the optional warehouse/catalog seeders when GCP env/auth is available:
+Then run the orchestrator from the MKG repo root — it always runs the mandatory
+Neo4j seeders and only runs the optional warehouse/catalog seeders when GCP
+env/auth is available:
 
 ```bash
 uv run python import/sales_agent/seed_all.py
 ```
 
-## Step 5 - Restart and verify tools
+Or run individual seeders:
 
-Restart the MCP server/session after changing `./.env`; env changes do not apply
-to already-running servers.
+```bash
+# Minimum Neo4j-backed demo:
+uv run python import/sales_agent/seed_neo4j.py
+uv run python import/sales_agent/seed_learnings.py
+uv run python import/sales_agent/seed_system_prompt.py
+
+# Optional BigQuery + Neocarta (requires GCP env/auth above):
+uv run python import/sales_agent/seed_bigquery.py
+uv run python import/sales_agent/run_neocarta.py
+```
+
+## Step 6 - Restart and verify tools
+
+Restart the MCP server/session after changing `~/.config/meta-knowledge-graph/.env`;
+env changes do not apply to already-running servers.
 
 Expected tools by configuration:
 
@@ -162,7 +166,7 @@ Expected tools by configuration:
   memory.
 - `DIFFBOT_TOKEN` set: `enhance_entity`, `search_news`.
 - `BIGQUERY_MCP_URL` set with Google auth: `bigquery_execute_query`.
-- `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID`, and embedding provider key set:
+- `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID`, and `OPENAI_API_KEY` set:
   `neocarta_*` catalog/search tools.
 
 Smoke tests:
@@ -177,15 +181,18 @@ Smoke tests:
 
 ## Troubleshooting
 
-- **No Diffbot tools:** `DIFFBOT_TOKEN` is missing or the MCP server was not
-  restarted after editing `./.env`.
-- **No BigQuery tool:** `BIGQUERY_MCP_URL` is missing, Google auth is unavailable,
-  or the server needs a restart.
-- **No `neocarta_*` tools:** one of the Neocarta mount gates failed:
-  `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID`, or the embedding provider key is
-  missing.
+- **No Diffbot tools:** `DIFFBOT_TOKEN` is missing from
+  `~/.config/meta-knowledge-graph/.env`, or the MCP server was not restarted.
+- **No BigQuery tool:** `BIGQUERY_MCP_URL` is missing from the global config
+  env, Google auth is unavailable, or the server needs a restart.
+- **No `neocarta_*` tools:** one of the Neocarta mount gates failed —
+  `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID`, or `OPENAI_API_KEY` is missing from
+  `~/.config/meta-knowledge-graph/.env`.
+- **Tools mount but optional vars are in repo `.env` only:** the MCP server
+  reads the global config env, not the repo `.env`. Copy the missing vars to
+  `~/.config/meta-knowledge-graph/.env` and restart.
 - **Neocarta tools mount but searches return nothing:** the catalog was not
   seeded, or it was seeded for a different dataset. Re-run
-  `uv run python import/sales_agent/run_neocarta.py` after confirming `./.env`.
+  `uv run python import/sales_agent/run_neocarta.py` after confirming the env.
 - **Auth errors during seed:** ADC/service-account credentials are not reachable
   or lack permission on the dataset.
