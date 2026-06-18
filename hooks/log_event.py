@@ -38,6 +38,7 @@ if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
 from project_common import (  # noqa: E402
+    PROJECT_NEUTRAL_LIFECYCLE_EVENTS,
     SUBAGENT_HOOK_EVENTS,
     agent_context_props,
     ensure_project_schema,
@@ -344,6 +345,27 @@ def _link_injected_memory(tx, session_id: str, event_id: str, event_name: str) -
     )
 
 
+def _session_has_project_work(tx, session_id: str) -> bool:
+    record = tx.run(
+        """
+        MATCH (s:Session {session_id: $session_id})-[:HAS_EVENT]->(e:SessionEvent)
+        WHERE NOT (e.event_name IN $neutral_events)
+        RETURN count(e) > 0 AS has_work
+        """,
+        session_id=session_id,
+        neutral_events=list(PROJECT_NEUTRAL_LIFECYCLE_EVENTS),
+    ).single()
+    return bool(record and record["has_work"])
+
+
+def _should_link_project_for_event(session, event_session_id: str, event_name: str) -> bool:
+    if event_name == "SessionStart":
+        return False
+    if event_name == "SessionEnd":
+        return bool(session.execute_read(_session_has_project_work, event_session_id))
+    return True
+
+
 def log_event(data: dict, client: str) -> None:
     from neo4j import GraphDatabase
 
@@ -408,7 +430,11 @@ def log_event(data: dict, client: str) -> None:
                     session.execute_write(
                         _link_injected_memory, session_id, event_id, event_name
                     )
-            if project:
+            if project and _should_link_project_for_event(
+                session,
+                event_session_id,
+                event_name,
+            ):
                 session.execute_write(
                     link_event_to_project,
                     project,

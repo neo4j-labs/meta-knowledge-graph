@@ -30,6 +30,7 @@ OAUTH_EXPIRY_GRACE_SECONDS = 60
 # INJECTED_AT link is attempted from both sides within this window.
 INJECTION_EVENT_WINDOW_SECONDS = 120
 SUBAGENT_HOOK_EVENTS = frozenset({"SubagentStart", "SubagentStop"})
+PROJECT_NEUTRAL_LIFECYCLE_EVENTS = frozenset({"SessionStart", "SessionEnd"})
 ROLLOUT_TRANSCRIPT_ID_RE = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$",
     re.IGNORECASE,
@@ -212,6 +213,20 @@ def llm_ready(model: str | None = None) -> bool:
     return ready
 
 
+def resolve_llm_model(preferred: str) -> str:
+    """Return the first ready model: ``preferred``, then the ``LLM_MODEL`` env var.
+
+    Falls back so that a project-specific ``LLM_MODEL`` (e.g. an OpenAI key) is
+    used when the default Claude/Anthropic model cannot authenticate.
+    """
+    if llm_ready(preferred):
+        return preferred
+    env_model = os.environ.get("LLM_MODEL", "").strip()
+    if env_model and env_model != preferred and llm_ready(env_model):
+        return env_model
+    return preferred
+
+
 def llm_readiness_status(model: str | None = None) -> tuple[bool, str | None]:
     """Return whether the LLM can be called, plus a non-secret reason if not."""
     if llm_backend() == "claude_cli":
@@ -367,7 +382,7 @@ def _is_anthropic_litellm_model(model: str) -> bool:
 def _has_explicit_anthropic_litellm_auth() -> bool:
     return any(
         os.environ.get(key)
-        for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
+        for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
     )
 
 
@@ -797,6 +812,13 @@ def project_update_props(project: ProjectRef) -> dict[str, Any]:
     props = project_props(project)
     props.pop("source", None)
     return props
+
+
+def has_project_work_events(events: list[dict[str, Any]]) -> bool:
+    return any(
+        str(event.get("event_name") or "") not in PROJECT_NEUTRAL_LIFECYCLE_EVENTS
+        for event in events
+    )
 
 
 def _query_records(result: Any) -> list[Any]:

@@ -34,6 +34,7 @@ from project_common import (  # noqa: E402
     extraction_model_label,
     fetch_project_decisions,
     fetch_project_learnings,
+    has_project_work_events,
     in_extraction_subprocess,
     learning_id,
     learning_namespace,
@@ -45,6 +46,7 @@ from project_common import (  # noqa: E402
     neo4j_config,
     normalize_scope,
     project_env,
+    resolve_llm_model,
     resolve_project,
     truncate,
 )
@@ -467,8 +469,8 @@ def _fetch_unprocessed_events(
         """
         MATCH (s:Session {session_id: $session_id})
         OPTIONAL MATCH (s)-[:HAS_SUBAGENT*1..]->(sub:Session)
-        WITH [s] + collect(DISTINCT sub) AS sessions
-        UNWIND sessions AS scoped_session
+        WITH s, collect(DISTINCT sub) AS subs
+        UNWIND ([s] + subs) AS scoped_session
         WITH DISTINCT scoped_session
         WHERE scoped_session IS NOT NULL
         MATCH (scoped_session)-[:HAS_EVENT]->(e:SessionEvent)
@@ -875,7 +877,6 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(ensure_project_schema)
-            session.execute_write(merge_project_and_session, project, session_id, timestamp)
             events = _fetch_unprocessed_events(
                 driver,
                 database,
@@ -884,8 +885,9 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                 mode=mode,
                 limit=limit,
             )
-            if not events:
+            if not events or not has_project_work_events(events):
                 return
+            session.execute_write(merge_project_and_session, project, session_id, timestamp)
             llm_model_used: str | None = None
             llm_status: str | None = None
             llm_skip_reason: str | None = None
@@ -932,7 +934,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     similar_decisions,
                     template=prompt_template,
                 )
-                model_name = _llm_model_for_processing_events(events)
+                model_name = resolve_llm_model(_llm_model_for_processing_events(events))
                 llm_model_used = extraction_model_label(model_name)
                 actions, llm_model_used, llm_meta = ask_llm_for_memory_actions_with_model(
                     prompt,

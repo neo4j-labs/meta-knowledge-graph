@@ -1313,6 +1313,70 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("source", params["project_props"])
         self.assertNotIn("source", params["project_update_props"])
 
+    def test_start_end_only_events_are_not_project_work(self) -> None:
+        self.assertFalse(
+            project_common.has_project_work_events(
+                [
+                    {"event_name": "SessionStart"},
+                    {"event_name": "SessionEnd"},
+                ]
+            )
+        )
+        self.assertTrue(
+            project_common.has_project_work_events(
+                [
+                    {"event_name": "SessionStart"},
+                    {"event_name": "UserPromptSubmit"},
+                ]
+            )
+        )
+
+    def test_log_event_defers_project_link_for_lifecycle_only_events(self) -> None:
+        class FakeSession:
+            def __init__(self, has_work: bool):
+                self.has_work = has_work
+                self.reads = 0
+
+            def execute_read(self, fn, *args):
+                self.reads += 1
+                return self.has_work
+
+        start_session = FakeSession(has_work=True)
+        self.assertFalse(
+            log_event._should_link_project_for_event(
+                start_session,
+                "session-1",
+                "SessionStart",
+            )
+        )
+        self.assertEqual(start_session.reads, 0)
+
+        empty_end_session = FakeSession(has_work=False)
+        self.assertFalse(
+            log_event._should_link_project_for_event(
+                empty_end_session,
+                "session-1",
+                "SessionEnd",
+            )
+        )
+        self.assertEqual(empty_end_session.reads, 1)
+
+        work_end_session = FakeSession(has_work=True)
+        self.assertTrue(
+            log_event._should_link_project_for_event(
+                work_end_session,
+                "session-1",
+                "SessionEnd",
+            )
+        )
+        self.assertTrue(
+            log_event._should_link_project_for_event(
+                work_end_session,
+                "session-1",
+                "UserPromptSubmit",
+            )
+        )
+
     def test_codex_stop_hook_logs_then_processes_project(self) -> None:
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
         stop_hooks = config["hooks"]["Stop"][0]["hooks"]
