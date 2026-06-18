@@ -72,11 +72,17 @@ claude plugin enable  meta-knowledge-graph@mkg
 claude plugin details meta-knowledge-graph@mkg     # component inventory + token cost
 ```
 
-### Configuring
+### Configuring the Claude Code plugin
 
-Credentials live in one user-global file, **`~/.config/meta-knowledge-graph/.env`**
-(mode `600`), read by both the hooks and the MCP server. It survives plugin
-updates and is never written into the ephemeral plugin cache.
+For an installed Claude Code plugin, the config path is:
+
+```
+~/.config/meta-knowledge-graph/.env
+```
+
+Credentials live in that one user-global file (mode `600`), read by both the
+hooks and the MCP server. It survives plugin updates and is never written into
+the ephemeral plugin cache.
 
 > MKG deliberately does **not** use `/plugin configure` — there is no
 > `userConfig`/keychain schema, so credentials stay file-based and portable
@@ -88,7 +94,7 @@ Run the wizard in your own terminal (it prompts for secrets):
 uv run --project ~/.claude/plugins/marketplaces/mkg meta-knowledge-graph setup
 ```
 
-…or write the file by hand:
+…or write the file by hand. Example `~/.config/meta-knowledge-graph/.env`:
 
 ```
 mkdir -p ~/.config/meta-knowledge-graph
