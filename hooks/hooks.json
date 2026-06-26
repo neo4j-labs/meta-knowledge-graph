@@ -143,10 +143,6 @@
           },
           {
             "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/process_project.py\" --mode session --background"
-          },
-          {
-            "type": "command",
             "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/consolidate_system_prompt.py\" --background"
           }
         ]

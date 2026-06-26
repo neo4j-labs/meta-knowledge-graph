@@ -16,8 +16,8 @@ It ships as two halves that form a closed capture-and-recall loop:
   graph, the persisted system prompt, and (optionally) a data catalog and
   warehouse to the agent as tools.
 - **Lifecycle hooks** — plain Python scripts that log every session event,
-  inject scoped project context on prompt submit, and run an LLM memory extraction processor at Stop
-  (and SessionEnd when the harness exposes it)
+  inject scoped project context on prompt submit, and run an LLM memory extraction
+  processor at Stop
   that distills durable `:Learning` (scoped `project` or `user`) and
   `:Decision` candidates from what just happened.
 
@@ -135,9 +135,9 @@ approval_mode = "approve"
 ```
 
 Credentials are read from `~/.config/meta-knowledge-graph/.env` exactly as for
-Claude Code. Codex doesn't currently document a `SessionEnd` hook, so the
-session-level processor is only wired where a harness exposes it. A dedicated
-Codex *plugin* (like the Claude Code one above) is planned.
+Claude Code. Codex doesn't currently document a `SessionEnd` hook, so MKG only
+wires Stop-time extraction for Codex. A dedicated Codex *plugin* (like the Claude
+Code one above) is planned.
 
 ### Claude Desktop & other harnesses
 
@@ -243,15 +243,15 @@ For installed Claude Code plugins, the scripts resolve project memory from the
 user's active worktree first (`cwd` / `CLAUDE_PROJECT_DIR`, with a git-root
 walk-up) and treat the plugin cache path as the hook implementation root only.
 Detached background processors carry that resolved project through
-`MKG_PROJECT_ROOT` / `MKG_PROJECT_ID` so Stop/SessionEnd extraction does not
-fall back to the plugin directory.
+`MKG_PROJECT_ROOT` / `MKG_PROJECT_ID` so Stop-time extraction does not fall back
+to the plugin directory.
 
 | Hook event | Script | Behavior |
 |---|---|---|
 | `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and capture user/project facts as scoped learnings. The injection log keeps only a content hash + summary on the `:SystemPromptInjection` node and links it to its source via `[:OF_PROMPT]→(:SystemPrompt)` instead of copying the prompt text. If the same prompt content was already injected into the same session, the hook skips the duplicate (unless the context was wiped by `clear`/`compact`). |
 | `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits: project-scoped learnings/decisions for the current project, plus durable user-scoped learnings that follow the user across every project. Every injected item is linked to the session via `[:INJECTED_IN]`; items already injected earlier in the same session — or first produced during it (`[:FROM_SESSION]`) — are excluded from retrieval, so a conversation never receives the same learning or decision twice, nor has its own freshly-extracted memory echoed back. Marks served learnings as used. |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | `hooks/log_event.py` | Persists each event as a `:SessionEvent` node threaded by `:NEXT`. Main-agent events land under the parent `:Session`; subagent events land under a separate `:Session` keyed by the subagent id and linked back to the parent session, spawn event, start event, and stop event. This is the corpus the memory extraction processor later reads. |
-| `Stop` (`--mode turn`), `SessionEnd` (`--mode session`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions for two buckets: `:Decision` nodes and `:Learning` nodes. Each learning is classified `project` (a fact about the project/environment) or `user` (a durable fact about the person that holds across projects); user-scoped learnings are keyed on a project-independent namespace so the same fact dedupes everywhere. Writes new nodes with status `candidate`, and stores the model used plus `llm_status` (`called`, `skipped`, or `error`) and skip/error reason on `:ProjectProcessing` and prompt-usage provenance. |
+| `Stop` (`--mode turn`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions for two buckets: `:Decision` nodes and `:Learning` nodes. Each learning is classified `project` (a fact about the project/environment) or `user` (a durable fact about the person that holds across projects); user-scoped learnings are keyed on a project-independent namespace so the same fact dedupes everywhere. Writes new nodes with status `candidate`, and stores the model used plus `llm_status` (`called`, `skipped`, or `error`) and skip/error reason on `:ProjectProcessing` and prompt-usage provenance. |
 | `Stop`, `SessionEnd` | `hooks/consolidate_system_prompt.py` | Runs in the background, rate-limited. The system-prompt consolidation service: it only does work when **more than 5** user-profile memories are in need of review — user-scoped `candidate` learnings not yet folded into the prompt (`MKG_PROMPT_CONSOLIDATION_THRESHOLD`) — and not more than once per cooldown window (`MKG_PROMPT_CONSOLIDATION_INTERVAL_HOURS`, default 24h, tracked via `last_consolidated_at` on the node). When both gates pass, it sends the current `(:SystemPrompt {name: 'default'})` plus the pending user facts to the LLM, which folds those facts into the persona, then archives the outgoing prompt as a `(:SystemPromptVersion)` history node before overwriting the active one and bumping its version. The folded learnings are stamped `consolidated_at` so they drop out of the backlog; their `candidate` status is left untouched, so the human promotion gate still owns `candidate → approved`. |
 | `PostToolUse` (matcher on the Diffbot tools `enhance_entity` / `search_news`) | `hooks/ingest_diffbot.py` | Builds Diffbot tool results back into the graph instead of letting them evaporate with the conversation. `enhance_entity` firmographics become `(:Account)-[:HAS_ENRICHMENT]→(:DiffbotOrganization)` or `(:DiffbotPerson)` (matched on domain, name/`allNames`, and employer hints); `search_news` articles become `(:NewsArticle)-[:MENTIONS]→(:Account)` plus `[:MENTIONS]→(:DiffbotOrganization)` when organization tags or account matches identify companies, and `[:TAGGED]→(:NewsTag)`. Only entities carrying a real Diffbot id are stored — references without one are dropped instead of being keyed on synthetic hashes. Diffbot entities and articles link `[:CAPTURED_IN]→(:Session)` for provenance. Handles the harness's response wrappers, including oversized results that arrive as a saved-to-file notice. |
 | `PostToolUse` (matcher on the query tools `bigquery_execute_query` / `neo4j_read_cypher`) | `hooks/capture_query_failures.py` | Captures failed or suspicious query outputs as structured `(:QueryExecution)-[:HAS_ISSUE]→(:QueryIssue)` artifacts. The first pass records issues visible in PostToolUse payloads: empty result sets, parser/schema/permission/resource/capability errors, malformed outputs, and Neo4j serialization cases such as temporal values returned as `{}`. Clean successful query results are ignored. |
@@ -462,8 +462,8 @@ submits inject the most relevant seeded learnings. Try:
 
 From there the loop takes over: every session's events are logged, and memory
 extraction distills new learnings (project- and user-scoped) and decisions on
-Stop, plus SessionEnd for harnesses that emit it. Each later session starts with
-the most relevant of those — plus durable facts about the user — already
+Stop. Each later session starts with the most relevant of those — plus durable
+facts about the user — already
 injected.
 
 ## Configuration

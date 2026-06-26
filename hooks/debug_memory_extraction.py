@@ -5,7 +5,7 @@
 # ///
 """One-shot diagnostic: rebuild and inspect a process_project extraction call.
 
-Usage: python hooks/debug_memory_extraction.py --mode session --session-id <id>
+Usage: python hooks/debug_memory_extraction.py --mode turn --session-id <id>
 """
 
 from __future__ import annotations

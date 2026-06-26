@@ -1461,6 +1461,27 @@ class ProjectHookTests(unittest.TestCase):
                 event,
             )
 
+    def test_claude_session_end_does_not_run_memory_extraction(self) -> None:
+        for hooks_path in (
+            ROOT / ".claude" / "settings.json",
+            ROOT / "hooks" / "hooks.json",
+        ):
+            with self.subTest(hooks_path=hooks_path):
+                config = json.loads(hooks_path.read_text())
+                commands = [
+                    hook["command"]
+                    for group in config["hooks"]["SessionEnd"]
+                    for hook in group["hooks"]
+                ]
+
+                self.assertTrue(any("hooks/log_event.py" in command for command in commands))
+                self.assertTrue(
+                    any("hooks/consolidate_system_prompt.py" in command for command in commands)
+                )
+                self.assertFalse(
+                    any("hooks/process_project.py" in command for command in commands)
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

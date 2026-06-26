@@ -5,9 +5,9 @@
 # ///
 """Process completed project work into compact candidate learnings.
 
-The raw hook stream remains append-only. This processor runs at Stop and
-SessionEnd, reads the completed batch of events, and writes a small curated
-projection for future retrieval.
+The raw hook stream remains append-only. This processor runs at Stop, reads the
+completed batch of events, and writes a small curated projection for future
+retrieval.
 """
 
 from __future__ import annotations

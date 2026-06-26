@@ -48,8 +48,8 @@ available in this session):
 2. Capture durable signal. When the user corrects you or asserts a constraint
    that future sessions will need, store it as a learning right away rather
    than relying on end-of-session auto-capture to notice.
-3. Trust the auto-capture for routine work. Stop / SessionEnd processing sends
-   the session corpus to an LLM memory extractor that writes ``:Learning`` /
+3. Trust the auto-capture for routine work. Stop processing sends the session
+   corpus to an LLM memory extractor that writes ``:Learning`` /
    ``:Decision`` candidates. Do not double-record what the pipeline will catch.
 4. Keep stored items small, durable, and reusable across tasks. Avoid
    transcripts, ephemeral state, and project-internal trivia.
