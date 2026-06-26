@@ -337,7 +337,42 @@ def _complete_claude_cli(messages: list[dict[str, str]]) -> str:
     return envelope.get("result") or ""
 
 
+def _llm_num_retries() -> int:
+    """Number of transient-failure retries for the litellm call.
+
+    Configurable via ``MKG_LLM_NUM_RETRIES`` (default 2). Retries are applied
+    by ``_complete_litellm`` with exponential backoff, only for retryable
+    provider errors, so a transient hiccup no longer drops a session's
+    extraction.
+    """
+    raw = (os.environ.get("MKG_LLM_NUM_RETRIES") or "2").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 2
+
+
+_RETRYABLE_LLM_ERRORS = (
+    "ServiceUnavailableError",
+    "RateLimitError",
+    "Timeout",
+    "APITimeoutError",
+    "APIConnectionError",
+    "InternalServerError",
+)
+
+
+def _is_retryable_llm_error(exc: Exception) -> bool:
+    """True for transient provider errors worth retrying (capacity/rate/timeout)."""
+    if type(exc).__name__ in _RETRYABLE_LLM_ERRORS:
+        return True
+    text = str(exc)
+    return any(s in text for s in ("503", "429", "overloaded", "high demand", "UNAVAILABLE"))
+
+
 def _complete_litellm(messages: list[dict[str, str]], model: str | None) -> str:
+    import time
+
     import litellm
 
     model_name = model or llm_model()
@@ -345,8 +380,16 @@ def _complete_litellm(messages: list[dict[str, str]], model: str | None) -> str:
     kwargs: dict[str, Any] = {"model": model_name, "messages": messages}
     if api_key:
         kwargs["api_key"] = api_key
-    response = litellm.completion(**kwargs)
-    return response.choices[0].message.content or ""
+    attempts = _llm_num_retries() + 1
+    for attempt in range(attempts):
+        try:
+            response = litellm.completion(**kwargs)
+            return response.choices[0].message.content or ""
+        except Exception as exc:
+            if attempt + 1 >= attempts or not _is_retryable_llm_error(exc):
+                raise
+            time.sleep(min(2 ** attempt, 8))
+    return ""  # unreachable: loop either returns or raises
 
 
 def llm_complete(messages: list[dict[str, str]], *, model: str | None = None) -> str:
