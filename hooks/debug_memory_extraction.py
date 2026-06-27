@@ -44,8 +44,8 @@ def fetch_all_session_events(driver, database: str, session_id: str):
         """
         MATCH (s:Session {session_id: $session_id})
         OPTIONAL MATCH (s)-[:HAS_SUBAGENT*1..]->(sub:Session)
-        WITH [s] + collect(DISTINCT sub) AS sessions
-        UNWIND sessions AS scoped_session
+        WITH s, collect(DISTINCT sub) AS subs
+        UNWIND ([s] + subs) AS scoped_session
         WITH DISTINCT scoped_session
         WHERE scoped_session IS NOT NULL
         MATCH (scoped_session)-[:HAS_EVENT]->(e:SessionEvent)
