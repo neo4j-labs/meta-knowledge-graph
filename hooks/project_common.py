@@ -167,6 +167,12 @@ def _should_default_to_claude(client: str | None = None) -> bool:
 
 
 DEFAULT_CLAUDE_CLI_TIMEOUT = 300.0
+DEFAULT_LLM_NUM_RETRIES = 3
+
+
+def llm_num_retries() -> int:
+    """Retry attempts for a failed background LLM call. ``MKG_LLM_NUM_RETRIES`` overrides."""
+    return max(0, int(_env_float("MKG_LLM_NUM_RETRIES", DEFAULT_LLM_NUM_RETRIES)))
 
 
 def llm_backend() -> str:
@@ -292,7 +298,7 @@ def _claude_cli_env() -> dict[str, str]:
     return env
 
 
-def _complete_claude_cli(messages: list[dict[str, str]]) -> str:
+def _complete_claude_cli_once(messages: list[dict[str, str]]) -> str:
     """Run one extraction turn through the harness's headless agent.
 
     System messages replace the default Claude Code prompt (we don't want its
@@ -337,12 +343,36 @@ def _complete_claude_cli(messages: list[dict[str, str]]) -> str:
     return envelope.get("result") or ""
 
 
+def _complete_claude_cli(messages: list[dict[str, str]]) -> str:
+    """``_complete_claude_cli_once`` with litellm-style retries and backoff."""
+    retries = llm_num_retries()
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return _complete_claude_cli_once(messages)
+        except (
+            RuntimeError,
+            subprocess.TimeoutExpired,
+            json.JSONDecodeError,
+        ) as exc:
+            last_exc = exc
+            if attempt == retries:
+                break
+            time.sleep(2 ** attempt)
+    assert last_exc is not None
+    raise last_exc
+
+
 def _complete_litellm(messages: list[dict[str, str]], model: str | None) -> str:
     import litellm
 
     model_name = model or llm_model()
     api_key = _litellm_api_key_for_model(model_name)
-    kwargs: dict[str, Any] = {"model": model_name, "messages": messages}
+    kwargs: dict[str, Any] = {
+        "model": model_name,
+        "messages": messages,
+        "num_retries": llm_num_retries(),
+    }
     if api_key:
         kwargs["api_key"] = api_key
     response = litellm.completion(**kwargs)
