@@ -1270,6 +1270,7 @@ def fetch_project_learnings(
                        score
                 ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
                          score DESC,
+                         coalesce(node.salience, 0.0) DESC,
                          coalesce(node.confidence, 0.0) DESC
                 LIMIT $limit
                 """,
@@ -1302,6 +1303,7 @@ def fetch_project_learnings(
                l.task_pattern AS task_pattern,
                0.0 AS score
         ORDER BY CASE l.status WHEN 'approved' THEN 0 ELSE 1 END,
+                 coalesce(l.salience, 0.0) DESC,
                  toString(coalesce(l.last_used_at, l.updated_at, l.created_at)) DESC
         LIMIT $limit
         """,
@@ -1613,6 +1615,91 @@ def mark_learnings_used(driver, database: str, learning_ids: list[str]) -> None:
         learning_ids=learning_ids,
         timestamp=timestamp,
     )
+
+
+def _salience_graph_name(project_id: str, run_token: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "_", f"salience_{project_id}_{run_token}")[:200]
+
+
+def recompute_learning_salience(
+    driver,
+    database: str,
+    project_id: str,
+    run_token: str,
+) -> None:
+    """Recompute retrieval salience for project learnings via Personalized
+    PageRank over the co-injection graph, anchored on ``approved`` learnings.
+
+    Salience measures how central a learning is to the recalled body of
+    knowledge, not whether it is correct; recall uses it to order injection.
+    Best-effort: no-ops when there are no approved anchors or GDS is absent.
+    """
+    seeds = _execute_query_single(
+        driver,
+        database,
+        """
+        MATCH (a:Learning {status: 'approved'})
+        WHERE coalesce(a.scope, 'project') = 'project' AND a.project_id = $project_id
+        RETURN count(a) AS seeds
+        """,
+        project_id=project_id,
+    )
+    if not seeds or not seeds["seeds"]:
+        return
+
+    graph_name = _salience_graph_name(project_id, run_token)
+    drop = "CALL gds.graph.drop($graph_name, false) YIELD graphName RETURN graphName"
+    try:
+        _execute_query(driver, database, drop, graph_name=graph_name)
+        _execute_query(
+            driver,
+            database,
+            """
+            MATCH (l1:Learning)
+            WHERE coalesce(l1.scope, 'project') = 'project' AND l1.project_id = $project_id
+            OPTIONAL MATCH (l1)-[:INJECTED_IN]->(:Session)<-[:INJECTED_IN]-(l2:Learning)
+            WHERE coalesce(l2.scope, 'project') = 'project'
+              AND l2.project_id = $project_id
+              AND elementId(l1) < elementId(l2)
+            WITH l1, l2, count(*) AS weight
+            RETURN gds.graph.project(
+                $graph_name,
+                l1,
+                l2,
+                {relationshipType: 'CO_INJECTED', relationshipProperties: {weight: weight}},
+                {undirectedRelationshipTypes: ['CO_INJECTED']}
+            ) AS ignored
+            """,
+            graph_name=graph_name,
+            project_id=project_id,
+        )
+        _execute_query(
+            driver,
+            database,
+            """
+            MATCH (a:Learning {status: 'approved'})
+            WHERE coalesce(a.scope, 'project') = 'project' AND a.project_id = $project_id
+            WITH collect(a) AS seeds
+            CALL gds.pageRank.stream($graph_name, {
+                sourceNodes: seeds,
+                relationshipWeightProperty: 'weight',
+                dampingFactor: 0.85,
+                maxIterations: 30,
+                tolerance: 1e-7
+            }) YIELD nodeId, score
+            WITH gds.util.asNode(nodeId) AS l, score
+            SET l.salience = score
+            """,
+            graph_name=graph_name,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        print(f"[recompute_learning_salience] skipped: {exc}", file=sys.stderr)
+    finally:
+        try:
+            _execute_query(driver, database, drop, graph_name=graph_name)
+        except Exception:
+            pass
 
 
 def format_learning_context(
