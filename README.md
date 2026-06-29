@@ -487,6 +487,24 @@ injected.
 | `BIGQUERY_REGION`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | — | — | Optional; forwarded to the Neocarta subprocess when set. `BIGQUERY_REGION` (default `US`) also sets the dataset location when seeding the sales-agent demo. |
 | `GCP_BILLING_PROJECT_ID` | — | falls back to `GCP_PROJECT_ID` | Optional billing project for the sales-agent BigQuery seeder. |
 | `GCP_SERVICE_ACCOUNT_JSON` / `GOOGLE_APPLICATION_CREDENTIALS` | — | — | GCP auth for optional BigQuery seeding and Neocarta when application-default credentials are not already available: inline service-account JSON (written to a temp file) or a credentials file path. |
+| `MKG_GDS_SESSION_MEMORY` | — | `8GB` | Aura only. Memory size of the Graph Analytics session created for the projection (e.g. `1GB`, `4GB`, `8GB`). Ignored by the in-database plugin. |
+| `MKG_GDS_SESSION_TTL_HOURS` | — | `1` | Aura only. Time-to-live of the Graph Analytics session, which auto-expires after this window. Ignored by the in-database plugin. |
+
+### Self-learning GDS backend
+
+After a session produces new learnings, the `process_project` hook recomputes a
+`salience` score on project `:Learning` nodes — Personalized PageRank over the
+learning co-injection graph, anchored on `approved` learnings — and
+`fetch_project_learnings` uses it to order which learnings are injected. It runs
+on either **in-database GDS** (the GDS plugin) or an **Aura Graph Analytics**
+session, auto-detected via the procedure catalog. 
+On Aura, projecting the graph spins up
+a session sized by `MKG_GDS_SESSION_MEMORY` and bounded by
+`MKG_GDS_SESSION_TTL_HOURS`; the projected graph is dropped after each run and
+the session itself auto-expires via its TTL. Inside an attached AuraDB the Cypher
+API is authorized automatically, so no extra Aura API credentials are required.
+Salience is best-effort: if no GDS backend is available it is skipped and
+injection falls back to relevance and recency ordering.
 
 ## TODO / Roadmap
 

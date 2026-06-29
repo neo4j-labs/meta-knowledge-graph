@@ -1621,6 +1621,77 @@ def _salience_graph_name(project_id: str, run_token: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", f"salience_{project_id}_{run_token}")[:200]
 
 
+def _gds_backend(driver, database: str) -> str:
+    """Resolve the GDS execution backend by probing the procedure catalog:
+    Aura exposes ``gds.session.*``, the in-database plugin does not.
+    """
+    try:
+        row = _execute_query_single(
+            driver,
+            database,
+            """
+            SHOW PROCEDURES YIELD name
+            WHERE name IN ['gds.session.list', 'gds.pageRank.stream']
+            RETURN collect(name) AS names
+            """,
+        )
+    except Exception:
+        return "plugin"
+    names = set(row["names"]) if row and row["names"] else set()
+    return "aura" if "gds.session.list" in names else "plugin"
+
+
+def _gds_session_ttl_hours() -> int:
+    try:
+        return max(1, int(float(os.getenv("MKG_GDS_SESSION_TTL_HOURS", "1"))))
+    except (TypeError, ValueError):
+        return 1
+
+
+_COOCCURRENCE_PROJECTION = """
+    MATCH (l1:Learning)
+    WHERE coalesce(l1.scope, 'project') = 'project' AND l1.project_id = $project_id
+    OPTIONAL MATCH (l1)-[:INJECTED_IN]->(:Session)<-[:INJECTED_IN]-(l2:Learning)
+    WHERE coalesce(l2.scope, 'project') = 'project'
+      AND l2.project_id = $project_id
+      AND elementId(l1) < elementId(l2)
+    WITH l1, l2, count(*) AS weight
+    RETURN gds.graph.project(
+        $graph_name,
+        l1,
+        l2,
+        {relationshipType: 'CO_INJECTED', relationshipProperties: {weight: weight}},
+        __SESSION_CONFIG__
+    ) AS ignored
+"""
+
+
+def _cooccurrence_projection(backend: str, graph_name: str, project_id: str):
+    params: dict[str, Any] = {"graph_name": graph_name, "project_id": project_id}
+    if backend == "aura":
+        config = (
+            "{undirectedRelationshipTypes: ['CO_INJECTED'], "
+            "memory: $memory, ttl: duration({hours: $ttl_hours})}"
+        )
+        params["memory"] = os.getenv("MKG_GDS_SESSION_MEMORY") or "8GB"
+        params["ttl_hours"] = _gds_session_ttl_hours()
+    else:
+        config = "{undirectedRelationshipTypes: ['CO_INJECTED']}"
+    return _COOCCURRENCE_PROJECTION.replace("__SESSION_CONFIG__", config), params
+
+
+def _drop_gds_graph(driver, database: str, graph_name: str) -> None:
+    try:
+        _execute_query(
+            driver,
+            database,
+            "CALL gds.graph.drop($graph_name, false) YIELD graphName RETURN graphName",
+            graph_name=graph_name,
+        )
+    except Exception:
+        pass
+
+
 def recompute_learning_salience(
     driver,
     database: str,
@@ -1630,10 +1701,12 @@ def recompute_learning_salience(
     """Recompute retrieval salience for project learnings via Personalized
     PageRank over the co-injection graph, anchored on ``approved`` learnings.
 
-    Salience measures how central a learning is to the recalled body of
-    knowledge, not whether it is correct; recall uses it to order injection.
-    Best-effort: no-ops when there are no approved anchors or GDS is absent.
+    Runs against in-database GDS or an Aura Graph Analytics session, chosen by
+    :func:`_gds_backend`. Salience measures how central a learning is to the
+    recalled body of knowledge, not whether it is correct; recall uses it to
+    order injection. Best-effort: no-ops without approved anchors or GDS.
     """
+    backend = _gds_backend(driver, database)
     seeds = _execute_query_single(
         driver,
         database,
@@ -1648,31 +1721,10 @@ def recompute_learning_salience(
         return
 
     graph_name = _salience_graph_name(project_id, run_token)
-    drop = "CALL gds.graph.drop($graph_name, false) YIELD graphName RETURN graphName"
+    project_query, project_params = _cooccurrence_projection(backend, graph_name, project_id)
+    _drop_gds_graph(driver, database, graph_name)
     try:
-        _execute_query(driver, database, drop, graph_name=graph_name)
-        _execute_query(
-            driver,
-            database,
-            """
-            MATCH (l1:Learning)
-            WHERE coalesce(l1.scope, 'project') = 'project' AND l1.project_id = $project_id
-            OPTIONAL MATCH (l1)-[:INJECTED_IN]->(:Session)<-[:INJECTED_IN]-(l2:Learning)
-            WHERE coalesce(l2.scope, 'project') = 'project'
-              AND l2.project_id = $project_id
-              AND elementId(l1) < elementId(l2)
-            WITH l1, l2, count(*) AS weight
-            RETURN gds.graph.project(
-                $graph_name,
-                l1,
-                l2,
-                {relationshipType: 'CO_INJECTED', relationshipProperties: {weight: weight}},
-                {undirectedRelationshipTypes: ['CO_INJECTED']}
-            ) AS ignored
-            """,
-            graph_name=graph_name,
-            project_id=project_id,
-        )
+        _execute_query(driver, database, project_query, **project_params)
         _execute_query(
             driver,
             database,
@@ -1697,10 +1749,7 @@ def recompute_learning_salience(
     except Exception as exc:
         print(f"[recompute_learning_salience] skipped: {exc}", file=sys.stderr)
     finally:
-        try:
-            _execute_query(driver, database, drop, graph_name=graph_name)
-        except Exception:
-            pass
+        _drop_gds_graph(driver, database, graph_name)
 
 
 def format_learning_context(
