@@ -1685,7 +1685,8 @@ def recompute_learning_salience(
                 relationshipWeightProperty: 'weight',
                 dampingFactor: 0.85,
                 maxIterations: 30,
-                tolerance: 1e-7
+                tolerance: 1e-7,
+                scaler: 'L1Norm'
             }) YIELD nodeId, score
             WITH gds.util.asNode(nodeId) AS l, score
             SET l.salience = score
