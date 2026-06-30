@@ -1258,7 +1258,7 @@ def fetch_project_learnings(
                 YIELD node, score
                 MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)
                 WHERE node.status IN $statuses
-                  AND coalesce(node.scope, 'project') = 'project'
+                  AND node.scope = 'project'
                   AND ($session_id IS NULL OR (
                        NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                        AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -1292,7 +1292,7 @@ def fetch_project_learnings(
         """
         MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
         WHERE l.status IN $statuses
-          AND coalesce(l.scope, 'project') = 'project'
+          AND l.scope = 'project'
           AND ($session_id IS NULL OR (
                NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                AND NOT (l)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -1416,13 +1416,13 @@ def fetch_project_decisions(
                 WHERE ($session_id IS NULL OR (
                       NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                       AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
-                  AND coalesce(node.scope, 'project') = 'project'
+                  AND node.scope = 'project'
                 RETURN node.id AS id,
                        node.text AS text,
                        node.rationale AS rationale,
                        node.confidence AS confidence,
                        node.task_pattern AS task_pattern,
-                       coalesce(node.scope, 'project') AS scope,
+                       node.scope AS scope,
                        score
                 ORDER BY score DESC,
                          coalesce(node.confidence, 0.0) DESC
@@ -1447,13 +1447,13 @@ def fetch_project_decisions(
         WHERE ($session_id IS NULL OR (
               NOT (d)-[:INJECTED_IN]->(:Session {session_id: $session_id})
               AND NOT (d)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
-          AND coalesce(d.scope, 'project') = 'project'
+          AND d.scope = 'project'
         RETURN d.id AS id,
                d.text AS text,
                d.rationale AS rationale,
                d.confidence AS confidence,
                d.task_pattern AS task_pattern,
-               coalesce(d.scope, 'project') AS scope,
+               d.scope AS scope,
                0.0 AS score
         ORDER BY coalesce(d.updated_at, d.created_at) DESC
         LIMIT $limit
@@ -1650,9 +1650,9 @@ def _gds_session_ttl_hours() -> int:
 
 _COOCCURRENCE_PROJECTION = """
     MATCH (l1:Learning)
-    WHERE coalesce(l1.scope, 'project') = 'project' AND l1.project_id = $project_id
+    WHERE l1.scope = 'project' AND l1.project_id = $project_id
     OPTIONAL MATCH (l1)-[:INJECTED_IN]->(:Session)<-[:INJECTED_IN]-(l2:Learning)
-    WHERE coalesce(l2.scope, 'project') = 'project'
+    WHERE l2.scope = 'project'
       AND l2.project_id = $project_id
       AND elementId(l1) < elementId(l2)
     WITH l1, l2, count(*) AS weight
@@ -1712,7 +1712,7 @@ def recompute_learning_salience(
         database,
         """
         MATCH (a:Learning {status: 'approved'})
-        WHERE coalesce(a.scope, 'project') = 'project' AND a.project_id = $project_id
+        WHERE a.scope = 'project' AND a.project_id = $project_id
         RETURN count(a) AS seeds
         """,
         project_id=project_id,
@@ -1730,7 +1730,7 @@ def recompute_learning_salience(
             database,
             """
             MATCH (a:Learning {status: 'approved'})
-            WHERE coalesce(a.scope, 'project') = 'project' AND a.project_id = $project_id
+            WHERE a.scope = 'project' AND a.project_id = $project_id
             WITH collect(a) AS seeds
             CALL gds.pageRank.stream($graph_name, {
                 sourceNodes: seeds,
