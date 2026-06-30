@@ -46,6 +46,7 @@ from project_common import (  # noqa: E402
     neo4j_config,
     normalize_scope,
     project_env,
+    recompute_learning_salience,
     resolve_llm_model,
     resolve_project,
     truncate,
@@ -965,6 +966,10 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     llm_error,
                     timestamp,
                 )
+                if learning_rows:
+                    recompute_learning_salience(
+                        driver, database, project.id, session_id
+                    )
             except Exception as exc:
                 error_text = f"{type(exc).__name__}: {exc}"
                 if llm_model_used and llm_status is None:

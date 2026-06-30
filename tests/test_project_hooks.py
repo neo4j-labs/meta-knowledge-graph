@@ -1081,7 +1081,7 @@ class ProjectHookTests(unittest.TestCase):
         )
 
         self.assertTrue(captured)
-        self.assertIn("coalesce(l.scope, 'project') = 'project'", captured[0][0])
+        self.assertIn("l.scope = 'project'", captured[0][0])
 
     def test_fetch_project_decisions_restricts_to_project_scope(self) -> None:
         captured: list[tuple[str, dict]] = []
@@ -1096,7 +1096,7 @@ class ProjectHookTests(unittest.TestCase):
         )
 
         self.assertTrue(captured)
-        self.assertIn("coalesce(d.scope, 'project') = 'project'", captured[0][0])
+        self.assertIn("d.scope = 'project'", captured[0][0])
 
     def test_fetch_user_learnings_spans_projects_and_filters_scope(self) -> None:
         captured: list[tuple[str, dict]] = []

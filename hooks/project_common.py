@@ -1258,7 +1258,7 @@ def fetch_project_learnings(
                 YIELD node, score
                 MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)
                 WHERE node.status IN $statuses
-                  AND coalesce(node.scope, 'project') = 'project'
+                  AND node.scope = 'project'
                   AND ($session_id IS NULL OR (
                        NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                        AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -1270,6 +1270,7 @@ def fetch_project_learnings(
                        score
                 ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
                          score DESC,
+                         coalesce(node.salience, 0.0) DESC,
                          coalesce(node.confidence, 0.0) DESC
                 LIMIT $limit
                 """,
@@ -1291,7 +1292,7 @@ def fetch_project_learnings(
         """
         MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
         WHERE l.status IN $statuses
-          AND coalesce(l.scope, 'project') = 'project'
+          AND l.scope = 'project'
           AND ($session_id IS NULL OR (
                NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                AND NOT (l)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -1302,6 +1303,7 @@ def fetch_project_learnings(
                l.task_pattern AS task_pattern,
                0.0 AS score
         ORDER BY CASE l.status WHEN 'approved' THEN 0 ELSE 1 END,
+                 coalesce(l.salience, 0.0) DESC,
                  toString(coalesce(l.last_used_at, l.updated_at, l.created_at)) DESC
         LIMIT $limit
         """,
@@ -1414,13 +1416,13 @@ def fetch_project_decisions(
                 WHERE ($session_id IS NULL OR (
                       NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                       AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
-                  AND coalesce(node.scope, 'project') = 'project'
+                  AND node.scope = 'project'
                 RETURN node.id AS id,
                        node.text AS text,
                        node.rationale AS rationale,
                        node.confidence AS confidence,
                        node.task_pattern AS task_pattern,
-                       coalesce(node.scope, 'project') AS scope,
+                       node.scope AS scope,
                        score
                 ORDER BY score DESC,
                          coalesce(node.confidence, 0.0) DESC
@@ -1445,13 +1447,13 @@ def fetch_project_decisions(
         WHERE ($session_id IS NULL OR (
               NOT (d)-[:INJECTED_IN]->(:Session {session_id: $session_id})
               AND NOT (d)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
-          AND coalesce(d.scope, 'project') = 'project'
+          AND d.scope = 'project'
         RETURN d.id AS id,
                d.text AS text,
                d.rationale AS rationale,
                d.confidence AS confidence,
                d.task_pattern AS task_pattern,
-               coalesce(d.scope, 'project') AS scope,
+               d.scope AS scope,
                0.0 AS score
         ORDER BY coalesce(d.updated_at, d.created_at) DESC
         LIMIT $limit
@@ -1613,6 +1615,141 @@ def mark_learnings_used(driver, database: str, learning_ids: list[str]) -> None:
         learning_ids=learning_ids,
         timestamp=timestamp,
     )
+
+
+def _salience_graph_name(project_id: str, run_token: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "_", f"salience_{project_id}_{run_token}")[:200]
+
+
+def _gds_backend(driver, database: str) -> str:
+    """Resolve the GDS execution backend by probing the procedure catalog:
+    Aura exposes ``gds.session.*``, the in-database plugin does not.
+    """
+    try:
+        row = _execute_query_single(
+            driver,
+            database,
+            """
+            SHOW PROCEDURES YIELD name
+            WHERE name IN ['gds.session.list', 'gds.pageRank.stream']
+            RETURN collect(name) AS names
+            """,
+        )
+    except Exception:
+        return "plugin"
+    names = set(row["names"]) if row and row["names"] else set()
+    return "aura" if "gds.session.list" in names else "plugin"
+
+
+def _gds_session_ttl_hours() -> int:
+    try:
+        return max(1, int(float(os.getenv("MKG_GDS_SESSION_TTL_HOURS", "1"))))
+    except (TypeError, ValueError):
+        return 1
+
+
+_COOCCURRENCE_PROJECTION = """
+    MATCH (l1:Learning)
+    WHERE l1.scope = 'project' AND l1.project_id = $project_id
+    OPTIONAL MATCH (l1)-[:INJECTED_IN]->(:Session)<-[:INJECTED_IN]-(l2:Learning)
+    WHERE l2.scope = 'project'
+      AND l2.project_id = $project_id
+      AND elementId(l1) < elementId(l2)
+    WITH l1, l2, count(*) AS weight
+    RETURN gds.graph.project(
+        $graph_name,
+        l1,
+        l2,
+        {relationshipType: 'CO_INJECTED', relationshipProperties: {weight: weight}},
+        __SESSION_CONFIG__
+    ) AS ignored
+"""
+
+
+def _cooccurrence_projection(backend: str, graph_name: str, project_id: str):
+    params: dict[str, Any] = {"graph_name": graph_name, "project_id": project_id}
+    if backend == "aura":
+        config = (
+            "{undirectedRelationshipTypes: ['CO_INJECTED'], "
+            "memory: $memory, ttl: duration({hours: $ttl_hours})}"
+        )
+        params["memory"] = os.getenv("MKG_GDS_SESSION_MEMORY") or "8GB"
+        params["ttl_hours"] = _gds_session_ttl_hours()
+    else:
+        config = "{undirectedRelationshipTypes: ['CO_INJECTED']}"
+    return _COOCCURRENCE_PROJECTION.replace("__SESSION_CONFIG__", config), params
+
+
+def _drop_gds_graph(driver, database: str, graph_name: str) -> None:
+    try:
+        _execute_query(
+            driver,
+            database,
+            "CALL gds.graph.drop($graph_name, false) YIELD graphName RETURN graphName",
+            graph_name=graph_name,
+        )
+    except Exception:
+        pass
+
+
+def recompute_learning_salience(
+    driver,
+    database: str,
+    project_id: str,
+    run_token: str,
+) -> None:
+    """Recompute retrieval salience for project learnings via Personalized
+    PageRank over the co-injection graph, anchored on ``approved`` learnings.
+
+    Runs against in-database GDS or an Aura Graph Analytics session, chosen by
+    :func:`_gds_backend`. Salience measures how central a learning is to the
+    recalled body of knowledge, not whether it is correct; recall uses it to
+    order injection. Best-effort: no-ops without approved anchors or GDS.
+    """
+    backend = _gds_backend(driver, database)
+    seeds = _execute_query_single(
+        driver,
+        database,
+        """
+        MATCH (a:Learning {status: 'approved'})
+        WHERE a.scope = 'project' AND a.project_id = $project_id
+        RETURN count(a) AS seeds
+        """,
+        project_id=project_id,
+    )
+    if not seeds or not seeds["seeds"]:
+        return
+
+    graph_name = _salience_graph_name(project_id, run_token)
+    project_query, project_params = _cooccurrence_projection(backend, graph_name, project_id)
+    _drop_gds_graph(driver, database, graph_name)
+    try:
+        _execute_query(driver, database, project_query, **project_params)
+        _execute_query(
+            driver,
+            database,
+            """
+            MATCH (a:Learning {status: 'approved'})
+            WHERE a.scope = 'project' AND a.project_id = $project_id
+            WITH collect(a) AS seeds
+            CALL gds.pageRank.stream($graph_name, {
+                sourceNodes: seeds,
+                relationshipWeightProperty: 'weight',
+                dampingFactor: 0.85,
+                maxIterations: 30,
+                tolerance: 1e-7,
+                scaler: 'L1Norm'
+            }) YIELD nodeId, score
+            WITH gds.util.asNode(nodeId) AS l, score
+            SET l.salience = score
+            """,
+            graph_name=graph_name,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        print(f"[recompute_learning_salience] skipped: {exc}", file=sys.stderr)
+    finally:
+        _drop_gds_graph(driver, database, graph_name)
 
 
 def format_learning_context(

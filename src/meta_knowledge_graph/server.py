@@ -780,7 +780,7 @@ def create_mcp_server(
                         YIELD node, score
                         MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)
                         WHERE node.status IN $statuses
-                          AND coalesce(node.scope, 'project') = 'project'
+                          AND node.scope = 'project'
                         RETURN node.id AS id, node.text AS text, node.status AS status,
                                node.confidence AS confidence, node.task_pattern AS task_pattern,
                                score
@@ -802,7 +802,7 @@ def create_mcp_server(
                     """
                     MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
                     WHERE l.status IN $statuses
-                      AND coalesce(l.scope, 'project') = 'project'
+                      AND l.scope = 'project'
                     RETURN l.id AS id, l.text AS text, l.status AS status,
                            l.confidence AS confidence, l.task_pattern AS task_pattern,
                            0.0 AS score
@@ -869,10 +869,10 @@ def create_mcp_server(
                         CALL db.index.fulltext.queryNodes('project_decision_fulltext', $q)
                         YIELD node, score
                         MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(node)
-                        WHERE coalesce(node.scope, 'project') = 'project'
+                        WHERE node.scope = 'project'
                         RETURN node.id AS id, node.text AS text, node.rationale AS rationale,
                                node.confidence AS confidence, node.task_pattern AS task_pattern,
-                               coalesce(node.scope, 'project') AS scope,
+                               node.scope AS scope,
                                score
                         ORDER BY score DESC, coalesce(node.confidence, 0.0) DESC
                         LIMIT $limit
@@ -889,10 +889,10 @@ def create_mcp_server(
                 records = await _execute_query(
                     """
                     MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(d:Decision)
-                    WHERE coalesce(d.scope, 'project') = 'project'
+                    WHERE d.scope = 'project'
                     RETURN d.id AS id, d.text AS text, d.rationale AS rationale,
                            d.confidence AS confidence, d.task_pattern AS task_pattern,
-                           coalesce(d.scope, 'project') AS scope,
+                           d.scope AS scope,
                            0.0 AS score
                     ORDER BY coalesce(d.updated_at, d.created_at) DESC
                     LIMIT $limit
