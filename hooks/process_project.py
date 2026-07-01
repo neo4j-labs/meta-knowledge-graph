@@ -52,6 +52,11 @@ from project_common import (  # noqa: E402
 )
 
 import capture_query_failures  # noqa: E402
+from consistency_gate import (  # noqa: E402
+    attach_candidate_embeddings,
+    ensure_memory_vector_indexes,
+    run_consistency_gate,
+)
 
 
 DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME = "default"
@@ -625,6 +630,7 @@ def _write_processing(
             SET l.text = row.text,
                 l.task_pattern = row.task_pattern,
                 l.summary = row.summary,
+                l.embedding = coalesce(row.embedding, l.embedding),
                 l.last_source = row.source,
                 l.last_source_session_id = $session_id,
                 l.last_reason = row.reason,
@@ -705,6 +711,7 @@ def _write_processing(
                 d.rationale = row.rationale,
                 d.task_pattern = row.task_pattern,
                 d.summary = row.summary,
+                d.embedding = coalesce(row.embedding, d.embedding),
                 d.scope = row.scope,
                 d.last_source = row.source,
                 d.last_source_session_id = $session_id,
@@ -877,6 +884,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(ensure_project_schema)
+            ensure_memory_vector_indexes(driver, database)
             events = _fetch_unprocessed_events(
                 driver,
                 database,
@@ -949,6 +957,9 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     actions,
                     llm_model=llm_model_used,
                 )
+                # Embed candidates before the write so each is stored searchable
+                # and the consistency gate can retrieve prior approved neighbours.
+                attach_candidate_embeddings(learning_rows, decision_rows)
                 session.execute_write(
                     _write_processing,
                     project,
@@ -965,6 +976,20 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     llm_error,
                     timestamp,
                 )
+                # Auto-approval gate: promote consistent candidates, invalidate
+                # older items they supersede. No-op if embeddings/judge/index
+                # are unavailable (candidates simply stay 'candidate'). Runs only
+                # at Stop ('turn'), never at SessionEnd ('session').
+                if mode == "turn":
+                    run_consistency_gate(
+                        driver,
+                        database,
+                        project=project,
+                        learning_rows=learning_rows,
+                        decision_rows=decision_rows,
+                        model=model_name,
+                        timestamp=timestamp,
+                    )
             except Exception as exc:
                 error_text = f"{type(exc).__name__}: {exc}"
                 if llm_model_used and llm_status is None:

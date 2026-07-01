@@ -397,6 +397,98 @@ def extraction_model_label(model: str | None = None) -> str:
     return model or llm_model()
 
 
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+DEFAULT_EMBEDDING_DIMENSIONS = 1536
+
+
+def embedding_model() -> str:
+    """litellm model string for embeddings (e.g. ``text-embedding-3-small`` for
+    OpenAI, ``azure/<deployment>`` for Azure). Kept separate from the chat model
+    so the consistency gate can embed even when the extractor runs on Claude."""
+    return os.environ.get("EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
+
+
+def embedding_dimensions() -> int:
+    """Vector dimensionality for the memory embedding model. Must match the model
+    (``text-embedding-3-small`` → 1536) and the vector index config."""
+    try:
+        return int(os.environ.get("EMBEDDING_DIMENSIONS", str(DEFAULT_EMBEDDING_DIMENSIONS)))
+    except ValueError:
+        return DEFAULT_EMBEDDING_DIMENSIONS
+
+
+def embeddings_ready(model: str | None = None) -> tuple[bool, str | None]:
+    """Whether embeddings can be produced, plus a non-secret reason if not.
+
+    Embeddings always run through litellm (the ``claude_cli`` chat backend has no
+    embedding surface), so this mirrors :func:`llm_readiness_status`'s litellm
+    branch: it checks for present, non-blank provider credentials."""
+    model_name = model or embedding_model()
+    os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+    try:
+        import litellm
+    except Exception as exc:
+        return False, f"litellm import failed: {type(exc).__name__}: {str(exc)[:200]}"
+    blanked = {k: v for k, v in os.environ.items() if not v.strip()}
+    for key in blanked:
+        del os.environ[key]
+    try:
+        result = litellm.validate_environment(model=model_name)
+    except Exception as exc:
+        return (
+            False,
+            f"litellm.validate_environment failed for {model_name}: "
+            f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
+    finally:
+        os.environ.update(blanked)
+    if bool(result.get("keys_in_environment")):
+        return True, None
+    return False, f"embedding provider credentials unavailable for {model_name}"
+
+
+def embed_texts(texts: list[str], *, model: str | None = None) -> list[list[float] | None]:
+    """Embed a batch of texts, preserving input order. Returns ``None`` in a slot
+    when embeddings are unavailable or the call failed, so callers degrade to the
+    pre-embedding behaviour rather than raising."""
+    if not texts:
+        return []
+    model_name = model or embedding_model()
+    ready, _ = embeddings_ready(model_name)
+    if not ready:
+        return [None] * len(texts)
+    import litellm
+
+    try:
+        response = litellm.embedding(model=model_name, input=list(texts))
+    except Exception:
+        return [None] * len(texts)
+
+    data = getattr(response, "data", None) or []
+    ordered: list[list[float] | None] = [None] * len(texts)
+    fell_back = False
+    for position, item in enumerate(data):
+        if isinstance(item, dict):
+            index = item.get("index")
+            vector = item.get("embedding")
+        else:
+            index = getattr(item, "index", None)
+            vector = getattr(item, "embedding", None)
+        slot = index if isinstance(index, int) else position
+        if 0 <= slot < len(ordered):
+            ordered[slot] = vector
+        else:
+            fell_back = True
+    if fell_back:
+        return [None] * len(texts)
+    return ordered
+
+
+def embed_text(text: str, *, model: str | None = None) -> list[float] | None:
+    """Embed a single text; ``None`` when embeddings are unavailable."""
+    return embed_texts([text], model=model)[0]
+
+
 @dataclass(frozen=True)
 class ClaudeOAuthCredential:
     token: str
