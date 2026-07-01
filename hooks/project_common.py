@@ -695,7 +695,7 @@ PROJECT_ROOT_ENV_VARS = (
     "CODEX_WORKSPACE_ROOT",
     "PWD",
 )
-HOOK_ROOT_ENV_VARS = ("CLAUDE_PLUGIN_ROOT", "MKG_HOOK_ROOT")
+HOOK_ROOT_ENV_VARS = ("CODEX_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "MKG_HOOK_ROOT")
 
 # Credentials the background hooks consume. When MKG's own .env defines one of
 # these, it is loaded authoritatively (override=True) so the configured value

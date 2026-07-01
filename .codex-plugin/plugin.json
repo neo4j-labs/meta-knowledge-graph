@@ -1,0 +1,43 @@
+{
+  "name": "meta-knowledge-graph",
+  "version": "0.1.17",
+  "description": "MKG: Neo4j-backed agent memory with capture/recall hooks, Codex skills, and the Meta Knowledge Graph MCP server.",
+  "author": {
+    "name": "Tomaz Bratanic"
+  },
+  "homepage": "https://github.com/neo4j-labs/meta-knowledge-graph",
+  "repository": "https://github.com/neo4j-labs/meta-knowledge-graph",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "mcp",
+    "memory",
+    "neo4j",
+    "knowledge-graph",
+    "hooks"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Meta Knowledge Graph",
+    "shortDescription": "Neo4j-backed agent memory for Codex",
+    "longDescription": "Meta Knowledge Graph packages a Neo4j-backed memory MCP server plus Codex skills that mirror the Claude Code commands. Use it to recall project and user memory, capture durable learnings, and run the RoadFlex sales demo from Codex.",
+    "developerName": "Neo4j Labs",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/neo4j-labs/meta-knowledge-graph",
+    "privacyPolicyURL": "https://neo4j.com/privacy-policy/",
+    "termsOfServiceURL": "https://neo4j.com/terms/",
+    "defaultPrompt": [
+      "Use MKG to recall memory before planning this task.",
+      "Set up the RoadFlex sales demo with MKG.",
+      "Capture this project decision as durable MKG memory."
+    ],
+    "brandColor": "#018B6A",
+    "screenshots": []
+  }
+}

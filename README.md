@@ -36,14 +36,15 @@ enterprise car-rental provider — ships in the repo; see
 
 ## Running MKG
 
-MKG is **harness-agnostic**, and there are two ways to run it:
+MKG is **harness-agnostic**, and can run in several ways:
 
 - **Claude Code** — install the packaged **plugin** (below). This is the quickest
   path and the one most users want.
-- **Codex and other harnesses** — they run today straight from a **repo
-  checkout**: the `.codex/` wiring is committed, so opening this repo Just Works,
-  and any harness with lifecycle hooks can drive the same scripts. Dedicated
-  plugins for Codex and other harnesses are on the roadmap.
+- **Codex** — install the packaged **plugin** for lifecycle hooks, the MCP server,
+  and Codex skills, or run straight from a **repo checkout** with the committed
+  `.codex/` wiring.
+- **Other harnesses** — any MCP-capable harness with lifecycle hooks can drive the
+  same shared scripts.
 
 Either way MKG is two halves — lifecycle **hooks** (capture + recall) and an
 **MCP server** (Neo4j / BigQuery / neocarta tools) — and the only host
@@ -114,7 +115,47 @@ Resolution order (first existing wins): `MKG_ENV_FILE` → `<project>/.env`
 the dir with `MKG_CONFIG_DIR` or `XDG_CONFIG_HOME`. Start a new session after
 changing credentials.
 
-### Codex
+### Codex (plugin)
+
+The Codex plugin mirrors the Claude Code plugin as closely as Codex's plugin
+surface currently allows:
+
+- [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json) packages the plugin
+  metadata, Codex skills, and MCP server declaration.
+- [`hooks.json`](hooks.json) is the plugin-discovered Codex hook config. Its
+  commands run the canonical scripts from the installed plugin cache with
+  `uv run --script`.
+- [`skills/`](skills/) exposes Codex equivalents of the Claude Code commands:
+  `mkg-start`, `mkg-orchestrate`, `sales-agent-demo`, and `mkg-recall`.
+- [`.mcp.json`](.mcp.json) is shared with the Claude Code plugin and starts the
+  same `meta-knowledge-graph` MCP server from the installed plugin cache or repo
+  checkout.
+
+Command and skill ownership is deliberately split by host:
+
+- [`commands/`](commands/) is the Claude Code slash-command surface and the
+  canonical procedure source.
+- [`skills/`](skills/) is the Codex plugin surface. Each Codex skill is a thin
+  adapter that reads the matching `commands/*.md` file where one exists, then
+  follows that procedure with Codex tools and naming.
+
+Codex also supports a repo-local checkout mode:
+[`.codex/hooks.json`](.codex/hooks.json) wires the same lifecycle capture and
+recall scripts through `git rev-parse --show-toplevel`, which is convenient when
+developing MKG from this repository. Installed plugins use the root
+[`hooks.json`](hooks.json) instead, so the hook commands resolve the plugin cache
+rather than the user's active project checkout.
+
+For local marketplace testing, point Codex at a real marketplace directory whose
+`plugins/meta-knowledge-graph` entry is a copy of this checkout or a dedicated
+plugin working tree. Avoid a symlink from `plugins/meta-knowledge-graph` back to
+the repo root; tools that follow symlinks can recurse through
+`plugins/meta-knowledge-graph/plugins/...`.
+
+Start a new Codex thread after install so the plugin hooks, skills, and MCP tools
+are picked up.
+
+### Codex (repo checkout)
 
 Open this repo in Codex and it works out of the box —
 [`.codex/config.toml`](.codex/config.toml) wires the same MCP server (with
@@ -136,8 +177,7 @@ approval_mode = "approve"
 
 Credentials are read from `~/.config/meta-knowledge-graph/.env` exactly as for
 Claude Code. Codex doesn't currently document a `SessionEnd` hook, so MKG only
-wires Stop-time extraction for Codex. A dedicated Codex *plugin* (like the Claude
-Code one above) is planned.
+wires Stop-time extraction for Codex.
 
 ### Claude Desktop & other harnesses
 
@@ -169,6 +209,7 @@ Iterate against your working tree without touching the marketplace or cache:
 
 ```
 claude --plugin-dir /path/to/meta-knowledge-graph     # loads from the repo, this session only
+codex plugin add meta-knowledge-graph@<local-marketplace>  # reloads a local Codex marketplace install
 ```
 
 In a repo checkout the project-local `.env` takes precedence, so demo creds stay
@@ -184,6 +225,7 @@ Tests and manifest validation:
 ```
 uv run python -m pytest tests/ -v
 claude plugin validate .
+uv run python ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .
 ```
 
 **Publishing a release** (so `claude plugin update` surfaces it — a version bump
@@ -459,9 +501,9 @@ To preview the generated dataset without touching any database:
 ### 3. Register the MCP server and hooks
 
 See [Running MKG](#running-mkg) above for your harness — Claude Code via the
-plugin, Codex via [`.codex/config.toml`](.codex/config.toml) and
-[`.codex/hooks.json`](.codex/hooks.json), or any custom harness that can spawn
-an MCP server and fire lifecycle hooks.
+plugin, Codex via the plugin's [`hooks.json`](hooks.json) or repo-local
+[`.codex/config.toml`](.codex/config.toml) / [`.codex/hooks.json`](.codex/hooks.json),
+or any custom harness that can spawn an MCP server and fire lifecycle hooks.
 The Neo4j-backed memory and graph tools mount in the minimum setup. With
 `DIFFBOT_TOKEN` set, the server mounts `search_news` and `enhance_entity`. With
 `BIGQUERY_MCP_URL` set and Google auth available, it mounts

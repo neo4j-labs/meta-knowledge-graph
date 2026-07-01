@@ -1461,6 +1461,62 @@ class ProjectHookTests(unittest.TestCase):
                 event,
             )
 
+    def test_codex_plugin_packages_root_hooks_without_manifest_field(self) -> None:
+        manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text())
+        plugin_config = json.loads((ROOT / "hooks.json").read_text())
+        checkout_config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
+
+        self.assertNotIn("hooks", manifest)
+        self.assertEqual(set(plugin_config["hooks"].keys()), set(checkout_config["hooks"].keys()))
+        self.assertIn("SessionStart", plugin_config["hooks"])
+        self.assertIn("Stop", plugin_config["hooks"])
+        self.assertNotIn("SessionEnd", plugin_config["hooks"])
+
+    def test_codex_plugin_hooks_resolve_from_installed_plugin_root(self) -> None:
+        config = json.loads((ROOT / "hooks.json").read_text())
+        commands = [
+            hook["command"]
+            for groups in config["hooks"].values()
+            for group in groups
+            for hook in group["hooks"]
+        ]
+
+        self.assertTrue(commands)
+        for command in commands:
+            self.assertIn("CODEX_PLUGIN_ROOT", command)
+            self.assertIn("MKG_HOOK_ROOT", command)
+            self.assertIn("uv run --script", command)
+            self.assertNotIn("git rev-parse", command)
+            self.assertNotIn("--project", command)
+
+        stop_commands = [
+            hook["command"] for hook in config["hooks"]["Stop"][0]["hooks"]
+        ]
+        self.assertIn("hooks/log_event.py", stop_commands[0])
+        self.assertIn("--client codex", stop_commands[0])
+        self.assertIn("hooks/process_project.py", stop_commands[1])
+        self.assertIn("--mode turn --background", stop_commands[1])
+        self.assertIn("hooks/consolidate_system_prompt.py", stop_commands[2])
+        self.assertIn("--background", stop_commands[2])
+
+    def test_codex_checkout_hooks_resolve_from_repo_root(self) -> None:
+        config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
+        commands = [
+            hook["command"]
+            for groups in config["hooks"].values()
+            for group in groups
+            for hook in group["hooks"]
+        ]
+
+        self.assertTrue(commands)
+        for command in commands:
+            self.assertIn("git rev-parse --show-toplevel", command)
+            self.assertIn("MKG_HOOK_ROOT", command)
+            self.assertIn("uv run --script", command)
+            self.assertNotIn("CODEX_PLUGIN_ROOT", command)
+            self.assertNotIn("--project", command)
+            self.assertNotIn("--no-sync", command)
+
     def test_claude_session_end_does_not_run_memory_extraction(self) -> None:
         for hooks_path in (
             ROOT / ".claude" / "settings.json",

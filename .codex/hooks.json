@@ -6,11 +6,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/inject_system_prompt.py\""
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/inject_system_prompt.py\""
           },
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/inject_project_context.py\""
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/inject_project_context.py\""
           }
         ]
       },
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
           }
         ]
       },
@@ -67,7 +67,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/ingest_diffbot.py\""
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/ingest_diffbot.py\""
           }
         ]
       },
@@ -76,7 +76,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/capture_query_failures.py\""
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/capture_query_failures.py\""
           }
         ]
       }
@@ -86,7 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -96,7 +96,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -106,11 +106,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/inject_project_context.py\""
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/inject_project_context.py\""
           },
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -120,7 +120,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
           }
         ]
       }
@@ -130,15 +130,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/log_event.py\" --client codex"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
           },
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/process_project.py\" --mode turn --background"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/process_project.py\" --mode turn --background"
           },
           {
             "type": "command",
-            "command": "uv run --project \"$(git rev-parse --show-toplevel)\" --no-sync python \"$(git rev-parse --show-toplevel)/hooks/consolidate_system_prompt.py\" --background"
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/consolidate_system_prompt.py\" --background"
           }
         ]
       }

@@ -41,6 +41,8 @@ def _session_start_commands(hooks_path: Path) -> list[str]:
 
 def test_plugin_session_start_hooks_can_bootstrap_uv_environment() -> None:
     for hooks_path in (
+        ROOT / "hooks.json",
+        ROOT / ".codex" / "hooks.json",
         ROOT / "hooks" / "hooks.json",
         ROOT / ".claude" / "settings.json",
     ):
