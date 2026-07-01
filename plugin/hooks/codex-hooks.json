@@ -6,11 +6,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/inject_system_prompt.py\""
+            "command": "HOOK=\"inject_system_prompt.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\""
           },
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/inject_project_context.py\""
+            "command": "HOOK=\"inject_project_context.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\""
           }
         ]
       },
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
+            "command": "HOOK=\"log_event.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --client codex"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
+            "command": "HOOK=\"log_event.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --client codex"
           }
         ]
       }
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
+            "command": "HOOK=\"log_event.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --client codex"
           }
         ]
       }
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
+            "command": "HOOK=\"log_event.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --client codex"
           }
         ]
       }
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
+            "command": "HOOK=\"log_event.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --client codex"
           }
         ]
       },
@@ -67,7 +67,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/ingest_diffbot.py\""
+            "command": "HOOK=\"ingest_diffbot.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\""
           }
         ]
       },
@@ -76,7 +76,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/capture_query_failures.py\""
+            "command": "HOOK=\"capture_query_failures.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\""
           }
         ]
       }
@@ -86,7 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
+            "command": "HOOK=\"log_event.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --client codex"
           }
         ]
       }
@@ -96,7 +96,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
+            "command": "HOOK=\"log_event.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --client codex"
           }
         ]
       }
@@ -106,11 +106,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/inject_project_context.py\""
+            "command": "HOOK=\"inject_project_context.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\""
           },
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
+            "command": "HOOK=\"log_event.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --client codex"
           }
         ]
       }
@@ -120,7 +120,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
+            "command": "HOOK=\"log_event.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --client codex"
           }
         ]
       }
@@ -130,15 +130,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/log_event.py\" --client codex"
+            "command": "HOOK=\"log_event.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --client codex"
           },
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/process_project.py\" --mode turn --background"
+            "command": "HOOK=\"process_project.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --mode turn --background"
           },
           {
             "type": "command",
-            "command": "ROOT=\"${CODEX_PLUGIN_ROOT:-$PWD}\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/consolidate_system_prompt.py\" --background"
+            "command": "HOOK=\"consolidate_system_prompt.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\" --background"
           }
         ]
       }

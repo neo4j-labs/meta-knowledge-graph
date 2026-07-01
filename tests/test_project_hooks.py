@@ -1490,19 +1490,25 @@ class ProjectHookTests(unittest.TestCase):
         self.assertTrue(commands)
         for command in commands:
             self.assertIn("CODEX_PLUGIN_ROOT", command)
+            self.assertIn("plugins/cache", command)
             self.assertIn("MKG_HOOK_ROOT", command)
             self.assertIn("uv run --script", command)
+            self.assertIn("installed Codex plugin cache", command)
             self.assertNotIn("git rev-parse", command)
+            self.assertNotIn("CODEX_PLUGIN_ROOT:-$PWD", command)
+            self.assertNotIn("MKG_PLUGIN_ROOT", command)
+            self.assertNotIn("CLAUDE_PLUGIN_ROOT", command)
+            self.assertNotIn("$PWD/hooks", command)
             self.assertNotIn("--project", command)
 
         stop_commands = [
             hook["command"] for hook in config["hooks"]["Stop"][0]["hooks"]
         ]
-        self.assertIn("hooks/log_event.py", stop_commands[0])
+        self.assertIn("log_event.py", stop_commands[0])
         self.assertIn("--client codex", stop_commands[0])
-        self.assertIn("hooks/process_project.py", stop_commands[1])
+        self.assertIn("process_project.py", stop_commands[1])
         self.assertIn("--mode turn --background", stop_commands[1])
-        self.assertIn("hooks/consolidate_system_prompt.py", stop_commands[2])
+        self.assertIn("consolidate_system_prompt.py", stop_commands[2])
         self.assertIn("--background", stop_commands[2])
 
     def test_codex_checkout_hooks_resolve_from_repo_root(self) -> None:
