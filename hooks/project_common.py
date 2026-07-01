@@ -220,16 +220,21 @@ def llm_ready(model: str | None = None) -> bool:
 
 
 def resolve_llm_model(preferred: str) -> str:
-    """Return the first ready model: ``preferred``, then the ``LLM_MODEL`` env var.
+    """Return the first model that can actually authenticate: ``preferred``,
+    then an explicit ``LLM_MODEL`` override, then the generic litellm default.
 
-    Falls back so that a project-specific ``LLM_MODEL`` (e.g. an OpenAI key) is
-    used when the default Claude/Anthropic model cannot authenticate.
+    This is what makes the Claude Code fallback "litellm, whatever provider is
+    configured" rather than Anthropic-specific: when the preferred Claude model
+    has no subscription OAuth token (and no Anthropic key), a batch still runs on
+    any provider whose key is present — an ``LLM_MODEL`` override, or otherwise
+    the default litellm model (e.g. OpenAI via ``OPENAI_API_KEY``) — instead of
+    skipping.
     """
     if llm_ready(preferred):
         return preferred
-    env_model = os.environ.get("LLM_MODEL", "").strip()
-    if env_model and env_model != preferred and llm_ready(env_model):
-        return env_model
+    for candidate in (os.environ.get("LLM_MODEL", "").strip(), DEFAULT_LLM_MODEL):
+        if candidate and candidate != preferred and llm_ready(candidate):
+            return candidate
     return preferred
 
 
@@ -242,17 +247,16 @@ def llm_readiness_status(model: str | None = None) -> tuple[bool, str | None]:
     model_name = model or llm_model()
 
     oauth_reason: str | None = None
-    if _is_anthropic_litellm_model(model_name) and not _has_explicit_anthropic_litellm_auth():
-        credential = _read_claude_oauth_token()
-        if credential:
+    if _is_anthropic_litellm_model(model_name):
+        # Claude Code default: prefer the logged-in Claude subscription OAuth
+        # token, then fall back to an explicit ANTHROPIC_API_KEY.
+        if _read_claude_oauth_token() or _has_explicit_anthropic_litellm_auth():
             return True, None
         oauth_reason = (
-            "Claude/Anthropic model selected, but no explicit Anthropic auth is "
-            "configured and no valid Claude Code OAuth token was readable from "
-            "the platform credential store or CLAUDE_CODE_OAUTH_TOKEN"
+            "Claude/Anthropic model selected, but no valid Claude Code "
+            "subscription OAuth token was readable (platform credential store / "
+            "CLAUDE_CODE_OAUTH_TOKEN) and no ANTHROPIC_API_KEY is configured"
         )
-    elif _litellm_api_key_for_model(model_name):
-        return True, None
 
     # litellm auto-loads a .env on its first import in the default DEV mode,
     # which would silently repopulate a key the caller deliberately unset; pin
@@ -511,15 +515,18 @@ def _has_explicit_anthropic_litellm_auth() -> bool:
 def _litellm_api_key_for_model(model: str) -> str | None:
     """Return a call-scoped LiteLLM API key override, if MKG should supply one.
 
-    For Claude/Anthropic models, LiteLLM accepts Claude Code OAuth tokens via
-    the ``api_key`` parameter. Its Anthropic adapter detects ``sk-ant-oat...``
+    For Claude/Anthropic models (the Claude Code hook default) MKG prefers the
+    logged-in Claude *subscription*: it injects a Claude Code OAuth token via the
+    ``api_key`` parameter, and LiteLLM's Anthropic adapter detects ``sk-ant-oat...``
     tokens and sends them as ``Authorization: Bearer`` with the required OAuth
-    beta header. Explicit MKG-owned Anthropic key/token settings win; base-url
-    routing can still use the Claude Code OAuth token.
+    beta header. When no subscription token is readable this returns ``None`` so
+    LiteLLM falls back to an explicit ``ANTHROPIC_API_KEY`` from the environment.
+
+    Non-Anthropic models (the Codex/dev default, e.g. ``gpt-5.4-mini``) route
+    entirely through LiteLLM provider keys, so this returns ``None`` and LiteLLM
+    reads the provider key (``OPENAI_API_KEY`` etc.) from the environment itself.
     """
     if not _is_anthropic_litellm_model(model):
-        return None
-    if _has_explicit_anthropic_litellm_auth():
         return None
     credential = _read_claude_oauth_token()
     return credential.token if credential else None

@@ -104,8 +104,11 @@ NEO4J_URI=neo4j+s://xxxx.databases.neo4j.io
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=change-me
 NEO4J_DATABASE=neo4j
-OPENAI_API_KEY=sk-...          # optional: memory extraction + embeddings
-# ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY / DIFFBOT_TOKEN also honored
+# LLM for memory extraction (all optional; Claude Code prefers your subscription):
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # preferred: `claude setup-token`
+OPENAI_API_KEY=sk-...                      # litellm fallback (any provider) + embeddings
+ANTHROPIC_API_KEY=sk-ant-api03-...         # litellm fallback (any provider) also works
+# GEMINI_API_KEY / OPENROUTER_API_KEY / LLM_MODEL / DIFFBOT_TOKEN also honored
 EOF
 chmod 600 ~/.config/meta-knowledge-graph/.env
 ```
@@ -425,13 +428,19 @@ NEO4J_PASSWORD=<your-password>
 NEO4J_DATABASE=neo4j
 
 # Required: LLM calls for memory extraction. Calls route through litellm.
-# Codex/dev runs default to OpenAI's model, so set OPENAI_API_KEY. Claude Code
-# hook batches default to an Anthropic/Claude model when LLM_MODEL is unset, and
-# can reuse a logged-in Claude Code subscription if Anthropic key vars are unset;
-# MKG reads a fresh Claude OAuth token from the platform credential store at call
-# time.
+# Codex/dev runs default to OpenAI's model (litellm), so set OPENAI_API_KEY.
+# Claude Code hook batches default to a Claude model and PREFER the logged-in
+# Claude subscription (a Claude Code OAuth token from CLAUDE_CODE_OAUTH_TOKEN or
+# the platform credential store). With no subscription token they fall back to
+# litellm on whatever provider is configured here — an LLM_MODEL override, or any
+# provider key below (OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / ...).
 OPENAI_API_KEY=<your-openai-api-key>
-# Optional explicit model override for every harness:
+# Optional: reuse your Claude subscription for Claude Code hook extraction
+# (preferred over any API key). Mint one with: claude setup-token
+# CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+# Optional: any litellm provider key also serves as the fallback, e.g.:
+# ANTHROPIC_API_KEY=sk-ant-api03-...
+# Optional explicit model override for every harness (any litellm model):
 # LLM_MODEL=anthropic/claude-haiku-4-5
 
 # Optional: Diffbot live news / firmographic enrichment
