@@ -89,34 +89,96 @@ class ResolveTests(unittest.TestCase):
         )
         self.assertEqual(res["outcome"], "approved")
 
+    def test_already_learned_folds_into_canonical(self):
+        res = consistency_gate._resolve(
+            "cand", _neighbours("a", "b"), [], already_learned_of="a"
+        )
+        self.assertEqual(res["outcome"], "already_learned")
+        self.assertEqual(res["consistency"], "already_learned")
+        self.assertEqual(res["already_learned_ids"], ["a"])
+        self.assertEqual(res["superseded_ids"], [])
+
+    def test_veto_beats_already_learned(self):
+        # A genuine veto is still the most conservative outcome.
+        res = consistency_gate._resolve(
+            "cand",
+            _neighbours("a", "b"),
+            [{"existing_id": "b", "winner": "existing", "reason": "trusted"}],
+            already_learned_of="a",
+        )
+        self.assertEqual(res["outcome"], "rejected")
+        self.assertEqual(res["contradicted_by_ids"], ["b"])
+        self.assertEqual(res["already_learned_ids"], [])
+
+    def test_already_learned_beats_supersede(self):
+        # Restatement short-circuits before creating/superseding a new node.
+        res = consistency_gate._resolve(
+            "cand",
+            _neighbours("a", "b"),
+            [{"existing_id": "b", "winner": "new", "reason": "newer"}],
+            already_learned_of="a",
+        )
+        self.assertEqual(res["outcome"], "already_learned")
+        self.assertEqual(res["already_learned_ids"], ["a"])
+        self.assertEqual(res["superseded_ids"], [])
+
+    def test_already_learned_unknown_id_ignored(self):
+        res = consistency_gate._resolve(
+            "cand", _neighbours("a"), [], already_learned_of="ghost"
+        )
+        self.assertEqual(res["outcome"], "approved")
+        self.assertEqual(res["already_learned_ids"], [])
+
 
 class ParseJudgeTests(unittest.TestCase):
     def test_plain_json(self):
         out = consistency_gate._parse_judge(
             '{"contradictions": [{"existing_id": "a", "winner": "new", "reason": "r"}]}'
         )
-        self.assertEqual(out, [{"existing_id": "a", "winner": "new", "reason": "r"}])
+        self.assertEqual(
+            out,
+            {
+                "contradictions": [{"existing_id": "a", "winner": "new", "reason": "r"}],
+                "already_learned_of": None,
+            },
+        )
 
     def test_fenced_json(self):
         out = consistency_gate._parse_judge(
             '```json\n{"contradictions": []}\n```'
         )
-        self.assertEqual(out, [])
+        self.assertEqual(out, {"contradictions": [], "already_learned_of": None})
 
     def test_garbage_returns_empty(self):
-        self.assertEqual(consistency_gate._parse_judge("no json here"), [])
+        self.assertEqual(
+            consistency_gate._parse_judge("no json here"),
+            {"contradictions": [], "already_learned_of": None},
+        )
 
     def test_bad_winner_defaults_unclear(self):
         out = consistency_gate._parse_judge(
             '{"contradictions": [{"existing_id": "a", "winner": "maybe"}]}'
         )
-        self.assertEqual(out[0]["winner"], "unclear")
+        self.assertEqual(out["contradictions"][0]["winner"], "unclear")
 
     def test_missing_existing_id_dropped(self):
         out = consistency_gate._parse_judge(
             '{"contradictions": [{"winner": "new"}]}'
         )
-        self.assertEqual(out, [])
+        self.assertEqual(out["contradictions"], [])
+
+    def test_parses_already_learned_of(self):
+        out = consistency_gate._parse_judge(
+            '{"contradictions": [], "already_learned_of": "abc", "already_learned_reason": "same fact"}'
+        )
+        self.assertEqual(out["already_learned_of"], "abc")
+        self.assertEqual(out["contradictions"], [])
+
+    def test_already_learned_null_normalizes_to_none(self):
+        out = consistency_gate._parse_judge(
+            '{"contradictions": [], "already_learned_of": null}'
+        )
+        self.assertIsNone(out["already_learned_of"])
 
 
 class AttachEmbeddingsTests(unittest.TestCase):

@@ -13,9 +13,12 @@ approval gate*. It runs only at Stop, never at SessionEnd:
    decision step.
 3. An LLM judge decides whether the candidate genuinely *contradicts* any of
    those neighbours (as opposed to merely resembling them) and, per conflict,
-   which side is more likely correct.
+   which side is more likely correct. It also flags whether the candidate is
+   simply *already learned* — a restatement fully covered by one existing item.
 4. Resolve: newer information is preferred but not absolute.
    - no contradiction .......... candidate -> ``approved``
+   - already learned ........... candidate -> ``already_learned`` (``ALREADY_LEARNED_FROM``);
+     the canonical item's ``support_count`` is reinforced (+1) and its confidence raised
    - candidate wins a conflict .. candidate -> ``approved``; loser -> ``rejected`` (``SUPERSEDES``)
    - an existing item vetoes .... candidate -> ``rejected`` (``CONTRADICTED_BY``); existing stays approved
    - only ambiguous conflicts ... candidate stays ``candidate`` (``CONTRADICTS``) for the human gate
@@ -273,13 +276,21 @@ def _build_judge_prompt(
     neighbour_block = "\n".join(
         _format_neighbour(i, item) for i, item in enumerate(neighbours)
     )
-    return f"""A new {kind} candidate was just extracted for this project. Decide whether it \
-GENUINELY CONTRADICTS any of the existing approved {kind}s below.
+    return f"""A new {kind} candidate was just extracted for this project. Make TWO \
+independent judgements about it against the existing approved {kind}s below.
 
-A contradiction means the two statements cannot both be true at the same time \
-(e.g. "we use REST" vs "we use GraphQL", "deploy on Fridays" vs "never deploy on \
-Fridays"). Do NOT flag items that merely share a topic, refine, add detail to, or \
-restate an existing item — those are not contradictions.
+(1) CONTRADICTION: does the candidate GENUINELY CONTRADICT any existing item — \
+the two statements cannot both be true at the same time (e.g. "we use REST" vs \
+"we use GraphQL", "deploy on Fridays" vs "never deploy on Fridays")?
+
+(2) ALREADY LEARNED: is the candidate simply a RESTATEMENT of one existing item — \
+the same fact/decision in different words, adding no materially new constraint or \
+detail (a paraphrase, or a strict subset of what the existing item already says)? \
+If it refines or adds a genuinely new constraint, it is NOT already learned and \
+should be treated as new.
+
+A single existing item is never both contradicted and already-learned, and \
+merely sharing a topic is neither.
 
 NEW {kind.upper()} CANDIDATE:
 {chr(10).join(candidate_lines)}
@@ -294,14 +305,20 @@ clearly more reliable — much higher support_count/confidence, or the new
 candidate looks mistaken or speculative. Use "unclear" only when you truly
 cannot tell which is right.
 
+For "already learned", return the id of the single existing item the candidate
+restates, or null when the candidate carries new information.
+
 Return strict JSON of exactly this shape:
-{{"contradictions": [{{"existing_id": "<id from the list>", "winner": "new|existing|unclear", "reason": "<short>"}}]}}
-Return {{"contradictions": []}} when there is no genuine contradiction."""
+{{"contradictions": [{{"existing_id": "<id from the list>", "winner": "new|existing|unclear", "reason": "<short>"}}], "already_learned_of": "<id from the list or null>", "already_learned_reason": "<short or empty>"}}
+Return {{"contradictions": [], "already_learned_of": null}} when there is no contradiction and the candidate is new."""
 
 
-def _parse_judge(text: str) -> list[dict[str, Any]]:
+def _parse_judge(text: str) -> dict[str, Any]:
+    """Parse the judge reply into both dimensions: a cleaned ``contradictions``
+    list and a single ``already_learned_of`` id (or ``None``)."""
+    empty: dict[str, Any] = {"contradictions": [], "already_learned_of": None}
     if not text:
-        return []
+        return empty
     body = text.strip()
     if body.startswith("```"):
         body = body.split("```", 2)[1] if "```" in body[3:] else body.strip("`")
@@ -309,41 +326,45 @@ def _parse_judge(text: str) -> list[dict[str, Any]]:
             body = body.lstrip()[4:]
     start, end = body.find("{"), body.rfind("}")
     if start == -1 or end == -1:
-        return []
+        return empty
     try:
         parsed = json.loads(body[start : end + 1])
     except (json.JSONDecodeError, ValueError):
-        return []
-    items = parsed.get("contradictions") if isinstance(parsed, dict) else None
-    if not isinstance(items, list):
-        return []
+        return empty
+    if not isinstance(parsed, dict):
+        return empty
     cleaned: list[dict[str, Any]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        existing_id = str(item.get("existing_id") or "").strip()
-        if not existing_id:
-            continue
-        winner = str(item.get("winner") or "new").strip().lower()
-        if winner not in {"new", "existing", "unclear"}:
-            winner = "unclear"
-        cleaned.append(
-            {"existing_id": existing_id, "winner": winner, "reason": str(item.get("reason") or "")[:280]}
-        )
-    return cleaned
+    items = parsed.get("contradictions")
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            existing_id = str(item.get("existing_id") or "").strip()
+            if not existing_id:
+                continue
+            winner = str(item.get("winner") or "new").strip().lower()
+            if winner not in {"new", "existing", "unclear"}:
+                winner = "unclear"
+            cleaned.append(
+                {"existing_id": existing_id, "winner": winner, "reason": str(item.get("reason") or "")[:280]}
+            )
+    already = str(parsed.get("already_learned_of") or "").strip()
+    return {"contradictions": cleaned, "already_learned_of": already or None}
 
 
 def _resolve(
     candidate_id: str,
     neighbours: list[dict[str, Any]],
     contradictions: list[dict[str, Any]],
+    already_learned_of: str | None = None,
 ) -> dict[str, Any]:
-    """Map judged contradictions onto a status transition for one candidate.
+    """Map judged contradictions + already-learned onto a status transition.
 
-    Precedence (conservative): an "existing" veto beats a "new" win, which beats
-    an "unclear". So a candidate is only rejected when the judge is confident an
-    existing item is more reliable, and only auto-approved as a supersede when no
-    existing item vetoes it.
+    Precedence (conservative): an "existing" veto beats an already-learned merge,
+    which beats a "new" win, which beats an "unclear". So a candidate is only
+    rejected when the judge is confident an existing item is more reliable; only
+    folded in as already-learned when nothing vetoes it; and only auto-approved as
+    a supersede when it is neither vetoed nor a restatement.
     """
     valid_ids = {item["id"] for item in neighbours}
     superseded, vetoed, unclear = [], [], []
@@ -358,8 +379,16 @@ def _resolve(
         else:
             unclear.append(existing_id)
 
+    already_id = (
+        already_learned_of
+        if already_learned_of in valid_ids and already_learned_of != candidate_id
+        else None
+    )
+
     if vetoed:
         outcome, consistency = "rejected", "vetoed"
+    elif already_id:
+        outcome, consistency = "already_learned", "already_learned"
     elif superseded:
         outcome, consistency = "approved", "superseded_conflicts"
     elif unclear:
@@ -374,6 +403,7 @@ def _resolve(
         "superseded_ids": sorted(set(superseded)) if outcome == "approved" else [],
         "contradicted_by_ids": sorted(set(vetoed)) if outcome == "rejected" else [],
         "unclear_ids": sorted(set(unclear)) if outcome == "candidate" else [],
+        "already_learned_ids": [already_id] if outcome == "already_learned" else [],
     }
 
 
@@ -416,6 +446,21 @@ def _apply_resolutions(tx, *, label: str, rows: list[dict[str, Any]], model: str
             MERGE (c)-[r:CONTRADICTS]->(other)
             SET r.created_at = datetime($timestamp)
             RETURN count(*) AS unclear
+        }}
+        CALL {{
+            WITH c, row
+            UNWIND row.already_learned_ids AS aid
+            MATCH (canon:{label} {{id: aid}})
+            SET canon.support_count = coalesce(canon.support_count, 0) + 1,
+                canon.confidence = CASE
+                    WHEN coalesce(canon.confidence, 0.0) < coalesce(c.confidence, 0.0)
+                    THEN c.confidence ELSE canon.confidence END,
+                canon.last_reinforced_at = datetime($timestamp),
+                c.already_learned_from = aid,
+                c.already_learned_at = datetime($timestamp)
+            MERGE (c)-[r:ALREADY_LEARNED_FROM]->(canon)
+            SET r.created_at = datetime($timestamp)
+            RETURN count(*) AS already_learned
         }}
         RETURN count(*) AS updated
         """,
@@ -480,6 +525,7 @@ def _gate_one_label(
             )
             continue
         contradictions: list[dict[str, Any]] = []
+        already_learned_of: str | None = None
         if neighbours:
             try:
                 judgement = llm_complete(
@@ -489,7 +535,9 @@ def _gate_one_label(
                     ],
                     model=model,
                 )
-                contradictions = _parse_judge(judgement)
+                verdict = _parse_judge(judgement)
+                contradictions = verdict["contradictions"]
+                already_learned_of = verdict["already_learned_of"]
             except Exception as exc:
                 print(
                     f"[consistency_gate] judge failed for {label} {candidate_id} "
@@ -497,7 +545,9 @@ def _gate_one_label(
                     flush=True,
                 )
                 continue
-        resolutions.append(_resolve(candidate_id, neighbours, contradictions))
+        resolutions.append(
+            _resolve(candidate_id, neighbours, contradictions, already_learned_of)
+        )
 
     if not resolutions:
         return 0
