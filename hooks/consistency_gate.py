@@ -420,8 +420,7 @@ def _apply_resolutions(tx, *, label: str, rows: list[dict[str, Any]], model: str
             c.consistency_checked_at = datetime($timestamp),
             c.consistency_model = $model
         WITH c, row
-        CALL {{
-            WITH c, row
+        CALL (c, row) {{
             UNWIND row.superseded_ids AS sid
             MATCH (old:{label} {{id: sid}})
             SET old.status = 'rejected',
@@ -431,24 +430,21 @@ def _apply_resolutions(tx, *, label: str, rows: list[dict[str, Any]], model: str
             SET r.created_at = datetime($timestamp)
             RETURN count(*) AS superseded
         }}
-        CALL {{
-            WITH c, row
+        CALL (c, row) {{
             UNWIND row.contradicted_by_ids AS xid
             MATCH (other:{label} {{id: xid}})
             MERGE (c)-[r:CONTRADICTED_BY]->(other)
             SET r.created_at = datetime($timestamp)
             RETURN count(*) AS vetoed
         }}
-        CALL {{
-            WITH c, row
+        CALL (c, row) {{
             UNWIND row.unclear_ids AS uid
             MATCH (other:{label} {{id: uid}})
             MERGE (c)-[r:CONTRADICTS]->(other)
             SET r.created_at = datetime($timestamp)
             RETURN count(*) AS unclear
         }}
-        CALL {{
-            WITH c, row
+        CALL (c, row) {{
             UNWIND row.already_learned_ids AS aid
             MATCH (canon:{label} {{id: aid}})
             SET canon.support_count = coalesce(canon.support_count, 0) + 1,
