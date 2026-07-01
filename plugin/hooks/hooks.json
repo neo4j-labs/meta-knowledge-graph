@@ -1,0 +1,152 @@
+{
+  "description": "MKG capture/recall hooks. Resolves its own root: ${CLAUDE_PLUGIN_ROOT} when installed as a plugin, else ${CLAUDE_PROJECT_DIR} when committed in-repo. Each hook is a self-contained PEP 723 uv script (`uv run --script`): uv builds and caches a tiny per-script environment from the inline `# /// script` dependencies (just `neo4j`, plus `litellm` for the background extraction scripts) instead of syncing the full MCP-server project venv. The first run installs ~2 packages and caches the env; later runs reuse it (~0.1s, no install). No bootstrap or `--no-sync` ordering is required.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/inject_system_prompt.py\""
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/inject_project_context.py\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/inject_project_context.py\""
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*__(enhance_entity|search_news)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/ingest_diffbot.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*__(bigquery_execute_query|neo4j_read_cypher)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/capture_query_failures.py\""
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/process_project.py\" --mode turn --background"
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/consolidate_system_prompt.py\" --background"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/consolidate_system_prompt.py\" --background"
+          }
+        ]
+      }
+    ]
+  }
+}

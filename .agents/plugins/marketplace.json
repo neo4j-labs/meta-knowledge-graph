@@ -1,0 +1,20 @@
+{
+  "name": "mkg",
+  "interface": {
+    "displayName": "Meta Knowledge Graph"
+  },
+  "plugins": [
+    {
+      "name": "meta-knowledge-graph",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

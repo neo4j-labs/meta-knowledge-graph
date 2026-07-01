@@ -21,7 +21,7 @@ def test_neocarta_transport_uses_project_environment_entrypoint() -> None:
 
 
 def test_plugin_mcp_server_uses_project_uv_environment() -> None:
-    mcp_config = json.loads((ROOT / ".mcp.json").read_text())
+    mcp_config = json.loads((ROOT / "plugin" / ".mcp.json").read_text())
     mkg_server = mcp_config["mcpServers"]["meta-knowledge-graph"]
 
     assert mkg_server["command"] == "bash"
@@ -41,9 +41,10 @@ def _session_start_commands(hooks_path: Path) -> list[str]:
 
 def test_plugin_session_start_hooks_can_bootstrap_uv_environment() -> None:
     for hooks_path in (
-        ROOT / "hooks.json",
+        ROOT / "plugin" / "hooks" / "codex-hooks.json",
         ROOT / ".codex" / "hooks.json",
         ROOT / "hooks" / "hooks.json",
+        ROOT / "plugin" / "hooks" / "hooks.json",
         ROOT / ".claude" / "settings.json",
     ):
         commands = _session_start_commands(hooks_path)

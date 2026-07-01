@@ -99,7 +99,7 @@ class SalesAgentSeedAllTests(unittest.TestCase):
         calls: list[str] = []
 
         with patch.dict(os.environ, BASELINE_ENV, clear=True):
-            with patch.object(seed_all, "load_dotenv", return_value=True):
+            with patch.object(seed_all, "load_seed_env", return_value=None):
                 with patch.object(seed_all, "_verify_neo4j", return_value=None):
                     with patch.object(
                         seed_all,
@@ -122,7 +122,7 @@ class SalesAgentSeedAllTests(unittest.TestCase):
         }
 
         with patch.dict(os.environ, env, clear=True):
-            with patch.object(seed_all, "load_dotenv", return_value=True):
+            with patch.object(seed_all, "load_seed_env", return_value=None):
                 with patch.object(seed_all, "_verify_neo4j", return_value=None):
                     with patch.object(
                         seed_all,

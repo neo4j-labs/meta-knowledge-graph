@@ -236,7 +236,7 @@ def _fake_litellm(content: str):
         def __init__(self, text):
             self.choices = [_Choice(text)]
 
-    def completion(model, messages):  # noqa: ARG001
+    def completion(**_kwargs):
         return _Response(content)
 
     module.completion = completion

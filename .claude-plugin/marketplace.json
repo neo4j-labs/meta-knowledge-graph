@@ -5,7 +5,8 @@
   "plugins": [
     {
       "name": "meta-knowledge-graph",
-      "source": "./",
+      "version": "0.1.17",
+      "source": "./plugin",
       "description": "Neo4j-backed agent memory: capture/recall hooks + MCP server."
     }
   ]

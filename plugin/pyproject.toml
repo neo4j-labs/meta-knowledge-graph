@@ -1,0 +1,24 @@
+[project]
+name = "meta-knowledge-graph"
+version = "0.1.1"
+description = "Meta Knowledge Graph: MCP server and hooks for Neo4j-backed agent memory"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.10.5,<3",
+    "httpx>=0.28.0,<1",
+    "litellm>=1.40.0",
+    "neo4j>=5.26.0",
+    "pydantic>=2.10.1",
+    "neo4j-mcp-server>=1.5.0",
+    "python-dotenv>=1.0.0",
+    "google-auth>=2.0.0",
+    "google-cloud-bigquery>=3.41.0",
+    "neocarta>=0.7.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+meta-knowledge-graph = "meta_knowledge_graph:main"

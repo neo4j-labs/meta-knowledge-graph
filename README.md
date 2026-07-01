@@ -117,40 +117,47 @@ changing credentials.
 
 ### Codex (plugin)
 
-The Codex plugin mirrors the Claude Code plugin as closely as Codex's plugin
-surface currently allows:
+The installable plugin package lives in [`plugin/`](plugin/), following the
+same layout as `claude-mem`: the repo root is the marketplace/catalog checkout,
+and `plugin/` is the versioned payload copied into the host plugin cache.
 
-- [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json) packages the plugin
-  metadata, Codex skills, and MCP server declaration.
-- [`hooks.json`](hooks.json) is the plugin-discovered Codex hook config. Its
-  commands run the canonical scripts from the installed plugin cache with
-  `uv run --script`.
-- [`skills/`](skills/) exposes Codex equivalents of the Claude Code commands:
+- [`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json) is the
+  Codex marketplace catalog and points at `./plugin`.
+- [`plugin/.codex-plugin/plugin.json`](plugin/.codex-plugin/plugin.json)
+  packages the plugin metadata, Codex skills, hooks, and MCP server declaration.
+- [`plugin/hooks/codex-hooks.json`](plugin/hooks/codex-hooks.json) is the Codex
+  hook config. Its commands run the packaged hook scripts with `uv run --script`.
+- [`plugin/codex-skills/`](plugin/codex-skills/) exposes Codex equivalents of
+  the Claude Code commands:
   `mkg-start`, `mkg-orchestrate`, `sales-agent-demo`, and `mkg-recall`.
-- [`.mcp.json`](.mcp.json) is shared with the Claude Code plugin and starts the
-  same `meta-knowledge-graph` MCP server from the installed plugin cache or repo
-  checkout.
+- [`plugin/.mcp.json`](plugin/.mcp.json) is shared with the Claude Code plugin
+  and starts the same `meta-knowledge-graph` MCP server from the installed
+  plugin cache or repo checkout.
+
+Install from the remote marketplace repo:
+
+```
+codex plugin marketplace add neo4j-labs/meta-knowledge-graph
+codex plugin add meta-knowledge-graph@mkg
+```
 
 Command and skill ownership is deliberately split by host:
 
 - [`commands/`](commands/) is the Claude Code slash-command surface and the
   canonical procedure source.
-- [`skills/`](skills/) is the Codex plugin surface. Each Codex skill is a thin
-  adapter that reads the matching `commands/*.md` file where one exists, then
-  follows that procedure with Codex tools and naming.
+- [`plugin/codex-skills/`](plugin/codex-skills/) is the Codex plugin surface.
+  Each Codex skill is a thin adapter that reads the matching packaged
+  `plugin/commands/*.md` file where one exists, then follows that procedure with
+  Codex tools and naming.
 
 Codex also supports a repo-local checkout mode:
 [`.codex/hooks.json`](.codex/hooks.json) wires the same lifecycle capture and
 recall scripts through `git rev-parse --show-toplevel`, which is convenient when
-developing MKG from this repository. Installed plugins use the root
-[`hooks.json`](hooks.json) instead, so the hook commands resolve the plugin cache
-rather than the user's active project checkout.
-
-For local marketplace testing, point Codex at a real marketplace directory whose
-`plugins/meta-knowledge-graph` entry is a copy of this checkout or a dedicated
-plugin working tree. Avoid a symlink from `plugins/meta-knowledge-graph` back to
-the repo root; tools that follow symlinks can recurse through
-`plugins/meta-knowledge-graph/plugins/...`.
+developing MKG from this repository. Installed plugins use
+[`plugin/hooks/codex-hooks.json`](plugin/hooks/codex-hooks.json) instead, so
+hook commands resolve the plugin cache rather than the user's active project
+checkout. The repo does not use a recursive
+`plugins/meta-knowledge-graph -> ..` symlink.
 
 Start a new Codex thread after install so the plugin hooks, skills, and MCP tools
 are picked up.
@@ -209,7 +216,8 @@ Iterate against your working tree without touching the marketplace or cache:
 
 ```
 claude --plugin-dir /path/to/meta-knowledge-graph     # loads from the repo, this session only
-codex plugin add meta-knowledge-graph@<local-marketplace>  # reloads a local Codex marketplace install
+codex plugin marketplace add /path/to/meta-knowledge-graph
+codex plugin add meta-knowledge-graph@mkg
 ```
 
 In a repo checkout the project-local `.env` takes precedence, so demo creds stay
@@ -225,7 +233,6 @@ Tests and manifest validation:
 ```
 uv run python -m pytest tests/ -v
 claude plugin validate .
-uv run python ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .
 ```
 
 **Publishing a release** (so `claude plugin update` surfaces it — a version bump
@@ -252,8 +259,9 @@ automatic — but the version bump is still what makes a new release visible.
 - `~/.claude/plugins/marketplaces/mkg/` — git clone of the repo (the catalog),
   refreshed by `marketplace update`.
 - `~/.claude/plugins/cache/mkg/meta-knowledge-graph/<version>/` — the
-  version-pinned copy that `$CLAUDE_PLUGIN_ROOT` resolves to at runtime, with its
-  own `.venv` (re-synced on the first session after each update).
+  version-pinned copy of `plugin/` that `$CLAUDE_PLUGIN_ROOT` resolves to at
+  runtime, with its own `.venv` (re-synced on the first session after each
+  update).
 
 ## Architecture
 
@@ -501,9 +509,11 @@ To preview the generated dataset without touching any database:
 ### 3. Register the MCP server and hooks
 
 See [Running MKG](#running-mkg) above for your harness — Claude Code via the
-plugin, Codex via the plugin's [`hooks.json`](hooks.json) or repo-local
-[`.codex/config.toml`](.codex/config.toml) / [`.codex/hooks.json`](.codex/hooks.json),
-or any custom harness that can spawn an MCP server and fire lifecycle hooks.
+plugin, Codex via the plugin's
+[`plugin/hooks/codex-hooks.json`](plugin/hooks/codex-hooks.json) or repo-local
+[`.codex/config.toml`](.codex/config.toml) /
+[`.codex/hooks.json`](.codex/hooks.json), or any custom harness that can spawn
+an MCP server and fire lifecycle hooks.
 The Neo4j-backed memory and graph tools mount in the minimum setup. With
 `DIFFBOT_TOKEN` set, the server mounts `search_news` and `enhance_entity`. With
 `BIGQUERY_MCP_URL` set and Google auth available, it mounts

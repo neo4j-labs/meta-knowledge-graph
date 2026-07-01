@@ -1461,19 +1461,25 @@ class ProjectHookTests(unittest.TestCase):
                 event,
             )
 
-    def test_codex_plugin_packages_root_hooks_without_manifest_field(self) -> None:
+    def test_codex_plugin_package_points_at_child_payload(self) -> None:
         manifest = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text())
-        plugin_config = json.loads((ROOT / "hooks.json").read_text())
+        package_manifest = json.loads((ROOT / "plugin" / ".codex-plugin" / "plugin.json").read_text())
+        plugin_config = json.loads((ROOT / "plugin" / "hooks" / "codex-hooks.json").read_text())
         checkout_config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
 
-        self.assertNotIn("hooks", manifest)
+        self.assertEqual(manifest["skills"], "./plugin/codex-skills/")
+        self.assertEqual(manifest["mcpServers"], "./plugin/.mcp.json")
+        self.assertEqual(manifest["hooks"], "./plugin/hooks/codex-hooks.json")
+        self.assertEqual(package_manifest["skills"], "./codex-skills/")
+        self.assertEqual(package_manifest["mcpServers"], "./.mcp.json")
+        self.assertEqual(package_manifest["hooks"], "./hooks/codex-hooks.json")
         self.assertEqual(set(plugin_config["hooks"].keys()), set(checkout_config["hooks"].keys()))
         self.assertIn("SessionStart", plugin_config["hooks"])
         self.assertIn("Stop", plugin_config["hooks"])
         self.assertNotIn("SessionEnd", plugin_config["hooks"])
 
     def test_codex_plugin_hooks_resolve_from_installed_plugin_root(self) -> None:
-        config = json.loads((ROOT / "hooks.json").read_text())
+        config = json.loads((ROOT / "plugin" / "hooks" / "codex-hooks.json").read_text())
         commands = [
             hook["command"]
             for groups in config["hooks"].values()
@@ -1521,6 +1527,7 @@ class ProjectHookTests(unittest.TestCase):
         for hooks_path in (
             ROOT / ".claude" / "settings.json",
             ROOT / "hooks" / "hooks.json",
+            ROOT / "plugin" / "hooks" / "hooks.json",
         ):
             with self.subTest(hooks_path=hooks_path):
                 config = json.loads(hooks_path.read_text())

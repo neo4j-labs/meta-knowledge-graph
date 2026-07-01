@@ -16,9 +16,9 @@
     "knowledge-graph",
     "hooks"
   ],
-  "skills": "./plugin/codex-skills/",
-  "mcpServers": "./plugin/.mcp.json",
-  "hooks": "./plugin/hooks/codex-hooks.json",
+  "skills": "./codex-skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/codex-hooks.json",
   "interface": {
     "displayName": "Meta Knowledge Graph",
     "shortDescription": "Neo4j-backed agent memory for Codex",
