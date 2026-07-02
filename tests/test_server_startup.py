@@ -33,13 +33,21 @@ def test_neocarta_transport_uses_project_environment_entrypoint() -> None:
     assert transport.env == {"NEO4J_URI": "bolt://example"}
 
 
-def test_plugin_mcp_server_uses_project_uv_environment() -> None:
+def test_plugin_mcp_server_prefers_cached_venv_with_uv_fallback() -> None:
     mcp_config = json.loads((ROOT / "plugin" / ".mcp.json").read_text())
     mkg_server = mcp_config["mcpServers"]["meta-knowledge-graph"]
+    launcher = (ROOT / "plugin" / "scripts" / "mcp-launcher.sh").read_text()
+    command = " ".join(mkg_server["args"])
 
     assert mkg_server["command"] == "bash"
-    assert "uv run --project" in " ".join(mkg_server["args"])
-    assert "uvx" not in " ".join(mkg_server["args"])
+    assert "scripts/mcp-launcher.sh" in command
+    assert "plugin/scripts/mcp-launcher.sh" in command
+    assert "ls -dt" in command
+    assert "sort -V" not in command
+    assert 'exec "$ROOT/.venv/bin/python" -m meta_knowledge_graph' in launcher
+    assert 'export PATH="$ROOT/.venv/bin:${PATH:-}"' in launcher
+    assert 'exec uv run --project "$ROOT" meta-knowledge-graph' in launcher
+    assert "uvx" not in command + launcher
 
 
 def _session_start_commands(hooks_path: Path) -> list[str]:

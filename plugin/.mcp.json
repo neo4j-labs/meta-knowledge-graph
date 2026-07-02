@@ -4,7 +4,7 @@
       "command": "bash",
       "args": [
         "-c",
-        "ROOT=\"${CODEX_PLUGIN_ROOT:-${MKG_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}\"; [ -f \"$ROOT/pyproject.toml\" ] || ROOT=\"$(ls -d \"${CODEX_HOME:-$HOME/.codex}\"/plugins/cache/*/meta-knowledge-graph/*/ 2>/dev/null | sort -V | tail -1)\"; [ -f \"$ROOT/pyproject.toml\" ] || ROOT=\"$(ls -d \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"/plugins/cache/*/meta-knowledge-graph/*/ 2>/dev/null | sort -V | tail -1)\"; [ -f \"$ROOT/pyproject.toml\" ] || ROOT=\"${CLAUDE_PROJECT_DIR:-$PWD}\"; exec uv run --project \"$ROOT\" meta-knowledge-graph"
+        "ROOT=\"${CODEX_PLUGIN_ROOT:-${MKG_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}\"; [ -f \"$ROOT/pyproject.toml\" ] || ROOT=\"$(ls -dt \"${CODEX_HOME:-$HOME/.codex}\"/plugins/cache/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; [ -f \"$ROOT/pyproject.toml\" ] || ROOT=\"$(ls -dt \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"/plugins/cache/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; [ -f \"$ROOT/pyproject.toml\" ] || ROOT=\"${CLAUDE_PROJECT_DIR:-$PWD}\"; LAUNCHER=\"$ROOT/scripts/mcp-launcher.sh\"; [ -f \"$LAUNCHER\" ] || LAUNCHER=\"$ROOT/plugin/scripts/mcp-launcher.sh\"; exec bash \"$LAUNCHER\" \"$ROOT\""
       ]
     }
   }

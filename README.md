@@ -59,10 +59,12 @@ claude plugin install meta-knowledge-graph@mkg
 ```
 
 - The marketplace is named `mkg`; the qualified plugin id is `meta-knowledge-graph@mkg`.
-- On the **first session** after install, the `SessionStart` hooks bootstrap a
-  `uv` virtualenv for the plugin cache (one-time; that session is slower).
-  Later sessions reuse it, and optional MCP subprocesses run from that same
-  environment instead of doing their own `uvx` startup install.
+- On the **first MCP start** after install, the plugin launcher falls back to
+  `uv run --project` to create the plugin cache virtualenv (one-time; that start
+  is slower). Later MCP starts execute the cached `.venv/bin/python -m
+  meta_knowledge_graph` directly, with the venv on `PATH` so optional MCP
+  subprocesses run from the same environment instead of doing their own `uvx`
+  startup install.
 - Verify: `claude plugin list` shows `meta-knowledge-graph@mkg` *enabled*; inside
   a session the MKG system prompt is injected and `mcp__meta-knowledge-graph__*`
   tools are available.
@@ -135,7 +137,9 @@ and `plugin/` is the versioned payload copied into the host plugin cache.
   `mkg-start`, `mkg-orchestrate`, `sales-agent-demo`, and `mkg-recall`.
 - [`plugin/.mcp.json`](plugin/.mcp.json) is shared with the Claude Code plugin
   and starts the same `meta-knowledge-graph` MCP server from the installed
-  plugin cache or repo checkout.
+  plugin cache or repo checkout. Warm plugin starts bypass `uv` and run the
+  cached virtualenv's Python directly; `uv run --project` remains the fallback
+  when the virtualenv has not been created yet.
 
 Install from the remote marketplace repo:
 
