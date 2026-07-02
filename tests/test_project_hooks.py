@@ -183,7 +183,7 @@ class ProjectHookTests(unittest.TestCase):
 
         self.assertEqual(token, "sk-ant-oat01-test")
 
-    def test_litellm_claude_oauth_does_not_override_explicit_auth(self) -> None:
+    def test_litellm_claude_oauth_preferred_over_explicit_auth(self) -> None:
         credential = project_common.ClaudeOAuthCredential(
             token="sk-ant-oat01-test",
             source="test",
@@ -211,7 +211,7 @@ class ProjectHookTests(unittest.TestCase):
                         token = project_common._litellm_api_key_for_model(
                             "anthropic/claude-haiku-4-5"
                         )
-                self.assertIsNone(token)
+                self.assertEqual(token, "sk-ant-oat01-test")
 
     def test_litellm_claude_oauth_still_used_with_base_url_only(self) -> None:
         credential = project_common.ClaudeOAuthCredential(
