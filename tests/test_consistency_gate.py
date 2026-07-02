@@ -242,6 +242,275 @@ class _FakeDriver:
         return _FakeSession()
 
 
+class _FakeResult:
+    def __init__(self, records):
+        self._records = records
+
+    def __iter__(self):
+        return iter(self._records)
+
+    def consume(self):
+        return None
+
+
+class _RecordingSession:
+    def __init__(self, log):
+        self._log = log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def run(self, query, **params):
+        self._log.append((query, params))
+        return _FakeResult([])
+
+    def execute_write(self, fn, **kwargs):
+        return None
+
+
+class _RecordingDriver:
+    def __init__(self):
+        self.log: list[tuple[str, dict]] = []
+
+    def session(self, **kwargs):
+        return _RecordingSession(self.log)
+
+
+class NeighbourRetrievalTests(unittest.TestCase):
+    def test_vector_query_prefilters_project_scope_and_excludes_self(self):
+        driver = _RecordingDriver()
+        consistency_gate._fetch_neighbours_vector(
+            driver,
+            "neo4j",
+            label="Learning",
+            index_name="project_learning_vector",
+            project_id="proj",
+            scope="project",
+            vector=[0.1],
+            topk=15,
+            candidate_id="learning:proj:self",
+        )
+        query, params = driver.log[0]
+        # No status predicate (it is still RETURNed for the judge): the gate
+        # removes embeddings from rejected / already-learned items, so
+        # everything the vector index can see is live memory (approved or
+        # candidate).
+        self.assertNotIn("node.status =", query)
+        self.assertNotIn("node.status IN", query)
+        self.assertIn("node.project_id = $project_id", query)
+        self.assertIn("node.scope = $scope", query)
+        self.assertIn("node.id <> $candidate_id", query)
+        self.assertEqual(params["candidate_id"], "learning:proj:self")
+        # One extra index slot compensates for the candidate matching itself.
+        self.assertEqual(params["limit"], 16)
+
+    def test_fulltext_query_includes_candidates_and_excludes_self(self):
+        driver = _RecordingDriver()
+        consistency_gate._fetch_neighbours_fulltext(
+            driver,
+            "neo4j",
+            label="Learning",
+            fulltext_index="project_learning_fulltext",
+            project_id="proj",
+            scope="project",
+            text="use rest for the api",
+            topk=15,
+            candidate_id="learning:proj:self",
+        )
+        query, params = driver.log[0]
+        self.assertIn("node.status IN ['approved', 'candidate']", query)
+        self.assertIn("node.id <> $candidate_id", query)
+        self.assertEqual(params["candidate_id"], "learning:proj:self")
+        self.assertEqual(params["limit"], 15)
+
+    def test_format_neighbour_shows_status(self):
+        line = consistency_gate._format_neighbour(
+            0, {"id": "a", "text": "t", "status": "candidate"}
+        )
+        self.assertIn("status=candidate", line)
+
+
+class TombstoneTests(unittest.TestCase):
+    def test_apply_resolutions_strips_dead_embeddings(self):
+        captured: list[str] = []
+
+        class _Tx:
+            def run(self, query, **params):
+                captured.append(query)
+
+        consistency_gate._apply_resolutions(
+            _Tx(),
+            label="Learning",
+            rows=[
+                {
+                    "id": "cand",
+                    "outcome": "approved",
+                    "consistency": "superseded_conflicts",
+                    "superseded_ids": ["old"],
+                    "contradicted_by_ids": [],
+                    "unclear_ids": [],
+                    "already_learned_ids": [],
+                }
+            ],
+            model="m",
+            timestamp="2026-07-01T00:00:00Z",
+        )
+        query = captured[0]
+        # Death removes the embedding, which drops the item out of the vector
+        # index — that is what lets retrieval skip status filtering entirely.
+        self.assertIn("old.embedding = null", query)
+        self.assertIn(
+            "WHEN row.outcome IN ['rejected', 'already_learned'] THEN null", query
+        )
+
+
+class PerRowApplyTests(unittest.TestCase):
+    def test_resolutions_apply_per_row_between_retrievals(self):
+        # The write for row 1 must land before row 2's neighbour retrieval, so
+        # restatements extracted in one batch collapse instead of mutually
+        # folding into each other.
+        events: list[str] = []
+
+        class _Session:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute_write(self, fn, **kwargs):
+                events.append("write:" + kwargs["rows"][0]["id"])
+
+        class _Driver:
+            def session(self, **kwargs):
+                return _Session()
+
+        def fake_fetch(*args, **kwargs):
+            events.append("fetch:" + kwargs["candidate_id"])
+            return [{"id": "other", "text": "t", "status": "candidate"}]
+
+        with patch.object(
+            consistency_gate, "_fetch_neighbours_vector", side_effect=fake_fetch
+        ), patch.object(
+            consistency_gate,
+            "llm_complete",
+            return_value='{"contradictions": [], "already_learned_of": null}',
+        ):
+            applied = consistency_gate._gate_one_label(
+                _Driver(),
+                "neo4j",
+                project=type("P", (), {"id": "proj"})(),
+                label="Learning",
+                index_name="project_learning_vector",
+                fulltext_index="project_learning_fulltext",
+                kind="learning",
+                rows=[
+                    {"id": "l1", "text": "a", "embedding": [0.1], "scope": "project"},
+                    {"id": "l2", "text": "b", "embedding": [0.2], "scope": "project"},
+                ],
+                model=None,
+                timestamp="2026-07-01T00:00:00Z",
+            )
+        self.assertEqual(applied, 2)
+        self.assertEqual(events, ["fetch:l1", "write:l1", "fetch:l2", "write:l2"])
+
+
+class SweepTests(unittest.TestCase):
+    def _project(self):
+        return type("P", (), {"id": "proj"})()
+
+    def test_disabled_gate_skips(self):
+        with patch.dict("os.environ", {"MKG_CONSISTENCY_GATE": "0"}):
+            out = consistency_gate.sweep_ungated_candidates(
+                None, "neo4j", project=self._project(), model=None, timestamp="t"
+            )
+        self.assertEqual(out, {"learnings": 0, "decisions": 0})
+
+    def test_zero_sweep_limit_disables(self):
+        with patch.dict(
+            "os.environ",
+            {"MKG_CONSISTENCY_GATE": "1", "MKG_CONSISTENCY_SWEEP_LIMIT": "0"},
+        ):
+            out = consistency_gate.sweep_ungated_candidates(
+                None, "neo4j", project=self._project(), model=None, timestamp="t"
+            )
+        self.assertEqual(out, {"learnings": 0, "decisions": 0})
+
+    def test_judge_unavailable_skips(self):
+        with patch.dict("os.environ", {"MKG_CONSISTENCY_GATE": "1"}), patch.object(
+            consistency_gate, "llm_readiness_status", return_value=(False, "no creds")
+        ):
+            out = consistency_gate.sweep_ungated_candidates(
+                None, "neo4j", project=self._project(), model=None, timestamp="t"
+            )
+        self.assertEqual(out, {"learnings": 0, "decisions": 0})
+
+    def test_sweep_limit_env_override(self):
+        with patch.dict("os.environ", {"MKG_CONSISTENCY_SWEEP_LIMIT": "3"}):
+            self.assertEqual(consistency_gate.sweep_limit(), 3)
+        with patch.dict("os.environ", {"MKG_CONSISTENCY_SWEEP_LIMIT": "bogus"}):
+            self.assertEqual(
+                consistency_gate.sweep_limit(), consistency_gate.DEFAULT_SWEEP_LIMIT
+            )
+
+    def test_sweeps_embeds_and_gates_ungated_rows(self):
+        rows = [
+            {"id": "l1", "text": "a", "scope": "project", "embedding": None},
+            {"id": "l2", "text": "b", "scope": "project", "embedding": [0.2]},
+        ]
+        fetched: dict[str, dict] = {}
+        persisted: dict[str, list[str]] = {}
+        gated: dict[str, list[str]] = {}
+
+        def fake_fetch(driver, database, *, label, project_id, exclude_ids, limit):
+            fetched[label] = {"exclude_ids": exclude_ids, "limit": limit}
+            return [dict(r) for r in rows] if label == "Learning" else []
+
+        def fake_attach(group):
+            for row in group:
+                row["embedding"] = [0.9]
+            return True
+
+        def fake_persist(driver, database, *, label, rows, timestamp):
+            persisted[label] = [r["id"] for r in rows]
+            return len(rows)
+
+        def fake_gate(driver, database, *, label, rows, **kwargs):
+            gated[label] = [r["id"] for r in rows]
+            return len(rows)
+
+        with patch.dict("os.environ", {"MKG_CONSISTENCY_GATE": "1"}), patch.object(
+            consistency_gate, "llm_readiness_status", return_value=(True, None)
+        ), patch.object(
+            consistency_gate, "_fetch_ungated_candidates", side_effect=fake_fetch
+        ), patch.object(
+            consistency_gate, "attach_candidate_embeddings", side_effect=fake_attach
+        ), patch.object(
+            consistency_gate, "_persist_embeddings", side_effect=fake_persist
+        ), patch.object(
+            consistency_gate, "_gate_one_label", side_effect=fake_gate
+        ):
+            out = consistency_gate.sweep_ungated_candidates(
+                None,
+                "neo4j",
+                project=self._project(),
+                model=None,
+                timestamp="2026-07-01T00:00:00Z",
+                exclude_ids=["fresh1"],
+            )
+
+        self.assertEqual(out, {"learnings": 2, "decisions": 0})
+        self.assertEqual(fetched["Learning"]["exclude_ids"], ["fresh1"])
+        # Only the row without a stored embedding is embedded and persisted.
+        self.assertEqual(persisted["Learning"], ["l1"])
+        self.assertEqual(gated["Learning"], ["l1", "l2"])
+        # The decision label found nothing ungated, so nothing was persisted.
+        self.assertNotIn("Decision", persisted)
+
+
 class DispatchTests(unittest.TestCase):
     def _run(self, row):
         with patch.object(

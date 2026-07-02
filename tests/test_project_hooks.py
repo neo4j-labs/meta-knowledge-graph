@@ -984,6 +984,30 @@ class ProjectHookTests(unittest.TestCase):
         self.assertTrue(by_scope["user"]["id"].startswith("decision:user:"))
         self.assertTrue(by_scope["project"]["id"].startswith("decision:mkg:"))
 
+    def test_decision_rows_are_born_candidates(self) -> None:
+        # Decisions carry an explicit lifecycle status from creation, exactly
+        # like learnings: recall requires status IN ['approved','candidate']
+        # and the consistency-gate sweep matches {status: 'candidate'}, so a
+        # status-less decision would be invisible to both.
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        actions = {
+            "learnings": [],
+            "decisions": [
+                {
+                    "action": "create",
+                    "scope": "project",
+                    "text": "Adopt trunk-based development.",
+                    "confidence": 0.9,
+                }
+            ],
+        }
+
+        _, decision_rows = process_project._memory_rows_from_actions(
+            project, "turn", actions
+        )
+
+        self.assertEqual(decision_rows[0]["status"], "candidate")
+
     def test_learning_context_marks_candidates_as_hints(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
         context = project_common.format_learning_context(
@@ -1097,7 +1121,7 @@ class ProjectHookTests(unittest.TestCase):
         )
 
         self.assertTrue(captured)
-        self.assertIn("coalesce(l.scope, 'project') = 'project'", captured[0][0])
+        self.assertIn("l.scope = 'project'", captured[0][0])
 
     def test_fetch_project_decisions_restricts_to_project_scope(self) -> None:
         captured: list[tuple[str, dict]] = []
@@ -1112,7 +1136,10 @@ class ProjectHookTests(unittest.TestCase):
         )
 
         self.assertTrue(captured)
-        self.assertIn("coalesce(d.scope, 'project') = 'project'", captured[0][0])
+        self.assertIn("d.scope = 'project'", captured[0][0])
+        # Decisions carry the same lifecycle as learnings: recall requires a
+        # live status, with no tolerance for status-less legacy nodes.
+        self.assertIn("d.status IN ['approved', 'candidate']", captured[0][0])
 
     def test_fetch_user_learnings_spans_projects_and_filters_scope(self) -> None:
         captured: list[tuple[str, dict]] = []

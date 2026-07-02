@@ -1357,7 +1357,7 @@ def fetch_project_learnings(
                 YIELD node, score
                 MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)
                 WHERE node.status IN $statuses
-                  AND coalesce(node.scope, 'project') = 'project'
+                  AND node.scope = 'project'
                   AND ($session_id IS NULL OR (
                        NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                        AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -1390,7 +1390,7 @@ def fetch_project_learnings(
         """
         MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
         WHERE l.status IN $statuses
-          AND coalesce(l.scope, 'project') = 'project'
+          AND l.scope = 'project'
           AND ($session_id IS NULL OR (
                NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                AND NOT (l)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -1510,16 +1510,17 @@ def fetch_project_decisions(
                 CALL db.index.fulltext.queryNodes('project_decision_fulltext', $search_query)
                 YIELD node, score
                 MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(node)
-                WHERE ($session_id IS NULL OR (
+                WHERE node.status IN ['approved', 'candidate']
+                  AND node.scope = 'project'
+                  AND ($session_id IS NULL OR (
                       NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                       AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
-                  AND coalesce(node.scope, 'project') = 'project'
                 RETURN node.id AS id,
                        node.text AS text,
                        node.rationale AS rationale,
                        node.confidence AS confidence,
                        node.task_pattern AS task_pattern,
-                       coalesce(node.scope, 'project') AS scope,
+                       node.scope AS scope,
                        score
                 ORDER BY score DESC,
                          coalesce(node.confidence, 0.0) DESC
@@ -1541,16 +1542,17 @@ def fetch_project_decisions(
         database,
         """
         MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(d:Decision)
-        WHERE ($session_id IS NULL OR (
+        WHERE d.status IN ['approved', 'candidate']
+          AND d.scope = 'project'
+          AND ($session_id IS NULL OR (
               NOT (d)-[:INJECTED_IN]->(:Session {session_id: $session_id})
               AND NOT (d)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
-          AND coalesce(d.scope, 'project') = 'project'
         RETURN d.id AS id,
                d.text AS text,
                d.rationale AS rationale,
                d.confidence AS confidence,
                d.task_pattern AS task_pattern,
-               coalesce(d.scope, 'project') AS scope,
+               d.scope AS scope,
                0.0 AS score
         ORDER BY coalesce(d.updated_at, d.created_at) DESC
         LIMIT $limit
@@ -1578,6 +1580,7 @@ def fetch_user_decisions(
                 CALL db.index.fulltext.queryNodes('project_decision_fulltext', $search_query)
                 YIELD node, score
                 WHERE node.scope = 'user'
+                  AND node.status IN ['approved', 'candidate']
                   AND ($session_id IS NULL OR (
                        NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                        AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -1607,9 +1610,10 @@ def fetch_user_decisions(
         database,
         """
         MATCH (d:Decision {scope: 'user'})
-        WHERE $session_id IS NULL OR (
+        WHERE d.status IN ['approved', 'candidate']
+          AND ($session_id IS NULL OR (
               NOT (d)-[:INJECTED_IN]->(:Session {session_id: $session_id})
-              AND NOT (d)-[:FROM_SESSION]->(:Session {session_id: $session_id}))
+              AND NOT (d)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
         RETURN d.id AS id,
                d.text AS text,
                d.rationale AS rationale,

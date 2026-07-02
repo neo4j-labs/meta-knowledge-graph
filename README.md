@@ -304,7 +304,7 @@ to the plugin directory.
 | `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and capture user/project facts as scoped learnings. The injection log keeps only a content hash + summary on the `:SystemPromptInjection` node and links it to its source via `[:OF_PROMPT]→(:SystemPrompt)` instead of copying the prompt text. If the same prompt content was already injected into the same session, the hook skips the duplicate (unless the context was wiped by `clear`/`compact`). |
 | `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` and `:Decision` against the new prompt and injects the top hits: project-scoped learnings/decisions for the current project, plus durable user-scoped learnings that follow the user across every project. Every injected item is linked to the session via `[:INJECTED_IN]`; items already injected earlier in the same session — or first produced during it (`[:FROM_SESSION]`) — are excluded from retrieval, so a conversation never receives the same learning or decision twice, nor has its own freshly-extracted memory echoed back. Marks served learnings as used. |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | `hooks/log_event.py` | Persists each event as a `:SessionEvent` node threaded by `:NEXT`. Main-agent events land under the parent `:Session`; subagent events land under a separate `:Session` keyed by the subagent id and linked back to the parent session, spawn event, start event, and stop event. This is the corpus the memory extraction processor later reads. |
-| `Stop` (`--mode turn`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions for two buckets: `:Decision` nodes and `:Learning` nodes. Each learning is classified `project` (a fact about the project/environment) or `user` (a durable fact about the person that holds across projects); user-scoped learnings are keyed on a project-independent namespace so the same fact dedupes everywhere. Writes new nodes with status `candidate` (embedding each so it is searchable), and stores the model used plus `llm_status` (`called`, `skipped`, or `error`) and skip/error reason on `:ProjectProcessing` and prompt-usage provenance. Then runs the **consistency gate** (`hooks/consistency_gate.py`): each new project-scoped candidate is searched against the top-15 `approved` learnings/decisions in the same project/scope — semantically via the vector index when `EMBEDDING_MODEL` is set, else via the fulltext index — and an LLM judge decides genuine contradictions, promoting consistent candidates to `approved`, rejecting the items they supersede (`[:SUPERSEDES]`), or vetoing the candidate to `rejected` (`[:CONTRADICTED_BY]`) when an existing item is clearly more reliable. |
+| `Stop` (`--mode turn`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, loads the persisted `(:MemoryExtractionPrompt {name: 'default'})` template from Neo4j (seeding the default if needed), builds a tail-preserving corpus, fetches the closest existing learnings/decisions, and asks an LLM to return create/update/ignore actions for two buckets: `:Decision` nodes and `:Learning` nodes. Each learning is classified `project` (a fact about the project/environment) or `user` (a durable fact about the person that holds across projects); user-scoped learnings are keyed on a project-independent namespace so the same fact dedupes everywhere. Writes new nodes with status `candidate` (embedding each so it is searchable), and stores the model used plus `llm_status` (`called`, `skipped`, or `error`) and skip/error reason on `:ProjectProcessing` and prompt-usage provenance. Then runs the **consistency gate** (`hooks/consistency_gate.py`): each new project-scoped candidate is searched against the top-15 `approved` **and fellow `candidate`** learnings/decisions in the same project/scope (excluding itself) — semantically via the vector index when `EMBEDDING_MODEL` is set, else via the fulltext index — and an LLM judge decides genuine contradictions, promoting consistent candidates to `approved`, rejecting the items they supersede (`[:SUPERSEDES]`), or vetoing the candidate to `rejected` (`[:CONTRADICTED_BY]`) when an existing item is clearly more reliable. Resolutions apply per candidate, so restatements extracted in one batch collapse onto one canonical item. Finally a bounded **sweep** pushes ungated candidates — `project_add_learning` MCP writes and rows an earlier judge failure skipped — through the same gate, backfilling their embeddings first. |
 | `Stop`, `SessionEnd` | `hooks/consolidate_system_prompt.py` | Runs in the background, rate-limited. The system-prompt consolidation service: it only does work when **more than 5** user-profile memories are in need of review — user-scoped `candidate` learnings not yet folded into the prompt (`MKG_PROMPT_CONSOLIDATION_THRESHOLD`) — and not more than once per cooldown window (`MKG_PROMPT_CONSOLIDATION_INTERVAL_HOURS`, default 24h, tracked via `last_consolidated_at` on the node). When both gates pass, it sends the current `(:SystemPrompt {name: 'default'})` plus the pending user facts to the LLM, which folds those facts into the persona, then archives the outgoing prompt as a `(:SystemPromptVersion)` history node before overwriting the active one and bumping its version. The folded learnings are stamped `consolidated_at` so they drop out of the backlog; their `candidate` status is left untouched, so the human promotion gate still owns `candidate → approved`. |
 | `PostToolUse` (matcher on the Diffbot tools `enhance_entity` / `search_news`) | `hooks/ingest_diffbot.py` | Builds Diffbot tool results back into the graph instead of letting them evaporate with the conversation. `enhance_entity` firmographics become `(:Account)-[:HAS_ENRICHMENT]→(:DiffbotOrganization)` or `(:DiffbotPerson)` (matched on domain, name/`allNames`, and employer hints); `search_news` articles become `(:NewsArticle)-[:MENTIONS]→(:Account)` plus `[:MENTIONS]→(:DiffbotOrganization)` when organization tags or account matches identify companies, and `[:TAGGED]→(:NewsTag)`. Only entities carrying a real Diffbot id are stored — references without one are dropped instead of being keyed on synthetic hashes. Diffbot entities and articles link `[:CAPTURED_IN]→(:Session)` for provenance. Handles the harness's response wrappers, including oversized results that arrive as a saved-to-file notice. |
 | `PostToolUse` (matcher on the query tools `bigquery_execute_query` / `neo4j_read_cypher`) | `hooks/capture_query_failures.py` | Captures failed or suspicious query outputs as structured `(:QueryExecution)-[:HAS_ISSUE]→(:QueryIssue)` artifacts. The first pass records issues visible in PostToolUse payloads: empty result sets, parser/schema/permission/resource/capability errors, malformed outputs, and Neo4j serialization cases such as temporal values returned as `{}`. Clean successful query results are ignored. |
@@ -360,29 +360,46 @@ to the plugin directory.
 
 Candidate learnings flow through retrieval but are review-gated. Project-scoped
 candidates are promoted automatically by the **consistency gate** (see the `Stop`
-hook), which retrieves the closest `approved` learnings/decisions in the same
-project/scope and asks an LLM judge whether the candidate genuinely contradicts
-any of them. Retrieval is semantic (a vector index) when the `EMBEDDING_MODEL` is
+hook), which retrieves the closest `approved` and fellow `candidate`
+learnings/decisions in the same project/scope (the item itself excluded) and asks
+an LLM judge whether the candidate genuinely contradicts or merely restates any
+of them — including candidates in retrieval is what lets restatements collapse
+(`[:ALREADY_LEARNED_FROM]`) instead of piling up side by side in the review
+queue. Retrieval is semantic (a vector index) when the `EMBEDDING_MODEL` is
 available and falls back to the fulltext index when it is not. No contradiction,
 or a contradiction the candidate wins, promotes it to `approved` (and rejects the
 item it supersedes); an existing item that the judge finds clearly more reliable
 vetoes the candidate to `rejected`; a genuinely ambiguous conflict leaves it
-`candidate` for a human. The gate is additive — only the LLM judge is required;
-with the judge unavailable (or `MKG_CONSISTENCY_GATE=0`) candidates stay
-`candidate` as before, and user-scoped candidates always continue through the
-`consolidate_system_prompt.py` gate untouched.
+`candidate` for a human. Candidates that enter the graph outside the extractor —
+the `project_add_learning` MCP tool writes them directly (embedding at write time
+when the provider is available), and a judge outage can leave extracted rows
+unresolved — are picked up by a bounded per-turn **sweep**
+(`MKG_CONSISTENCY_SWEEP_LIMIT`, default 8 per label, 0 disables) that backfills
+missing embeddings and runs the exact same gate, so MCP-written memory reaches
+`approved` instead of staying a second-class hint forever. Decisions carry the same lifecycle:
+written as `candidate`, resolved by the gate, and recall everywhere requires
+`status IN ['approved', 'candidate']` — there is no tolerance for status- or
+scope-less legacy nodes. The gate is additive —
+only the LLM judge is required; with the judge unavailable (or
+`MKG_CONSISTENCY_GATE=0`) candidates stay `candidate` as before, and user-scoped
+candidates always continue through the `consolidate_system_prompt.py` gate
+untouched.
 
 Fulltext indexes
 `project_learning_fulltext` and `project_decision_fulltext` back the retrieval
 path; the same learning index serves both project-scoped and user-scoped lookups
 (the latter filtered to `scope = 'user'` and unbound from any single project).
 The consistency gate adds cosine vector indexes `project_learning_vector` /
-`project_decision_vector` over an `embedding` property, with `project_id` /
-`scope` / `status` declared as index metadata so the `SEARCH` clause pre-filters
-them in-index (native filtered vector search, **Neo4j 2026.02+**). Run
+`project_decision_vector` over an `embedding` property, with the `SEARCH` clause
+pre-filtering `project_id` / `scope` in-index (native filtered vector search,
+**Neo4j 2026.02+**). There is no status filter at search time: the gate strips
+the `embedding` from items it rejects or folds, so the vector index only ever
+contains live memory — dead items keep their text and provenance edges as
+tombstones but drop out of retrieval. Run
 `scripts/backfill_memory_embeddings.py` once after enabling it so pre-existing
-nodes become retrievable. Tunables: `MKG_CONSISTENCY_GATE` (default on),
-`MKG_CONSISTENCY_TOPK` (default 15), and `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS`.
+live nodes become retrievable (it skips tombstones). Tunables: `MKG_CONSISTENCY_GATE` (default on),
+`MKG_CONSISTENCY_TOPK` (default 15), `MKG_CONSISTENCY_SWEEP_LIMIT` (default 8),
+and `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS`.
 The persisted system prompt and memory extraction prompt are frozen at runtime —
 read on session start but never self-modified mid-session. Improving the system
 prompt from the accumulated learning corpus is the job of the rate-limited

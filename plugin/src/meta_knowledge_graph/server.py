@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -199,6 +200,44 @@ def _llm_credentials_present(model: str) -> bool:
     finally:
         os.environ.update(blanked)
     return bool(result.get("keys_in_environment"))
+
+
+def _embed_learning_text_sync(text: str) -> Optional[List[float]]:
+    """Best-effort embedding for a learning at write time.
+
+    Uses the same litellm ``EMBEDDING_MODEL`` knob as the hooks, so MCP-written
+    learnings enter the graph vector-searchable — the consistency gate's
+    neighbour retrieval and sweep see them immediately instead of waiting for
+    an embedding backfill. Returns ``None`` when credentials or the provider
+    are unavailable; the learning write itself must never fail on embedding
+    problems.
+    """
+    model = os.environ.get("EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
+    if not _llm_credentials_present(model):
+        return None
+    try:
+        import litellm
+
+        response = litellm.embedding(model=model, input=[text])
+    except Exception:
+        return None
+    data = getattr(response, "data", None) or []
+    if not data:
+        return None
+    item = data[0]
+    vector = (
+        item.get("embedding") if isinstance(item, dict) else getattr(item, "embedding", None)
+    )
+    return list(vector) if vector else None
+
+
+async def _embed_learning_text(text: str) -> Optional[List[float]]:
+    """Run the litellm embedding call off the event loop (litellm's first
+    import and its sync HTTP path both block)."""
+    try:
+        return await asyncio.to_thread(_embed_learning_text_sync, text)
+    except Exception:
+        return None
 
 
 def _compact_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -786,7 +825,7 @@ def create_mcp_server(
                         YIELD node, score
                         MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)
                         WHERE node.status IN $statuses
-                          AND coalesce(node.scope, 'project') = 'project'
+                          AND node.scope = 'project'
                         RETURN node.id AS id, node.text AS text, node.status AS status,
                                node.confidence AS confidence, node.task_pattern AS task_pattern,
                                score
@@ -808,7 +847,7 @@ def create_mcp_server(
                     """
                     MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
                     WHERE l.status IN $statuses
-                      AND coalesce(l.scope, 'project') = 'project'
+                      AND l.scope = 'project'
                     RETURN l.id AS id, l.text AS text, l.status AS status,
                            l.confidence AS confidence, l.task_pattern AS task_pattern,
                            0.0 AS score
@@ -875,10 +914,11 @@ def create_mcp_server(
                         CALL db.index.fulltext.queryNodes('project_decision_fulltext', $q)
                         YIELD node, score
                         MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(node)
-                        WHERE coalesce(node.scope, 'project') = 'project'
+                        WHERE node.status IN ['approved', 'candidate']
+                          AND node.scope = 'project'
                         RETURN node.id AS id, node.text AS text, node.rationale AS rationale,
                                node.confidence AS confidence, node.task_pattern AS task_pattern,
-                               coalesce(node.scope, 'project') AS scope,
+                               node.scope AS scope,
                                score
                         ORDER BY score DESC, coalesce(node.confidence, 0.0) DESC
                         LIMIT $limit
@@ -895,10 +935,11 @@ def create_mcp_server(
                 records = await _execute_query(
                     """
                     MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(d:Decision)
-                    WHERE coalesce(d.scope, 'project') = 'project'
+                    WHERE d.status IN ['approved', 'candidate']
+                      AND d.scope = 'project'
                     RETURN d.id AS id, d.text AS text, d.rationale AS rationale,
                            d.confidence AS confidence, d.task_pattern AS task_pattern,
-                           coalesce(d.scope, 'project') AS scope,
+                           d.scope AS scope,
                            0.0 AS score
                     ORDER BY coalesce(d.updated_at, d.created_at) DESC
                     LIMIT $limit
@@ -964,9 +1005,10 @@ def create_mcp_server(
         if not clean_text:
             return json.dumps({"status": "error", "error": "text is required"})
         normalized_scope = _normalize_scope(scope)
-        # The tool always writes candidates; promotion to 'approved' is owned by
-        # the human review gate (and the seed scripts). This keeps user-scoped
-        # facts flowing through the queue the prompt-consolidation service reads.
+        # The tool always writes candidates. Project-scoped ones are promoted
+        # (or folded/rejected) by the consistency-gate sweep at the next Stop;
+        # user-scoped facts stay candidates so they keep flowing through the
+        # queue the prompt-consolidation service reads.
         normalized_status = "candidate"
         clamped_confidence = max(0.0, min(1.0, float(confidence)))
         resolved_pid = _resolve_project_id(project_id)
@@ -974,6 +1016,10 @@ def create_mcp_server(
             _learning_namespace(resolved_pid, normalized_scope), clean_text
         )
         timestamp = _now_iso()
+        # Embed at write time so the learning is immediately visible to the
+        # consistency gate's vector retrieval; None (no creds / provider down)
+        # degrades to a plain write that the Stop-hook sweep embeds later.
+        embedding = await _embed_learning_text(clean_text)
 
         async with neo4j_driver.session(database=database):
             for stmt in (
@@ -998,6 +1044,7 @@ def create_mcp_server(
                               l.support_count = 0
                 SET l.text = $text,
                     l.summary = $text,
+                    l.embedding = coalesce($embedding, l.embedding),
                     l.task_pattern = coalesce($task_pattern, l.task_pattern),
                     l.status = CASE
                         WHEN l.status = 'approved' THEN l.status
@@ -1028,6 +1075,7 @@ def create_mcp_server(
                 scope=normalized_scope,
                 source=MCP_LEARNING_SOURCE,
                 confidence=clamped_confidence,
+                embedding=embedding,
                 timestamp=timestamp,
             )
 

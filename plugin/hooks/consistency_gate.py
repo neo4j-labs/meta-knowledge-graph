@@ -6,11 +6,13 @@ approval gate*. It runs only at Stop, never at SessionEnd:
 
 1. Embed each new candidate (litellm, ``EMBEDDING_MODEL``) when the embedding
    model is available.
-2. Retrieve the top-K closest **approved** items in the *same project and scope*.
-   With an embedding this is a semantic vector-index search; without one (no
-   embedding model configured) it falls back to the lexical fulltext index.
-   Either way retrieval only nominates candidates for the judge — it is not the
-   decision step.
+2. Retrieve the top-K closest stored items — **approved** plus other pending
+   **candidates** — in the *same project and scope*, excluding the candidate
+   itself. Including candidates is what lets restatements collapse instead of
+   piling up side by side in the review queue. With an embedding this is a
+   semantic vector-index search; without one (no embedding model configured) it
+   falls back to the lexical fulltext index. Either way retrieval only
+   nominates candidates for the judge — it is not the decision step.
 3. An LLM judge decides whether the candidate genuinely *contradicts* any of
    those neighbours (as opposed to merely resembling them) and, per conflict,
    which side is more likely correct. It also flags whether the candidate is
@@ -23,15 +25,29 @@ approval gate*. It runs only at Stop, never at SessionEnd:
    - an existing item vetoes .... candidate -> ``rejected`` (``CONTRADICTED_BY``); existing stays approved
    - only ambiguous conflicts ... candidate stays ``candidate`` (``CONTRADICTS``) for the human gate
 
+Resolutions are applied per candidate, immediately after judging it, so later
+candidates in the same batch retrieve the updated statuses — two restatements
+extracted together collapse onto one canonical item instead of mutually folding
+into each other.
+
+A companion sweep (:func:`sweep_ungated_candidates`) runs after the batch gate
+and pushes through project-scoped candidates that entered the graph without a
+gate run — ``project_add_learning`` MCP tool writes, and rows left behind by an
+earlier judge or retrieval failure — backfilling and persisting their
+embeddings first.
+
 Only the LLM judge is required. Without an embedding model the gate uses fulltext
 retrieval; without the judge (or with the gate disabled) candidates keep
 ``status = 'candidate'``.
 
-Vector retrieval uses Neo4j's native **pre-filtered** vector search: the index
-stores ``project_id`` / ``scope`` / ``status`` as metadata (``WITH [...]``) and
-the ``SEARCH`` clause applies them as an in-index ``WHERE`` so the walk only
-visits approved items in the right project. This requires **Neo4j 2026.02+**
-(the ``SEARCH`` clause / filtered vector search).
+Vector retrieval uses Neo4j's native **pre-filtered** vector search: the
+``SEARCH`` clause applies ``project_id`` / ``scope`` as an in-index ``WHERE`` so
+the walk only visits the right project and scope. This requires **Neo4j
+2026.02+** (the ``SEARCH`` clause / filtered vector search). There is no status
+predicate because the vector index only ever contains live memory: when the
+gate rejects an item or folds it as already-learned, it removes the item's
+``embedding``, which drops it out of the index. Dead items keep their text and
+provenance edges — they are tombstones, not searchable memory.
 """
 
 from __future__ import annotations
@@ -78,6 +94,8 @@ def ensure_memory_vector_indexes(driver, database: str) -> None:
 
     ``project_id`` / ``scope`` / ``status`` are declared as index metadata
     (``WITH [...]``) so the ``SEARCH`` clause can pre-filter on them in-index.
+    Retrieval only filters on ``project_id`` / ``scope``: dead items lose their
+    embedding (and thus leave the index), so no status predicate is needed.
     Each ``CREATE`` runs in its own session so one schema statement never blocks
     the next.
     """
@@ -144,6 +162,7 @@ _NEIGHBOUR_RETURN = """
         RETURN node.id AS id,
                node.text AS text,
                node.rationale AS rationale,
+               node.status AS status,
                node.confidence AS confidence,
                node.support_count AS support_count,
                toString(node.updated_at) AS updated_at,
@@ -177,10 +196,15 @@ def _fetch_neighbours_vector(
     scope: str,
     vector: list[float],
     topk: int,
+    candidate_id: str,
 ) -> list[dict[str, Any]]:
     # In-index pre-filter (Neo4j 2026.02+): the WHERE lives inside the SEARCH so
-    # the walk only visits approved items in this project/scope. The candidate
-    # itself is 'candidate', so status = 'approved' already excludes it.
+    # the walk only visits this project/scope. No status predicate is needed:
+    # the gate removes the embedding when it rejects or folds an item, so the
+    # vector index only ever contains live memory (approved + candidate). The
+    # candidate finds itself (its embedding is already written), so it is
+    # dropped by id after the search; the index LIMIT is one higher to keep
+    # topk real neighbours.
     query = f"""
         MATCH (node:{label})
         SEARCH node IN (
@@ -188,9 +212,10 @@ def _fetch_neighbours_vector(
             FOR $vector
             WHERE node.project_id = $project_id
               AND node.scope = $scope
-              AND node.status = 'approved'
             LIMIT $limit
         ) SCORE AS score
+        WITH node, score
+        WHERE node.id <> $candidate_id
         {_NEIGHBOUR_RETURN}
         ORDER BY score DESC
     """
@@ -200,7 +225,8 @@ def _fetch_neighbours_vector(
             vector=vector,
             project_id=project_id,
             scope=scope,
-            limit=topk,
+            limit=topk + 1,
+            candidate_id=candidate_id,
         )
         return [dict(record) for record in result]
 
@@ -215,6 +241,7 @@ def _fetch_neighbours_fulltext(
     scope: str,
     text: str,
     topk: int,
+    candidate_id: str,
 ) -> list[dict[str, Any]]:
     lucene = _lucene_query(text)
     if not lucene:
@@ -224,7 +251,8 @@ def _fetch_neighbours_fulltext(
         WHERE node:{label}
           AND node.project_id = $project_id
           AND node.scope = $scope
-          AND node.status = 'approved'
+          AND node.status IN ['approved', 'candidate']
+          AND node.id <> $candidate_id
         {_NEIGHBOUR_RETURN}
         ORDER BY score DESC
         LIMIT $limit
@@ -237,6 +265,7 @@ def _fetch_neighbours_fulltext(
             project_id=project_id,
             scope=scope,
             limit=topk,
+            candidate_id=candidate_id,
         )
         return [dict(record) for record in result]
 
@@ -251,7 +280,11 @@ _JUDGE_SYSTEM = (
 
 
 def _format_neighbour(idx: int, item: dict[str, Any]) -> str:
-    parts = [f"[{idx}] id={item['id']}", f"text={item.get('text')!r}"]
+    parts = [
+        f"[{idx}] id={item['id']}",
+        f"status={item.get('status')}",
+        f"text={item.get('text')!r}",
+    ]
     if item.get("rationale"):
         parts.append(f"rationale={item['rationale']!r}")
     if item.get("confidence") is not None:
@@ -277,7 +310,9 @@ def _build_judge_prompt(
         _format_neighbour(i, item) for i, item in enumerate(neighbours)
     )
     return f"""A new {kind} candidate was just extracted for this project. Make TWO \
-independent judgements about it against the existing approved {kind}s below.
+independent judgements about it against the existing stored {kind}s below. Each \
+existing item carries a status: "approved" items passed review; "candidate" \
+items are unreviewed peers still awaiting this same gate.
 
 (1) CONTRADICTION: does the candidate GENUINELY CONTRADICT any existing item — \
 the two statements cannot both be true at the same time (e.g. "we use REST" vs \
@@ -286,6 +321,7 @@ the two statements cannot both be true at the same time (e.g. "we use REST" vs \
 (2) ALREADY LEARNED: is the candidate simply a RESTATEMENT of one existing item — \
 the same fact/decision in different words, adding no materially new constraint or \
 detail (a paraphrase, or a strict subset of what the existing item already says)? \
+This applies whether the existing item is approved or itself a candidate. \
 If it refines or adds a genuinely new constraint, it is NOT already learned and \
 should be treated as new.
 
@@ -295,14 +331,15 @@ merely sharing a topic is neither.
 NEW {kind.upper()} CANDIDATE:
 {chr(10).join(candidate_lines)}
 
-EXISTING APPROVED {kind.upper()}S:
+EXISTING STORED {kind.upper()}S:
 {neighbour_block if neighbour_block else "(none)"}
 
 For each genuine contradiction, decide which side is more likely correct now.
 Prefer the NEW candidate (memory should track the latest reality), but do not
 treat that preference as absolute: choose "existing" when the existing item is
 clearly more reliable — much higher support_count/confidence, or the new
-candidate looks mistaken or speculative. Use "unclear" only when you truly
+candidate looks mistaken or speculative. An approved item outweighs an
+unreviewed candidate of similar support. Use "unclear" only when you truly
 cannot tell which is right.
 
 For "already learned", return the id of the single existing item the candidate
@@ -418,12 +455,19 @@ def _apply_resolutions(tx, *, label: str, rows: list[dict[str, Any]], model: str
         SET c.status = row.outcome,
             c.consistency_status = row.consistency,
             c.consistency_checked_at = datetime($timestamp),
-            c.consistency_model = $model
+            c.consistency_model = $model,
+            // Dead memory leaves the vector index: dropping the embedding is
+            // what lets neighbour retrieval skip status filtering entirely.
+            c.embedding = CASE
+                WHEN row.outcome IN ['rejected', 'already_learned'] THEN null
+                ELSE c.embedding
+            END
         WITH c, row
         CALL (c, row) {{
             UNWIND row.superseded_ids AS sid
             MATCH (old:{label} {{id: sid}})
             SET old.status = 'rejected',
+                old.embedding = null,
                 old.rejected_at = datetime($timestamp),
                 old.rejected_reason = 'superseded_by:' + c.id
             MERGE (c)-[r:SUPERSEDES]->(old)
@@ -483,7 +527,7 @@ def _gate_one_label(
     timestamp: str,
 ) -> int:
     topk = _topk()
-    resolutions: list[dict[str, Any]] = []
+    applied = 0
     for row in rows:
         candidate_id = row.get("id")
         if not candidate_id:
@@ -501,6 +545,7 @@ def _gate_one_label(
                     scope=scope,
                     vector=vector,
                     topk=topk,
+                    candidate_id=candidate_id,
                 )
             else:
                 neighbours = _fetch_neighbours_fulltext(
@@ -512,6 +557,7 @@ def _gate_one_label(
                     scope=scope,
                     text=row.get("text") or "",
                     topk=topk,
+                    candidate_id=candidate_id,
                 )
         except Exception as exc:
             print(
@@ -541,21 +587,30 @@ def _gate_one_label(
                     flush=True,
                 )
                 continue
-        resolutions.append(
-            _resolve(candidate_id, neighbours, contradictions, already_learned_of)
-        )
+        resolution = _resolve(candidate_id, neighbours, contradictions, already_learned_of)
+        # Apply immediately, not after the loop: later rows in this batch then
+        # retrieve the updated statuses, so two restatements extracted together
+        # collapse onto one canonical item instead of mutually folding into
+        # each other (A already_learned_from B *and* B already_learned_from A).
+        try:
+            with driver.session(database=database) as session:
+                session.execute_write(
+                    _apply_resolutions,
+                    label=label,
+                    rows=[resolution],
+                    model=extraction_model_label(model),
+                    timestamp=timestamp,
+                )
+        except Exception as exc:
+            print(
+                f"[consistency_gate] applying resolution failed for {label} {candidate_id} "
+                f"({type(exc).__name__}: {str(exc)[:140]}); leaving as candidate",
+                flush=True,
+            )
+            continue
+        applied += 1
 
-    if not resolutions:
-        return 0
-    with driver.session(database=database) as session:
-        session.execute_write(
-            _apply_resolutions,
-            label=label,
-            rows=resolutions,
-            model=extraction_model_label(model),
-            timestamp=timestamp,
-        )
-    return len(resolutions)
+    return applied
 
 
 def run_consistency_gate(
@@ -622,3 +677,184 @@ def run_consistency_gate(
         timestamp=timestamp,
     )
     return {"learnings": checked_learnings, "decisions": checked_decisions}
+
+
+# --------------------------------------------------------------------------- #
+# Sweep: gate candidates that entered the graph without a gate run
+# --------------------------------------------------------------------------- #
+DEFAULT_SWEEP_LIMIT = 8
+
+_SWEEP_LABELS = (
+    ("learnings", "Learning", "project_learning_vector", "project_learning_fulltext", "learning"),
+    ("decisions", "Decision", "project_decision_vector", "project_decision_fulltext", "decision"),
+)
+
+
+def sweep_limit() -> int:
+    """Max ungated candidates swept per label per run (bounds judge LLM calls).
+    ``MKG_CONSISTENCY_SWEEP_LIMIT`` overrides; 0 disables the sweep."""
+    try:
+        return max(0, int(os.environ.get("MKG_CONSISTENCY_SWEEP_LIMIT", str(DEFAULT_SWEEP_LIMIT))))
+    except ValueError:
+        return DEFAULT_SWEEP_LIMIT
+
+
+def _fetch_ungated_candidates(
+    driver,
+    database: str,
+    *,
+    label: str,
+    project_id: str,
+    exclude_ids: list[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Project-scoped candidates the gate has never resolved, oldest first.
+
+    ``consistency_checked_at`` is stamped by ``_apply_resolutions`` for every
+    gated row (including ambiguous keep-as-candidate outcomes), so its absence
+    means the item bypassed the gate entirely: an MCP tool write, or a row an
+    earlier judge/retrieval failure skipped. Oldest-first drains the backlog
+    without starvation under the per-run limit.
+    """
+    query = f"""
+        MATCH (n:{label} {{status: 'candidate'}})
+        WHERE n.project_id = $project_id
+          AND n.scope = 'project'
+          AND n.consistency_checked_at IS NULL
+          AND n.text IS NOT NULL
+          AND NOT n.id IN $exclude_ids
+        RETURN n.id AS id,
+               n.text AS text,
+               n.rationale AS rationale,
+               n.confidence AS confidence,
+               n.scope AS scope,
+               n.embedding AS embedding
+        ORDER BY coalesce(n.updated_at, n.created_at)
+        LIMIT $limit
+    """
+    with driver.session(database=database) as session:
+        result = session.run(
+            query,
+            project_id=project_id,
+            exclude_ids=list(exclude_ids),
+            limit=limit,
+        )
+        return [dict(record) for record in result]
+
+
+def _persist_embeddings(
+    driver,
+    database: str,
+    *,
+    label: str,
+    rows: list[dict[str, Any]],
+    timestamp: str,
+) -> int:
+    """Write freshly computed embeddings back onto swept nodes so they are
+    permanently vector-searchable, not just embedded for this gate run."""
+    payload = [
+        {"id": row["id"], "embedding": row["embedding"]}
+        for row in rows
+        if row.get("id") and row.get("embedding")
+    ]
+    if not payload:
+        return 0
+    with driver.session(database=database) as session:
+        session.run(
+            f"""
+            UNWIND $rows AS row
+            MATCH (n:{label} {{id: row.id}})
+            SET n.embedding = row.embedding,
+                n.embedding_updated_at = datetime($timestamp)
+            """,
+            rows=payload,
+            timestamp=timestamp,
+        ).consume()
+    return len(payload)
+
+
+def sweep_ungated_candidates(
+    driver,
+    database: str,
+    *,
+    project: ProjectRef,
+    model: str | None,
+    timestamp: str,
+    exclude_ids: list[str] | None = None,
+) -> dict[str, int]:
+    """Gate project-scoped candidates that never went through the gate.
+
+    The batch gate only sees rows the Stop extractor just produced, so
+    candidates written through the ``project_add_learning`` MCP tool — and rows
+    an earlier judge failure left unresolved — would otherwise stay ungated
+    (and un-embedded) forever. This sweep picks them up, embeds and persists
+    missing embeddings, and runs the exact same retrieve-judge-resolve pipeline
+    per item. ``exclude_ids`` should carry the ids the caller just attempted so
+    a row that failed the judge moments ago is not immediately retried.
+
+    Bounded by :func:`sweep_limit` per label per run so a large backlog drains
+    across turns instead of stalling one Stop. User-scoped candidates are
+    excluded for the same reason as in :func:`run_consistency_gate`.
+    """
+    if not consistency_gate_enabled():
+        return {"learnings": 0, "decisions": 0}
+    limit = sweep_limit()
+    if limit <= 0:
+        return {"learnings": 0, "decisions": 0}
+    ready, reason = llm_readiness_status(model)
+    if not ready:
+        print(f"[consistency_gate] sweep skipped: judge unavailable ({reason})", flush=True)
+        return {"learnings": 0, "decisions": 0}
+
+    counts: dict[str, int] = {}
+    for key, label, index_name, fulltext_index, kind in _SWEEP_LABELS:
+        counts[key] = 0
+        try:
+            rows = _fetch_ungated_candidates(
+                driver,
+                database,
+                label=label,
+                project_id=project.id,
+                exclude_ids=exclude_ids or [],
+                limit=limit,
+            )
+        except Exception as exc:
+            print(
+                f"[consistency_gate] sweep fetch failed for {label} "
+                f"({type(exc).__name__}: {str(exc)[:140]}); skipping",
+                flush=True,
+            )
+            continue
+        if not rows:
+            continue
+        missing = [row for row in rows if not row.get("embedding")]
+        if missing and attach_candidate_embeddings(missing):
+            try:
+                _persist_embeddings(
+                    driver, database, label=label, rows=missing, timestamp=timestamp
+                )
+            except Exception as exc:
+                print(
+                    f"[consistency_gate] persisting swept embeddings failed for {label} "
+                    f"({type(exc).__name__}: {str(exc)[:140]}); "
+                    "gating with the in-memory vector",
+                    flush=True,
+                )
+        counts[key] = _gate_one_label(
+            driver,
+            database,
+            project=project,
+            label=label,
+            index_name=index_name,
+            fulltext_index=fulltext_index,
+            kind=kind,
+            rows=rows,
+            model=model,
+            timestamp=timestamp,
+        )
+        if counts[key]:
+            print(
+                f"[consistency_gate] swept {counts[key]} ungated {kind} candidate(s)",
+                flush=True,
+            )
+    return counts

@@ -56,6 +56,7 @@ from consistency_gate import (  # noqa: E402
     attach_candidate_embeddings,
     ensure_memory_vector_indexes,
     run_consistency_gate,
+    sweep_ungated_candidates,
 )
 
 
@@ -457,6 +458,7 @@ def _memory_rows_from_actions(
                 "rationale": truncate(str(item.get("rationale") or ""), 500) or None,
                 "task_pattern": item.get("task_pattern"),
                 "confidence": _confidence(item.get("confidence")),
+                "status": "candidate",
                 "scope": scope,
                 "source": HOOK_LEARNING_SOURCE,
                 "summary": text or item.get("reason"),
@@ -711,6 +713,7 @@ def _write_processing(
                           d.summary = row.summary,
                           d.source = row.source,
                           d.created_by_model = row.llm_model,
+                          d.status = row.status,
                           d.scope = row.scope,
                           d.support_count = 0
             SET d.text = row.text,
@@ -755,7 +758,7 @@ def _write_processing(
                 d.rationale = coalesce(row.rationale, d.rationale),
                 d.task_pattern = coalesce(row.task_pattern, d.task_pattern),
                 d.summary = coalesce(row.summary, d.summary),
-                d.scope = coalesce(row.scope, d.scope, 'project'),
+                d.scope = row.scope,
                 d.last_source = row.source,
                 d.last_source_session_id = $session_id,
                 d.last_reason = row.reason,
@@ -995,6 +998,23 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                         decision_rows=decision_rows,
                         model=model_name,
                         timestamp=timestamp,
+                    )
+                    # Then sweep candidates that entered the graph without a
+                    # gate run — MCP `project_add_learning` writes and rows an
+                    # earlier judge failure skipped. This run's own rows are
+                    # excluded: they were just attempted, so a row the judge
+                    # failed on moments ago is not immediately retried.
+                    sweep_ungated_candidates(
+                        driver,
+                        database,
+                        project=project,
+                        model=model_name,
+                        timestamp=timestamp,
+                        exclude_ids=[
+                            row["id"]
+                            for row in (*learning_rows, *decision_rows)
+                            if row.get("id")
+                        ],
                     )
             except Exception as exc:
                 error_text = f"{type(exc).__name__}: {exc}"

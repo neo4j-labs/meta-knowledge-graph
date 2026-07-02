@@ -89,3 +89,18 @@ def test_project_add_learning_has_no_source_parameter() -> None:
     assert len(defs) == 1
     arg_names = {arg.arg for arg in defs[0].args.args + defs[0].args.kwonlyargs}
     assert "source" not in arg_names
+
+
+def test_embed_learning_text_returns_none_without_credentials(monkeypatch) -> None:
+    # The write path must degrade to a plain (un-embedded) learning when the
+    # embedding provider has no credentials; the sweep embeds it later.
+    monkeypatch.setattr(server, "_llm_credentials_present", lambda model: False)
+    assert server._embed_learning_text_sync("some text") is None
+
+
+def test_project_add_learning_writes_embedding_property() -> None:
+    # MCP-written learnings are embedded at write time so the consistency
+    # gate's vector retrieval sees them immediately; coalesce keeps the stored
+    # vector when embedding is unavailable for a given call.
+    source = Path(server.__file__).read_text()
+    assert "l.embedding = coalesce($embedding, l.embedding)" in source

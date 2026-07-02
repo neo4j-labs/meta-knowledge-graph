@@ -36,11 +36,16 @@ def _embedding_input(record: dict) -> str:
 
 
 def _fetch(session, label: str, only_missing: bool) -> list[dict]:
+    # Only live memory belongs in the vector index: the gate removes the
+    # embedding when it rejects or folds an item, and re-embedding those
+    # tombstones here would put them back into neighbour retrieval.
     predicate = "n.embedding IS NULL" if only_missing else "true"
     result = session.run(
         f"""
         MATCH (n:{label})
-        WHERE n.text IS NOT NULL AND ({predicate})
+        WHERE n.text IS NOT NULL
+          AND n.status IN ['approved', 'candidate']
+          AND ({predicate})
         RETURN n.id AS id, n.text AS text, n.rationale AS rationale
         """
     )
