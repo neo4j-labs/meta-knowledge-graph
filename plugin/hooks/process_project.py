@@ -983,7 +983,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                         timestamp=timestamp,
                     )
                     # Then sweep candidates that entered the graph without a
-                    # gate run — MCP `project_add_learning` writes and rows an
+                    # gate run — MCP memory tool writes and rows an
                     # earlier judge failure skipped. This run's own rows are
                     # excluded: they were just attempted, so a row the judge
                     # failed on moments ago is not immediately retried.

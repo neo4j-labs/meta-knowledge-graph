@@ -64,6 +64,7 @@ class SalesAgentSeedAllTests(unittest.TestCase):
         self.assertIn("system: Neo4j-backed", prompt)
         self.assertIn("Neo4j-backed `:Learning` / `:Decision` nodes", prompt)
         self.assertIn("`project_get_context`, `project_add_learning`", prompt)
+        self.assertIn("`project_add_decision`", prompt)
         self.assertIn(
             "Do not refer to, rely on, or imply any separate memory provider",
             normalized_prompt,

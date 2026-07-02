@@ -13,6 +13,18 @@ if str(SRC) not in sys.path:
 from meta_knowledge_graph import server  # noqa: E402
 
 
+def _server_function_def(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    tree = ast.parse(Path(server.__file__).read_text())
+    defs = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == name
+    ]
+    assert len(defs) == 1
+    return defs[0]
+
+
 def test_neocarta_transport_uses_project_environment_entrypoint() -> None:
     transport = server._neocarta_transport({"NEO4J_URI": "bolt://example"})
 
@@ -79,15 +91,15 @@ def test_mcp_learning_source_is_stable_verbose_tag() -> None:
 def test_project_add_learning_has_no_source_parameter() -> None:
     # The writer provenance is fixed by the tool, not caller-supplied. The tool
     # is a closure inside create_mcp_server, so inspect its definition via AST.
-    tree = ast.parse(Path(server.__file__).read_text())
-    defs = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "project_add_learning"
-    ]
-    assert len(defs) == 1
-    arg_names = {arg.arg for arg in defs[0].args.args + defs[0].args.kwonlyargs}
+    fn = _server_function_def("project_add_learning")
+    arg_names = {arg.arg for arg in fn.args.args + fn.args.kwonlyargs}
+    assert "source" not in arg_names
+
+
+def test_project_add_decision_has_no_source_parameter() -> None:
+    # Decision writes use the same fixed MCP provenance as learning writes.
+    fn = _server_function_def("project_add_decision")
+    arg_names = {arg.arg for arg in fn.args.args + fn.args.kwonlyargs}
     assert "source" not in arg_names
 
 
@@ -106,9 +118,26 @@ def test_project_add_learning_writes_embedding_property() -> None:
     assert "l.embedding = coalesce($embedding, l.embedding)" in source
 
 
+def test_project_add_decision_writes_embedding_property() -> None:
+    # Decision writes mirror learning writes: stable node, vector-ready payload,
+    # project relationship, and fulltext index for fallback retrieval.
+    source = Path(server.__file__).read_text()
+    assert '@mcp.tool(name="project_add_decision")' in source
+    assert "MERGE (d:Decision {id: $row_id})" in source
+    assert "d.embedding = coalesce($embedding, d.embedding)" in source
+    assert "MERGE (p)-[:HAS_DECISION]->(d)" in source
+    assert "CREATE FULLTEXT INDEX project_decision_fulltext IF NOT EXISTS" in source
+
+
 def test_project_get_context_uses_hybrid_retrieval() -> None:
     source = Path(server.__file__).read_text()
     assert "description=\"Optional free-text query for hybrid ranking" in source
     assert "VECTOR INDEX {vector_index}" in source
     assert "UNION ALL'.join(branches)" in source
     assert "sum(1.0 / ($rrf_k + rank)) AS score" in source
+
+
+def test_project_get_context_returns_user_decisions() -> None:
+    source = Path(server.__file__).read_text()
+    assert "MATCH (d:Decision {scope: 'user'})" in source
+    assert '"user_decisions": user_decisions' in source

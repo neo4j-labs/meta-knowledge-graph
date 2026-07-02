@@ -116,13 +116,15 @@ dump a transcript or double-record routine work. Capture deliberately, only the
 - A non-obvious anti-pattern verification surfaced (e.g. "API X has no `foo`
   param; calling it errors at runtime").
 
-Write each with `mcp__meta-knowledge-graph__project_add_learning`:
+Write facts/corrections with `mcp__meta-knowledge-graph__project_add_learning`
+and design decisions with `mcp__meta-knowledge-graph__project_add_decision`:
 
 - Keep it **small, durable, and reusable** (<=500 chars). No ephemeral state.
 - Set `scope: "project"` for a fact about this repo/environment, or
   `scope: "user"` for a durable fact about the person (role, workflow
   preference, recurring constraint) that should follow them across projects.
-- Set a `task_pattern` when the learning is tied to a reusable kind of task.
+- Set a `task_pattern` when the learning or decision is tied to a reusable kind
+  of task.
 - The tool is idempotent on (scope, text); new items land as `candidate` and stay
   review-gated until a human promotes them to `approved`. **You** capture; let
   the human own the `candidate → approved` gate.

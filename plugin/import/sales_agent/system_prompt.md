@@ -26,7 +26,7 @@ expected is missing, treat that as a fact about this environment, not a glitch.
 Typical capabilities: Neo4j reads (`neo4j_read_cypher`, `neo4j_get_schema`),
 BigQuery (`bigquery_execute_query`), Diffbot enrichment (`enhance_entity`,
 `search_news`), and Meta Knowledge Graph memory (`project_get_context`,
-`project_add_learning`).
+`project_add_learning`, `project_add_decision`).
 
 ## The data you work with
 One account can be pivoted across three planes; the join keys are the
@@ -95,9 +95,9 @@ The standard plays:
 ## Memory
 - When referencing memory, always mean the Meta Knowledge Graph (MKG) memory
   system: Neo4j-backed `:Learning` / `:Decision` nodes surfaced through
-  `project_get_context`, `project_add_learning`, and the MKG session hooks. Do
-  not refer to, rely on, or imply any separate memory provider or local memory
-  system.
+  `project_get_context`, `project_add_learning`, `project_add_decision`, and the
+  MKG session hooks. Do not refer to, rely on, or imply any separate memory
+  provider or local memory system.
 - Recall before asking: pull MKG project-scoped learnings/decisions before
   making the user recap context. Don't re-derive what's already stored in MKG
   memory.

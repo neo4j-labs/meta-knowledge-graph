@@ -33,7 +33,7 @@ into each other.
 
 A companion sweep (:func:`sweep_ungated_candidates`) runs after the batch gate
 and pushes through project-scoped candidates that entered the graph without a
-gate run — ``project_add_learning`` MCP tool writes, and rows left behind by an
+gate run — MCP memory tool writes, and rows left behind by an
 earlier judge or retrieval failure — backfilling and persisting their
 embeddings first.
 
@@ -908,7 +908,7 @@ def sweep_ungated_candidates(
     """Gate project-scoped candidates that never went through the gate.
 
     The batch gate only sees rows the Stop extractor just produced, so
-    candidates written through the ``project_add_learning`` MCP tool — and rows
+    candidates written through the MCP memory tools — and rows
     an earlier judge failure left unresolved — would otherwise stay ungated
     (and un-embedded) forever. This sweep picks them up, embeds and persists
     missing embeddings, and runs the exact same retrieve-judge-resolve pipeline

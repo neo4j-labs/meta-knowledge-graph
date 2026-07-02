@@ -12,6 +12,9 @@ approval_mode = "approve"
 [mcp_servers.meta-knowledge-graph.tools.project_add_learning]
 approval_mode = "approve"
 
+[mcp_servers.meta-knowledge-graph.tools.project_add_decision]
+approval_mode = "approve"
+
 [mcp_servers.meta-knowledge-graph.tools.neocarta_list_tables_by_schema]
 approval_mode = "approve"
 
