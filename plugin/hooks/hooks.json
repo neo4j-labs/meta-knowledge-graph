@@ -76,6 +76,25 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*__(bigquery_execute_query|neo4j_read_cypher)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/capture_query_failures.py\""
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "hooks": [

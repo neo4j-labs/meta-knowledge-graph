@@ -241,6 +241,76 @@ class QueryFailureCaptureTests(unittest.TestCase):
         self.assertNotIn("query", write_params)
 
 
+class ToolFailureEventTests(unittest.TestCase):
+    """Claude Code PostToolUseFailure payloads enter the same unified pipeline."""
+
+    def _failure_payload(self, *, error: str, is_interrupt: bool = False) -> dict:
+        return {
+            "session_id": "session-1",
+            "hook_event_name": "PostToolUseFailure",
+            "tool_use_id": "toolu-9",
+            "tool_name": "mcp__meta_knowledge_graph__neo4j_read_cypher",
+            "tool_input": {"query": "MATCH (n) RETRUN n"},
+            "error": error,
+            "is_interrupt": is_interrupt,
+        }
+
+    def test_failure_payload_normalizes_to_unified_error_response(self) -> None:
+        error = "Neo.ClientError.Statement.SyntaxError: Invalid input 'RETRUN'"
+        normalized = capture_query_failures.normalize_tool_failure_payload(
+            self._failure_payload(error=error)
+        )
+
+        self.assertEqual(normalized["hook_event_name"], "PostToolUse")
+        self.assertEqual(normalized["source_event"], "PostToolUseFailure")
+        self.assertTrue(normalized["tool_error"])
+        self.assertIs(normalized["is_interrupt"], False)
+        self.assertEqual(
+            normalized["tool_response"],
+            {"content": [{"type": "text", "text": error}], "isError": True},
+        )
+
+    def test_non_failure_payload_passes_through_unchanged(self) -> None:
+        payload = _payload(
+            "mcp__meta_knowledge_graph__neo4j_read_cypher",
+            "MATCH (n) RETURN n LIMIT 1",
+            _content("[]"),
+        )
+
+        self.assertIs(
+            capture_query_failures.normalize_tool_failure_payload(payload), payload
+        )
+
+    def test_failure_payload_is_classified_like_any_error_response(self) -> None:
+        normalized = capture_query_failures.normalize_tool_failure_payload(
+            self._failure_payload(
+                error="Neo.ClientError.Statement.SyntaxError: Invalid input 'RETRUN'"
+            )
+        )
+        projection = capture_query_failures.build_failure_projection(normalized)
+
+        self.assertIsNotNone(projection)
+        assert projection is not None
+        self.assertEqual(projection["query"]["status"], "error")
+        self.assertEqual(
+            sorted(issue["type"] for issue in projection["issues"]), ["syntax_error"]
+        )
+        # Same stable id the Stop-time transcript scan derives, so live and
+        # fallback capture converge on one QueryExecution node.
+        self.assertEqual(
+            projection["query"]["id"], "query-execution:session-1:toolu-9"
+        )
+
+    def test_interrupted_failure_is_not_captured(self) -> None:
+        captured = capture_query_failures.capture(
+            self._failure_payload(
+                error="[Request interrupted by user]", is_interrupt=True
+            )
+        )
+
+        self.assertEqual(captured, 0)
+
+
 class TranscriptExtractionTests(unittest.TestCase):
     """Stop-hook path: failed query tool calls are recovered from the transcript."""
 
@@ -386,6 +456,39 @@ class TranscriptExtractionTests(unittest.TestCase):
         self.assertEqual(
             projections["toolu_1"]["query"]["id"], "query-execution:session-x:toolu_1"
         )
+
+    def test_live_failure_event_converges_with_transcript_recovery(self) -> None:
+        neo = "mcp__meta_knowledge_graph__neo4j_read_cypher"
+        query = "CALL gds.graph.list() YIELD graphName RETURN graphName"
+        error = (
+            "Neo.ClientError.Procedure.ProcedureNotFound (There is no procedure "
+            "with the name `gds.graph.list` registered for this database instance.)"
+        )
+        live = capture_query_failures.build_failure_projection(
+            capture_query_failures.normalize_tool_failure_payload(
+                {
+                    "session_id": "session-x",
+                    "hook_event_name": "PostToolUseFailure",
+                    "tool_use_id": "toolu_2",
+                    "tool_name": neo,
+                    "tool_input": {"query": query},
+                    "error": error,
+                    "is_interrupt": False,
+                }
+            )
+        )
+        transcript = self._write_transcript(
+            [
+                self._tool_use("toolu_2", neo, query),
+                self._tool_result("toolu_2", error, is_error=True),
+            ]
+        )
+        recovered = capture_query_failures.build_failure_projection(
+            capture_query_failures.extract_query_payloads(transcript, "session-x")[0]
+        )
+
+        self.assertIsNotNone(live)
+        self.assertEqual(live, recovered)
 
     def test_ignores_non_query_tools(self) -> None:
         records = [

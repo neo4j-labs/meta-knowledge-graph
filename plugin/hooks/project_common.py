@@ -33,6 +33,10 @@ OAUTH_EXPIRY_GRACE_SECONDS = 60
 INJECTION_EVENT_WINDOW_SECONDS = 120
 SUBAGENT_HOOK_EVENTS = frozenset({"SubagentStart", "SubagentStop"})
 PROJECT_NEUTRAL_LIFECYCLE_EVENTS = frozenset({"SessionStart", "SessionEnd"})
+# Claude Code-only lifecycle event fired instead of PostToolUse when a tool
+# call fails; Codex has no equivalent and represents failures as error-shaped
+# tool results.
+TOOL_FAILURE_HOOK_EVENT = "PostToolUseFailure"
 ROLLOUT_TRANSCRIPT_ID_RE = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$",
     re.IGNORECASE,
@@ -43,6 +47,38 @@ def injection_window_start() -> str:
     return (
         datetime.now(timezone.utc) - timedelta(seconds=INJECTION_EVENT_WINDOW_SECONDS)
     ).isoformat()
+
+
+def normalize_tool_failure_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Map a Claude Code ``PostToolUseFailure`` payload onto the unified
+    ``PostToolUse`` shape.
+
+    The failure event carries ``error``/``is_interrupt`` instead of
+    ``tool_response``. Rewriting it as a PostToolUse whose ``tool_response`` is
+    the ``{content, isError: true}`` MCP error shape gives failed calls the
+    exact representation Codex failures already have, so every downstream
+    consumer — event log, pre/post enrichment pairing, query-issue
+    classification, memory corpus — handles both clients identically.
+    ``tool_error`` / ``is_interrupt`` / ``source_event`` keep the failure
+    distinguishable from an ordinary error-shaped success payload. Non-failure
+    payloads pass through unchanged.
+    """
+    if str(payload.get("hook_event_name") or "") != TOOL_FAILURE_HOOK_EVENT:
+        return payload
+    normalized = dict(payload)
+    normalized["hook_event_name"] = "PostToolUse"
+    normalized["source_event"] = TOOL_FAILURE_HOOK_EVENT
+    normalized["tool_error"] = True
+    normalized["is_interrupt"] = payload.get("is_interrupt") is True
+    error = payload.get("error")
+    if not isinstance(error, str):
+        error = json.dumps(error, default=str) if error is not None else ""
+    if normalized.get("tool_response") is None:
+        normalized["tool_response"] = {
+            "content": [{"type": "text", "text": error}],
+            "isError": True,
+        }
+    return normalized
 
 
 def _non_empty_text(value: Any) -> str | None:

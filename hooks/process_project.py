@@ -1091,8 +1091,11 @@ def main() -> int:
     # Deterministic query-failure capture runs synchronously in the foreground
     # hook: it is LLM-free, and only the foreground payload carries
     # transcript_path (the background re-invocation gets only --session-id).
-    # PostToolUse never fires for isError tool results, so the transcript is the
-    # sole complete record of failed queries.
+    # Claude Code captures failures live via PostToolUseFailure, but Codex has
+    # no failure event (PostToolUse never fires for isError results there), so
+    # this transcript scan stays as the Codex path — and as an idempotent
+    # safety net when a live hook never ran; shared stable ids make re-capture
+    # converge instead of duplicating.
     transcript_path = payload.get("transcript_path")
     if transcript_path:
         try:

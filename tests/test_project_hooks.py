@@ -629,6 +629,57 @@ class ProjectHookTests(unittest.TestCase):
             self.assertEqual(row["agent_transcript_id"], subagent_id)
             self.assertEqual(row["parent_session_id"], parent_session_id)
 
+    def test_event_enrichment_marks_failure_result_as_unsucceeded(self) -> None:
+        failure_response = json.dumps(
+            {
+                "content": [{"type": "text", "text": "Command exited with code 1"}],
+                "isError": True,
+            }
+        )
+        events = [
+            {
+                "event_id": "event-pre",
+                "event_name": "PreToolUse",
+                "timestamp": "2026-06-17T10:07:47Z",
+                "turn_id": "turn-1",
+                "tool_name": "Bash",
+                "tool_use_id": "call-1",
+                "tool_input": json.dumps({"command": "npm test"}),
+            },
+            {
+                "event_id": "event-post",
+                "event_name": "PostToolUse",
+                "timestamp": "2026-06-17T10:07:48Z",
+                "turn_id": "turn-1",
+                "tool_name": "Bash",
+                "tool_use_id": "call-1",
+                "tool_input": json.dumps({"command": "npm test"}),
+                "tool_response": failure_response,
+                "tool_error": True,
+                "source_event": "PostToolUseFailure",
+            },
+        ]
+
+        projection = enrich_events.build_event_enrichment_projection(
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "session-1",
+            "turn",
+            events,
+        )
+
+        self.assertEqual(len(projection["tool_calls"]), 1)
+        self.assertEqual(projection["tool_calls"][0]["post_event_id"], "event-post")
+        self.assertEqual(len(projection["results"]), 1)
+        self.assertIs(projection["results"][0]["succeeded"], False)
+
+    def test_result_success_reads_unified_iserror_shape(self) -> None:
+        self.assertIs(
+            enrich_events._result_success('{"content": [], "isError": true}'), False
+        )
+        self.assertIs(
+            enrich_events._result_success('{"content": [], "isError": false}'), True
+        )
+
     def test_parent_session_processors_include_subagent_sessions(self) -> None:
         captured: list[tuple[str, dict]] = []
 

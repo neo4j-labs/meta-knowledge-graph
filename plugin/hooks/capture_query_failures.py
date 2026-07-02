@@ -5,9 +5,12 @@
 # ///
 """Hook: capture failed or suspicious query tool results as graph artifacts.
 
-Wired as a PostToolUse hook for the BigQuery ``execute_query`` and Neo4j
-``read_cypher`` MCP tools. The hook only writes query artifacts when it detects
-an issue in the tool output; clean successful reads are ignored.
+Wired as a PostToolUse hook — and, on Claude Code, a PostToolUseFailure hook —
+for the BigQuery ``execute_query`` and Neo4j ``read_cypher`` MCP tools. The
+hook only writes query artifacts when it detects an issue in the tool output;
+clean successful reads are ignored. Failure payloads are normalized into the
+same ``{content, isError}`` response shape Codex failures use before
+classification, so both clients converge on identical QueryExecution nodes.
 
 Graph shape::
 
@@ -35,6 +38,7 @@ from project_common import (  # noqa: E402
     load_mkg_env,
     merge_project_and_session,
     neo4j_config,
+    normalize_tool_failure_payload,
     resolve_project,
 )
 
@@ -577,6 +581,11 @@ def write_failure_projection(
 
 
 def capture(payload: dict[str, Any]) -> int:
+    payload = normalize_tool_failure_payload(payload)
+    # A user interrupt (Ctrl+C) aborts the call before the engine answers;
+    # recording it as a query issue would be noise.
+    if payload.get("is_interrupt") is True:
+        return 0
     projection = build_failure_projection(payload)
     if projection is None:
         return 0
@@ -676,11 +685,13 @@ def _codex_tool_response(result: Any) -> dict[str, Any]:
 def extract_query_payloads(transcript_path: str, session_id: str) -> list[dict[str, Any]]:
     """Reconstruct PostToolUse-shaped payloads for query tools from a transcript.
 
-    PostToolUse hooks never fire for ``isError`` tool results in some harnesses,
-    so the transcript is the only complete record of failed queries. Supports
-    both Claude-style ``tool_use``/``tool_result`` message blocks and Codex
-    ``response_item/function_call`` plus ``event_msg/mcp_tool_call_end`` records,
-    normalizing each response into the ``{content, isError}`` shape the
+    Claude Code now surfaces failures live through PostToolUseFailure, but Codex
+    has no failure event and PostToolUse never fires for ``isError`` tool
+    results there, so the transcript remains the only complete record of failed
+    Codex queries — and a safety net for calls whose live hook never ran.
+    Supports both Claude-style ``tool_use``/``tool_result`` message blocks and
+    Codex ``response_item/function_call`` plus ``event_msg/mcp_tool_call_end``
+    records, normalizing each response into the ``{content, isError}`` shape the
     classifier already understands.
     """
     pending: dict[Any, dict[str, Any]] = {}
@@ -765,9 +776,9 @@ def capture_transcript(
 ) -> int:
     """Scan a transcript and persist every detectable query issue. Idempotent.
 
-    Reuses the same stable ``query-execution:{session}:{tool_use_id}`` ids as the
-    PostToolUse hook, so success-path issues already captured live converge on the
-    same nodes instead of duplicating.
+    Reuses the same stable ``query-execution:{session}:{tool_use_id}`` ids as
+    the live PostToolUse / PostToolUseFailure hooks, so issues already captured
+    live converge on the same nodes instead of duplicating.
     """
     projections = [
         projection

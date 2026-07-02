@@ -6,8 +6,12 @@
 """Hook: log every Claude Code lifecycle event to Neo4j as a linked list.
 
 Wired in .claude/settings.json for SessionStart, UserPromptSubmit, PreToolUse,
-PostToolUse, Notification, Stop, SubagentStop, PreCompact, and SessionEnd.
-Reads the hook payload from stdin and appends a SessionEvent to the per-session chain.
+PostToolUse, PostToolUseFailure, Notification, Stop, SubagentStop, PreCompact,
+and SessionEnd. Reads the hook payload from stdin and appends a SessionEvent to
+the per-session chain. PostToolUseFailure (Claude Code-only) is normalized into
+a PostToolUse event with an ``isError`` tool_response plus ``tool_error`` /
+``is_interrupt`` / ``source_event`` props, so failed calls look the same for
+Claude Code and Codex.
 
 Graph shape::
 
@@ -46,6 +50,7 @@ from project_common import (  # noqa: E402
     injection_window_start,
     link_event_to_project,
     load_mkg_env,
+    normalize_tool_failure_payload,
     resolve_project,
 )
 
@@ -354,6 +359,11 @@ def _event_project_id(project, event_name: str) -> str | None:
 def log_event(data: dict, client: str) -> None:
     from neo4j import GraphDatabase
 
+    # Claude Code delivers failed tool calls as PostToolUseFailure (CC-only)
+    # instead of PostToolUse. Fold them into the unified PostToolUse shape
+    # before hashing so the event id stays deterministic across hook configs
+    # and the stored event matches what a Codex failure looks like.
+    data = normalize_tool_failure_payload(data)
     session_id = str(data.get("session_id") or "unknown")
     event_name = str(data.get("hook_event_name") or "unknown")
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -389,6 +399,9 @@ def log_event(data: dict, client: str) -> None:
         "prompt": data.get("prompt"),
         "model": data.get("model"),
         "source": data.get("source"),
+        "source_event": data.get("source_event"),
+        "tool_error": data.get("tool_error"),
+        "is_interrupt": data.get("is_interrupt"),
         "turn_id": data.get("turn_id"),
         "last_assistant_message": data.get("last_assistant_message"),
         "stop_hook_active": data.get("stop_hook_active"),

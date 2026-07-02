@@ -273,9 +273,17 @@ def _result_success(tool_response: str) -> bool | None:
     if not tool_response:
         return None
     lowered = tool_response.lower()
-    if "process exited with code 0" in lowered or '"status": "success"' in lowered:
+    if (
+        "process exited with code 0" in lowered
+        or '"status": "success"' in lowered
+        or '"iserror": false' in lowered
+    ):
         return True
-    if "process exited with code " in lowered or '"status": "error"' in lowered:
+    if (
+        "process exited with code " in lowered
+        or '"status": "error"' in lowered
+        or '"iserror": true' in lowered
+    ):
         return False
     return None
 
@@ -454,6 +462,11 @@ def build_event_enrichment_projection(
 
         if post_event:
             result_id = f"tool-result:{call_id}"
+            # tool_error is stamped by log_event when the call arrived as a
+            # PostToolUseFailure; it overrides the text heuristic.
+            succeeded = (
+                False if post_event.get("tool_error") else _result_success(result_text)
+            )
             result_rows.append(
                 {
                     "id": result_id,
@@ -461,7 +474,7 @@ def build_event_enrichment_projection(
                     "post_event_id": _event_text(post_event, "event_id"),
                     "summary": _result_summary(result_text),
                     "response_chars": len(result_text),
-                    "succeeded": _result_success(result_text),
+                    "succeeded": succeeded,
                     "created_at": _event_time(post_event) or None,
                 }
             )

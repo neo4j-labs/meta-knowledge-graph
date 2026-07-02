@@ -75,6 +75,25 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/.claude/hooks/log_event.py --client claude_code"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*__(bigquery_execute_query|neo4j_read_cypher)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/capture_query_failures.py"
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "hooks": [
