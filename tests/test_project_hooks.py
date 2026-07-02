@@ -768,6 +768,197 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("remember duplicate handling", prompt)
         self.assertIn("Existing similar learnings", prompt)
 
+    def test_event_corpus_excludes_tool_output(self) -> None:
+        events = [
+            {
+                "event_name": "PostToolUse",
+                "tool_name": "neo4j_read_cypher",
+                "tool_input": "MATCH (n) RETURN count(n) AS nodes",
+                "tool_response": "TOOL-OUTPUT-MUST-NOT-LEAK",
+            }
+        ]
+
+        corpus = process_project._event_corpus(events)
+        self.assertIn("neo4j_read_cypher", corpus)
+        self.assertIn("MATCH (n) RETURN count(n) AS nodes", corpus)
+        self.assertNotIn("TOOL-OUTPUT-MUST-NOT-LEAK", corpus)
+
+        prompt = process_project.build_memory_extraction_prompt(
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "turn",
+            events,
+            [],
+            [],
+        )
+        self.assertNotIn("TOOL-OUTPUT-MUST-NOT-LEAK", prompt)
+
+    def test_event_corpus_includes_intermediate_assistant_messages(self) -> None:
+        base_records = [
+            {
+                "type": "user",
+                "timestamp": "2026-07-02T10:00:00.000Z",
+                "message": {"role": "user", "content": "Optimize the seeder"},
+            }
+        ]
+        new_records = [
+            {
+                "type": "assistant",
+                "timestamp": "2026-07-02T10:00:05.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "INTERMEDIATE-NARRATION: root cause is quota limits"},
+                        {
+                            "type": "tool_use",
+                            "id": "tu_1",
+                            "name": "neo4j_read_cypher",
+                            "input": {"query": "RETURN 1"},
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-07-02T10:00:06.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu_1",
+                            "content": "TRANSCRIPT-TOOL-OUTPUT-MUST-NOT-LEAK",
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-07-02T10:00:09.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "FINAL-ANSWER"}],
+                },
+            },
+        ]
+        first_snapshot = "\n".join(json.dumps(r) for r in base_records) + "\n"
+        last_snapshot = first_snapshot + "\n".join(json.dumps(r) for r in new_records) + "\n"
+        events = [
+            {
+                "event_name": "UserPromptSubmit",
+                "timestamp": "2026-07-02T10:00:00.000+00:00",
+                "prompt": "Optimize the seeder",
+                "transcript_path": "/tmp/session.jsonl",
+                "transcript": first_snapshot,
+            },
+            {
+                "event_name": "PostToolUse",
+                "timestamp": "2026-07-02T10:00:07.000+00:00",
+                "tool_name": "neo4j_read_cypher",
+                "tool_input": '{"query": "RETURN 1"}',
+                "tool_response": "EVENT-TOOL-OUTPUT-MUST-NOT-LEAK",
+            },
+            {
+                "event_name": "Stop",
+                "timestamp": "2026-07-02T10:00:10.000+00:00",
+                "last_assistant_message": "FINAL-ANSWER",
+                "transcript_path": "/tmp/session.jsonl",
+                "transcript": last_snapshot,
+            },
+        ]
+
+        corpus = process_project._event_corpus(events)
+
+        self.assertIn("INTERMEDIATE-NARRATION", corpus)
+        self.assertNotIn("TRANSCRIPT-TOOL-OUTPUT-MUST-NOT-LEAK", corpus)
+        self.assertNotIn("EVENT-TOOL-OUTPUT-MUST-NOT-LEAK", corpus)
+        # The final message arrives via last_assistant_message; its transcript
+        # copy is deduplicated.
+        self.assertEqual(corpus.count("FINAL-ANSWER"), 1)
+        # Chronological interleave: prompt, then narration, then the Stop event.
+        self.assertLess(corpus.index("Optimize the seeder"), corpus.index("INTERMEDIATE-NARRATION"))
+        self.assertLess(corpus.index("INTERMEDIATE-NARRATION"), corpus.index("Event: Stop"))
+
+    def test_event_corpus_scopes_assistant_messages_without_snapshot_prefix(self) -> None:
+        records = [
+            {
+                "type": "assistant",
+                "timestamp": "2026-07-02T09:59:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "OLD-TURN-NARRATION"}],
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": "2026-07-02T10:00:00.000Z",
+                "message": {"role": "user", "content": "current prompt"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-07-02T10:00:03.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "CURRENT-TURN-NARRATION"}],
+                },
+            },
+        ]
+        snapshot = "\n".join(json.dumps(r) for r in records) + "\n"
+        events = [
+            {
+                "event_name": "Stop",
+                "timestamp": "2026-07-02T10:00:10.000+00:00",
+                "transcript_path": "/tmp/solo.jsonl",
+                "transcript": snapshot,
+            }
+        ]
+
+        corpus = process_project._event_corpus(events)
+
+        self.assertIn("CURRENT-TURN-NARRATION", corpus)
+        self.assertNotIn("OLD-TURN-NARRATION", corpus)
+
+    def test_event_corpus_reads_codex_assistant_messages(self) -> None:
+        records = [
+            {
+                "type": "response_item",
+                "timestamp": "2026-07-02T10:00:02.000Z",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "CODEX-NARRATION"}],
+                },
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-07-02T10:00:03.000Z",
+                "payload": {
+                    "type": "mcp_tool_call_end",
+                    "call_id": "c1",
+                    "result": {
+                        "Ok": {
+                            "content": [
+                                {"type": "text", "text": "CODEX-TOOL-OUTPUT-MUST-NOT-LEAK"}
+                            ]
+                        }
+                    },
+                },
+            },
+        ]
+        snapshot = "\n".join(json.dumps(r) for r in records) + "\n"
+        events = [
+            {
+                "event_name": "Stop",
+                "timestamp": "2026-07-02T10:00:10.000+00:00",
+                "transcript_path": "/tmp/rollout.jsonl",
+                "transcript": snapshot,
+            }
+        ]
+
+        corpus = process_project._event_corpus(events)
+
+        self.assertIn("CODEX-NARRATION", corpus)
+        self.assertNotIn("CODEX-TOOL-OUTPUT-MUST-NOT-LEAK", corpus)
+
     def test_llm_action_rows_skip_ignored_memory(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
         actions = {
