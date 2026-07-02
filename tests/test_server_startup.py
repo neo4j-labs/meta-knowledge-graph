@@ -104,3 +104,11 @@ def test_project_add_learning_writes_embedding_property() -> None:
     # vector when embedding is unavailable for a given call.
     source = Path(server.__file__).read_text()
     assert "l.embedding = coalesce($embedding, l.embedding)" in source
+
+
+def test_project_get_context_uses_hybrid_retrieval() -> None:
+    source = Path(server.__file__).read_text()
+    assert "description=\"Optional free-text query for hybrid ranking" in source
+    assert "VECTOR INDEX {vector_index}" in source
+    assert "UNION ALL'.join(branches)" in source
+    assert "sum(1.0 / ($rrf_k + rank)) AS score" in source

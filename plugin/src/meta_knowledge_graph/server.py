@@ -19,6 +19,8 @@ from pydantic import Field
 
 MAX_LEARNING_TEXT = 500
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+HYBRID_RRF_K = 60.0
+HYBRID_KEYWORD_TERMS = 16
 DIFFBOT_API_BASE_URL = "https://kg.diffbot.com/kg/v3"
 DIFFBOT_TIMEOUT_SECONDS = 30.0
 MAX_DIFFBOT_LOCATIONS = 3
@@ -238,6 +240,19 @@ async def _embed_learning_text(text: str) -> Optional[List[float]]:
         return await asyncio.to_thread(_embed_learning_text_sync, text)
     except Exception:
         return None
+
+
+def _hybrid_keyword_query(value: str, limit: int = HYBRID_KEYWORD_TERMS) -> str:
+    words: list[str] = []
+    seen: set[str] = set()
+    for word in re.findall(r"[a-zA-Z0-9]{3,}", (value or "").lower()):
+        if word in seen:
+            continue
+        seen.add(word)
+        words.append(word)
+        if len(words) >= limit:
+            break
+    return " ".join(words)
 
 
 def _compact_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -509,6 +524,175 @@ def create_mcp_server(
     async def _execute_query_single(query: str, **params: Any):
         records = await _execute_query(query, **params)
         return records[0] if records else None
+
+    def _context_memory_projection(label: str) -> str:
+        if label == "Learning":
+            return """
+                   node.id AS id,
+                   node.text AS text,
+                   node.status AS status,
+                   node.confidence AS confidence,
+                   node.task_pattern AS task_pattern,
+                   node.scope AS scope,
+                   score,
+                   sources
+            """
+        return """
+               node.id AS id,
+               node.text AS text,
+               node.rationale AS rationale,
+               node.confidence AS confidence,
+               node.task_pattern AS task_pattern,
+               node.scope AS scope,
+               score,
+               sources
+        """
+
+    def _context_memory_rel(label: str) -> str:
+        return "HAS_LEARNING" if label == "Learning" else "HAS_DECISION"
+
+    def _context_vector_index(label: str) -> str:
+        return "project_learning_vector" if label == "Learning" else "project_decision_vector"
+
+    def _context_fulltext_index(label: str) -> str:
+        return "project_learning_fulltext" if label == "Learning" else "project_decision_fulltext"
+
+    async def _fetch_context_memory_hybrid(
+        *,
+        label: str,
+        query_text: str,
+        query_vector: Optional[List[float]],
+        scope: str,
+        statuses: list[str],
+        limit: int,
+        project_id: Optional[str] = None,
+        exclude_consolidated_user_facts: bool = False,
+    ) -> list[dict]:
+        keyword_query = _hybrid_keyword_query(query_text)
+        if not query_vector and not keyword_query:
+            return []
+
+        vector_index = _context_vector_index(label)
+        fulltext_index = _context_fulltext_index(label)
+        projection = _context_memory_projection(label)
+        project_filter = "AND node.project_id = $project_id" if project_id else ""
+        project_match = (
+            f"MATCH (:Project {{id: $project_id}})-[:{_context_memory_rel(label)}]->(node)"
+            if project_id
+            else ""
+        )
+        filters = ["true"]
+        if exclude_consolidated_user_facts:
+            filters.append(
+                "(node.consolidated_at IS NULL "
+                "OR toString(coalesce(node.updated_at, node.created_at)) > node.consolidated_at)"
+            )
+        post_filter = "\n          AND ".join(filters)
+        rank_limit = max(1, int(limit))
+        params = {
+            "project_id": project_id,
+            "scope": scope,
+            "statuses": statuses,
+            "search_query": keyword_query,
+            "query_vector": query_vector,
+            "rank_limit": rank_limit,
+            "limit": limit,
+            "rrf_k": HYBRID_RRF_K,
+        }
+
+        if query_vector:
+            branches = [
+                f"""
+                MATCH (node:{label})
+                SEARCH node IN (
+                    VECTOR INDEX {vector_index}
+                    FOR $query_vector
+                    WHERE node.scope = $scope
+                      AND node.status IN $statuses
+                      {project_filter}
+                    LIMIT $rank_limit
+                ) SCORE AS raw_score
+                WHERE {post_filter}
+                WITH node, raw_score
+                ORDER BY raw_score DESC
+                WITH collect({{node: node, raw_score: raw_score}}) AS rows
+                UNWIND range(0, size(rows) - 1) AS idx
+                WITH rows[idx] AS row, idx + 1 AS rank
+                RETURN row.node AS node,
+                       rank,
+                       row.raw_score AS raw_score,
+                       'vector' AS source
+                """
+            ]
+            if keyword_query:
+                branches.append(
+                    f"""
+                    CALL db.index.fulltext.queryNodes('{fulltext_index}', $search_query)
+                    YIELD node, score AS raw_score
+                    {project_match}
+                    WHERE node:{label}
+                      AND node.scope = $scope
+                      AND node.status IN $statuses
+                      AND {post_filter}
+                    WITH node, raw_score
+                    ORDER BY raw_score DESC
+                    LIMIT $rank_limit
+                    WITH collect({{node: node, raw_score: raw_score}}) AS rows
+                    UNWIND range(0, size(rows) - 1) AS idx
+                    WITH rows[idx] AS row, idx + 1 AS rank
+                    RETURN row.node AS node,
+                           rank,
+                           row.raw_score AS raw_score,
+                           'keyword' AS source
+                    """
+                )
+            hybrid_query = f"""
+                CALL {{
+                    {'UNION ALL'.join(branches)}
+                }}
+                WITH node,
+                     sum(1.0 / ($rrf_k + rank)) AS score,
+                     collect(source) AS sources
+                RETURN {projection}
+                ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
+                         score DESC,
+                         coalesce(node.confidence, 0.0) DESC
+                LIMIT $limit
+            """
+            try:
+                return [dict(r) for r in await _execute_query(hybrid_query, **params)]
+            except Neo4jError:
+                pass
+
+        if not keyword_query:
+            return []
+        keyword_query_text = f"""
+            CALL db.index.fulltext.queryNodes('{fulltext_index}', $search_query)
+            YIELD node, score AS raw_score
+            {project_match}
+            WHERE node:{label}
+              AND node.scope = $scope
+              AND node.status IN $statuses
+              AND {post_filter}
+            WITH node, raw_score
+            ORDER BY raw_score DESC
+            LIMIT $rank_limit
+            WITH collect({{node: node, raw_score: raw_score}}) AS rows
+            UNWIND range(0, size(rows) - 1) AS idx
+            WITH rows[idx] AS row, idx + 1 AS rank
+            WITH row.node AS node,
+                 1.0 / ($rrf_k + rank) AS score,
+                 ['keyword'] AS sources
+            RETURN {projection}
+            ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
+                     score DESC,
+                     coalesce(node.confidence, 0.0) DESC
+            LIMIT $limit
+        """
+        try:
+            return [dict(r) for r in await _execute_query(keyword_query_text, **params)]
+        except Neo4jError:
+            return []
 
     # Mount Neo4j Agent Memory MCP server (https://github.com/neo4j-labs/agent-memory)
     # if os.environ.get("OPENAI_API_KEY"):
@@ -790,7 +974,7 @@ def create_mcp_server(
         ),
         query: Optional[str] = Field(
             None,
-            description="Optional free-text query for fulltext ranking of learnings and decisions.",
+            description="Optional free-text query for hybrid ranking of learnings and decisions.",
         ),
         statuses: Optional[List[str]] = Field(
             None,
@@ -807,6 +991,9 @@ def create_mcp_server(
         resolved_pid = _resolve_project_id(project_id)
         resolved_statuses = statuses or ["approved", "candidate"]
         normalized_query = (query or "").strip()
+        query_vector = (
+            await _embed_learning_text(normalized_query) if normalized_query else None
+        )
 
         async with neo4j_driver.session(database=database):
             project_record = await _execute_query_single(
@@ -818,29 +1005,15 @@ def create_mcp_server(
 
             learnings: list[dict] = []
             if normalized_query:
-                try:
-                    records = await _execute_query(
-                        """
-                        CALL db.index.fulltext.queryNodes('project_learning_fulltext', $q)
-                        YIELD node, score
-                        MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)
-                        WHERE node.status IN $statuses
-                          AND node.scope = 'project'
-                        RETURN node.id AS id, node.text AS text, node.status AS status,
-                               node.confidence AS confidence, node.task_pattern AS task_pattern,
-                               score
-                        ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
-                                 score DESC, coalesce(node.confidence, 0.0) DESC
-                        LIMIT $limit
-                        """,
-                        project_id=resolved_pid,
-                        q=normalized_query,
-                        statuses=resolved_statuses,
-                        limit=limit,
-                    )
-                    learnings = [dict(r) for r in records]
-                except Neo4jError:
-                    learnings = []
+                learnings = await _fetch_context_memory_hybrid(
+                    label="Learning",
+                    query_text=normalized_query,
+                    query_vector=query_vector,
+                    scope="project",
+                    statuses=resolved_statuses,
+                    limit=limit,
+                    project_id=resolved_pid,
+                )
 
             if not learnings:
                 records = await _execute_query(
@@ -863,29 +1036,15 @@ def create_mcp_server(
 
             user_learnings: list[dict] = []
             if normalized_query:
-                try:
-                    records = await _execute_query(
-                        """
-                        CALL db.index.fulltext.queryNodes('project_learning_fulltext', $q)
-                        YIELD node, score
-                        WHERE node.scope = 'user'
-                          AND node.status IN $statuses
-                          AND (node.consolidated_at IS NULL
-                               OR toString(coalesce(node.updated_at, node.created_at)) > node.consolidated_at)
-                        RETURN node.id AS id, node.text AS text, node.status AS status,
-                               node.confidence AS confidence, node.task_pattern AS task_pattern,
-                               score
-                        ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
-                                 score DESC, coalesce(node.confidence, 0.0) DESC
-                        LIMIT $limit
-                        """,
-                        q=normalized_query,
-                        statuses=resolved_statuses,
-                        limit=limit,
-                    )
-                    user_learnings = [dict(r) for r in records]
-                except Neo4jError:
-                    user_learnings = []
+                user_learnings = await _fetch_context_memory_hybrid(
+                    label="Learning",
+                    query_text=normalized_query,
+                    query_vector=query_vector,
+                    scope="user",
+                    statuses=resolved_statuses,
+                    limit=limit,
+                    exclude_consolidated_user_facts=True,
+                )
 
             if not user_learnings:
                 records = await _execute_query(
@@ -908,28 +1067,15 @@ def create_mcp_server(
 
             decisions: list[dict] = []
             if normalized_query:
-                try:
-                    records = await _execute_query(
-                        """
-                        CALL db.index.fulltext.queryNodes('project_decision_fulltext', $q)
-                        YIELD node, score
-                        MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(node)
-                        WHERE node.status IN ['approved', 'candidate']
-                          AND node.scope = 'project'
-                        RETURN node.id AS id, node.text AS text, node.rationale AS rationale,
-                               node.confidence AS confidence, node.task_pattern AS task_pattern,
-                               node.scope AS scope,
-                               score
-                        ORDER BY score DESC, coalesce(node.confidence, 0.0) DESC
-                        LIMIT $limit
-                        """,
-                        project_id=resolved_pid,
-                        q=normalized_query,
-                        limit=limit,
-                    )
-                    decisions = [dict(r) for r in records]
-                except Neo4jError:
-                    decisions = []
+                decisions = await _fetch_context_memory_hybrid(
+                    label="Decision",
+                    query_text=normalized_query,
+                    query_vector=query_vector,
+                    scope="project",
+                    statuses=["approved", "candidate"],
+                    limit=limit,
+                    project_id=resolved_pid,
+                )
 
             if not decisions:
                 records = await _execute_query(

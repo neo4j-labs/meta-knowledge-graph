@@ -19,6 +19,8 @@ from typing import Any
 
 
 MAX_LEARNING_TEXT = 500
+HYBRID_RRF_K = 60.0
+HYBRID_KEYWORD_TERMS = 16
 DEFAULT_LLM_MODEL = "gpt-5.4-mini"
 DEFAULT_CLAUDE_LLM_MODEL = "anthropic/claude-haiku-4-5"
 ANTHROPIC_OAUTH_TOKEN_PREFIX = "sk-ant-oat"
@@ -1337,6 +1339,246 @@ def truncate(value: str, limit: int = MAX_LEARNING_TEXT) -> str:
     return value[: limit - 3].rstrip() + "..."
 
 
+def _hybrid_keyword_query(value: str, limit: int = HYBRID_KEYWORD_TERMS) -> str:
+    words: list[str] = []
+    seen: set[str] = set()
+    for word in re.findall(r"[a-zA-Z0-9]{3,}", (value or "").lower()):
+        if word in seen:
+            continue
+        seen.add(word)
+        words.append(word)
+        if len(words) >= limit:
+            break
+    return " ".join(words)
+
+
+def _memory_projection(label: str) -> str:
+    if label == "Learning":
+        return """
+               node.id AS id,
+               node.text AS text,
+               node.status AS status,
+               node.confidence AS confidence,
+               node.task_pattern AS task_pattern,
+               node.scope AS scope,
+               score,
+               sources
+        """
+    if label == "Decision":
+        return """
+               node.id AS id,
+               node.text AS text,
+               node.rationale AS rationale,
+               node.confidence AS confidence,
+               node.task_pattern AS task_pattern,
+               node.scope AS scope,
+               score,
+               sources
+        """
+    raise ValueError(f"unsupported memory label: {label!r}")
+
+
+def _memory_vector_index(label: str) -> str:
+    if label == "Learning":
+        return "project_learning_vector"
+    if label == "Decision":
+        return "project_decision_vector"
+    raise ValueError(f"unsupported memory label: {label!r}")
+
+
+def _memory_fulltext_index(label: str) -> str:
+    if label == "Learning":
+        return "project_learning_fulltext"
+    if label == "Decision":
+        return "project_decision_fulltext"
+    raise ValueError(f"unsupported memory label: {label!r}")
+
+
+def _memory_project_rel(label: str) -> str:
+    if label == "Learning":
+        return "HAS_LEARNING"
+    if label == "Decision":
+        return "HAS_DECISION"
+    raise ValueError(f"unsupported memory label: {label!r}")
+
+
+def _ranked_vector_branch(
+    *,
+    label: str,
+    vector_index: str,
+    project_filter: str,
+    post_filter: str,
+) -> str:
+    return f"""
+        MATCH (node:{label})
+        SEARCH node IN (
+            VECTOR INDEX {vector_index}
+            FOR $query_vector
+            WHERE node.scope = $scope
+              AND node.status IN $statuses
+              {project_filter}
+            LIMIT $rank_limit
+        ) SCORE AS raw_score
+        WHERE {post_filter}
+        WITH node, raw_score
+        ORDER BY raw_score DESC
+        WITH collect({{node: node, raw_score: raw_score}}) AS rows
+        UNWIND range(0, size(rows) - 1) AS idx
+        WITH rows[idx] AS row, idx + 1 AS rank
+        RETURN row.node AS node,
+               rank,
+               row.raw_score AS raw_score,
+               'vector' AS source
+    """
+
+
+def _ranked_fulltext_branch(
+    *,
+    label: str,
+    fulltext_index: str,
+    project_match: str,
+    post_filter: str,
+) -> str:
+    return f"""
+        CALL db.index.fulltext.queryNodes('{fulltext_index}', $search_query)
+        YIELD node, score AS raw_score
+        {project_match}
+        WHERE node:{label}
+          AND node.scope = $scope
+          AND node.status IN $statuses
+          AND {post_filter}
+        WITH node, raw_score
+        ORDER BY raw_score DESC
+        LIMIT $rank_limit
+        WITH collect({{node: node, raw_score: raw_score}}) AS rows
+        UNWIND range(0, size(rows) - 1) AS idx
+        WITH rows[idx] AS row, idx + 1 AS rank
+        RETURN row.node AS node,
+               rank,
+               row.raw_score AS raw_score,
+               'keyword' AS source
+    """
+
+
+def _fetch_memory_hybrid(
+    driver,
+    database: str,
+    *,
+    label: str,
+    query: str,
+    query_vector: list[float] | None,
+    scope: str,
+    statuses: list[str],
+    limit: int,
+    project_id: str | None = None,
+    exclude_session_id: str | None = None,
+    exclude_consolidated_user_facts: bool = False,
+) -> list[dict[str, Any]]:
+    keyword_query = _hybrid_keyword_query(query)
+    if not query_vector and not keyword_query:
+        return []
+
+    vector_index = _memory_vector_index(label)
+    fulltext_index = _memory_fulltext_index(label)
+    projection = _memory_projection(label)
+    project_filter = "AND node.project_id = $project_id" if project_id else ""
+    project_match = (
+        f"MATCH (:Project {{id: $project_id}})-[:{_memory_project_rel(label)}]->(node)"
+        if project_id
+        else ""
+    )
+    filters = [
+        "($session_id IS NULL OR ("
+        "NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id}) "
+        "AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))"
+    ]
+    if exclude_consolidated_user_facts:
+        filters.append(
+            "(node.consolidated_at IS NULL "
+            "OR toString(coalesce(node.updated_at, node.created_at)) > node.consolidated_at)"
+        )
+    post_filter = "\n          AND ".join(filters)
+    rank_limit = max(1, limit)
+
+    params = {
+        "project_id": project_id,
+        "scope": scope,
+        "statuses": statuses,
+        "limit": limit,
+        "rank_limit": rank_limit,
+        "rrf_k": HYBRID_RRF_K,
+        "session_id": exclude_session_id,
+        "search_query": keyword_query,
+        "query_vector": query_vector,
+    }
+
+    if query_vector:
+        branches = [
+            _ranked_vector_branch(
+                label=label,
+                vector_index=vector_index,
+                project_filter=project_filter,
+                post_filter=post_filter,
+            )
+        ]
+        if keyword_query:
+            branches.append(
+                _ranked_fulltext_branch(
+                    label=label,
+                    fulltext_index=fulltext_index,
+                    project_match=project_match,
+                    post_filter=post_filter,
+                )
+            )
+        query_text = f"""
+            CALL {{
+                {'UNION ALL'.join(branches)}
+            }}
+            WITH node,
+                 sum(1.0 / ($rrf_k + rank)) AS score,
+                 collect(source) AS sources
+            RETURN {projection}
+            ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
+                     score DESC,
+                     coalesce(node.confidence, 0.0) DESC
+            LIMIT $limit
+        """
+        try:
+            return [
+                dict(record)
+                for record in _execute_query(driver, database, query_text, **params)
+            ]
+        except Exception:
+            pass
+
+    if keyword_query:
+        query_text = f"""
+            {_ranked_fulltext_branch(
+                label=label,
+                fulltext_index=fulltext_index,
+                project_match=project_match,
+                post_filter=post_filter,
+            )}
+            WITH node,
+                 1.0 / ($rrf_k + rank) AS score,
+                 [source] AS sources
+            RETURN {projection}
+            ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
+                     score DESC,
+                     coalesce(node.confidence, 0.0) DESC
+            LIMIT $limit
+        """
+        try:
+            return [
+                dict(record)
+                for record in _execute_query(driver, database, query_text, **params)
+            ]
+        except Exception:
+            return []
+
+    return []
+
+
 def fetch_project_learnings(
     driver,
     database: str,
@@ -1345,9 +1587,25 @@ def fetch_project_learnings(
     statuses: list[str] | None = None,
     limit: int = 5,
     exclude_session_id: str | None = None,
+    query_vector: list[float] | None = None,
 ) -> list[dict[str, Any]]:
     statuses = statuses or ["approved", "candidate"]
     if query and query.strip():
+        rows = _fetch_memory_hybrid(
+            driver,
+            database,
+            label="Learning",
+            query=query,
+            query_vector=query_vector,
+            scope="project",
+            statuses=statuses,
+            limit=limit,
+            project_id=project_id,
+            exclude_session_id=exclude_session_id,
+        )
+        if rows:
+            return rows
+        # Legacy fulltext fallback for older databases or invalid vector indexes.
         try:
             records = _execute_query(
                 driver,
@@ -1373,7 +1631,7 @@ def fetch_project_learnings(
                 LIMIT $limit
                 """,
                 project_id=project_id,
-                search_query=query,
+                search_query=_hybrid_keyword_query(query),
                 statuses=statuses,
                 limit=limit,
                 session_id=exclude_session_id,
@@ -1419,6 +1677,7 @@ def fetch_user_learnings(
     statuses: list[str] | None = None,
     limit: int = 5,
     exclude_session_id: str | None = None,
+    query_vector: list[float] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch durable, cross-project facts about the user (``scope = 'user'``).
 
@@ -1429,6 +1688,20 @@ def fetch_user_learnings(
     """
     statuses = statuses or ["approved", "candidate"]
     if query and query.strip():
+        rows = _fetch_memory_hybrid(
+            driver,
+            database,
+            label="Learning",
+            query=query,
+            query_vector=query_vector,
+            scope="user",
+            statuses=statuses,
+            limit=limit,
+            exclude_session_id=exclude_session_id,
+            exclude_consolidated_user_facts=True,
+        )
+        if rows:
+            return rows
         try:
             records = _execute_query(
                 driver,
@@ -1454,7 +1727,7 @@ def fetch_user_learnings(
                          coalesce(node.confidence, 0.0) DESC
                 LIMIT $limit
                 """,
-                search_query=query,
+                search_query=_hybrid_keyword_query(query),
                 statuses=statuses,
                 limit=limit,
                 session_id=exclude_session_id,
@@ -1500,8 +1773,23 @@ def fetch_project_decisions(
     query: str | None,
     limit: int = 3,
     exclude_session_id: str | None = None,
+    query_vector: list[float] | None = None,
 ) -> list[dict[str, Any]]:
     if query and query.strip():
+        rows = _fetch_memory_hybrid(
+            driver,
+            database,
+            label="Decision",
+            query=query,
+            query_vector=query_vector,
+            scope="project",
+            statuses=["approved", "candidate"],
+            limit=limit,
+            project_id=project_id,
+            exclude_session_id=exclude_session_id,
+        )
+        if rows:
+            return rows
         try:
             records = _execute_query(
                 driver,
@@ -1527,7 +1815,7 @@ def fetch_project_decisions(
                 LIMIT $limit
                 """,
                 project_id=project_id,
-                search_query=query,
+                search_query=_hybrid_keyword_query(query),
                 limit=limit,
                 session_id=exclude_session_id,
             )
@@ -1570,8 +1858,22 @@ def fetch_user_decisions(
     query: str | None,
     limit: int = 3,
     exclude_session_id: str | None = None,
+    query_vector: list[float] | None = None,
 ) -> list[dict[str, Any]]:
     if query and query.strip():
+        rows = _fetch_memory_hybrid(
+            driver,
+            database,
+            label="Decision",
+            query=query,
+            query_vector=query_vector,
+            scope="user",
+            statuses=["approved", "candidate"],
+            limit=limit,
+            exclude_session_id=exclude_session_id,
+        )
+        if rows:
+            return rows
         try:
             records = _execute_query(
                 driver,
@@ -1595,7 +1897,7 @@ def fetch_user_decisions(
                          coalesce(node.confidence, 0.0) DESC
                 LIMIT $limit
                 """,
-                search_query=query,
+                search_query=_hybrid_keyword_query(query),
                 limit=limit,
                 session_id=exclude_session_id,
             )

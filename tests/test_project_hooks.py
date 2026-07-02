@@ -1123,6 +1123,31 @@ class ProjectHookTests(unittest.TestCase):
         self.assertTrue(captured)
         self.assertIn("l.scope = 'project'", captured[0][0])
 
+    def test_fetch_project_learnings_uses_hybrid_when_vector_is_available(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.fetch_project_learnings(
+            FakeDriver(),
+            "neo4j",
+            project_id="mkg",
+            query="Use REST for the API and keep the graph schema stable.",
+            query_vector=[0.1, 0.2],
+        )
+
+        self.assertTrue(captured)
+        query, params = captured[0]
+        self.assertIn("VECTOR INDEX project_learning_vector", query)
+        self.assertIn("db.index.fulltext.queryNodes", query)
+        self.assertIn("UNION ALL", query)
+        self.assertIn("sum(1.0 / ($rrf_k + rank)) AS score", query)
+        self.assertEqual(params["query_vector"], [0.1, 0.2])
+        self.assertEqual(params["search_query"], "use rest for the api and keep graph schema stable")
+
     def test_fetch_project_decisions_restricts_to_project_scope(self) -> None:
         captured: list[tuple[str, dict]] = []
 

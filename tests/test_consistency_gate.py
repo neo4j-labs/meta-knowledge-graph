@@ -294,18 +294,41 @@ class NeighbourRetrievalTests(unittest.TestCase):
             candidate_id="learning:proj:self",
         )
         query, params = driver.log[0]
-        # No status predicate (it is still RETURNed for the judge): the gate
-        # removes embeddings from rejected / already-learned items, so
-        # everything the vector index can see is live memory (approved or
-        # candidate).
+        # Vector retrieval prefilters live memory in-index. Dead items should
+        # also have their embeddings stripped, but the query is explicit now.
         self.assertNotIn("node.status =", query)
-        self.assertNotIn("node.status IN", query)
+        self.assertIn("node.status IN ['approved', 'candidate']", query)
         self.assertIn("node.project_id = $project_id", query)
         self.assertIn("node.scope = $scope", query)
         self.assertIn("node.id <> $candidate_id", query)
         self.assertEqual(params["candidate_id"], "learning:proj:self")
         # One extra index slot compensates for the candidate matching itself.
         self.assertEqual(params["limit"], 16)
+
+    def test_hybrid_query_unions_vector_and_keyword_with_rrf(self):
+        driver = _RecordingDriver()
+        consistency_gate._fetch_neighbours_hybrid_vector_keyword(
+            driver,
+            "neo4j",
+            label="Learning",
+            index_name="project_learning_vector",
+            fulltext_index="project_learning_fulltext",
+            project_id="proj",
+            scope="project",
+            vector=[0.1],
+            text="use rest for the api",
+            topk=15,
+            candidate_id="learning:proj:self",
+        )
+        query, params = driver.log[0]
+        self.assertIn("VECTOR INDEX project_learning_vector", query)
+        self.assertIn("db.index.fulltext.queryNodes", query)
+        self.assertIn("UNION ALL", query)
+        self.assertIn("sum(1.0 / ($rrf_k + rank)) AS score", query)
+        self.assertEqual(params["vector_limit"], 16)
+        self.assertEqual(params["keyword_limit"], 15)
+        self.assertEqual(params["limit"], 15)
+        self.assertEqual(params["rrf_k"], consistency_gate._HYBRID_RRF_K)
 
     def test_fulltext_query_includes_candidates_and_excludes_self(self):
         driver = _RecordingDriver()
@@ -393,7 +416,7 @@ class PerRowApplyTests(unittest.TestCase):
             return [{"id": "other", "text": "t", "status": "candidate"}]
 
         with patch.object(
-            consistency_gate, "_fetch_neighbours_vector", side_effect=fake_fetch
+            consistency_gate, "_fetch_neighbours_hybrid", side_effect=fake_fetch
         ), patch.object(
             consistency_gate,
             "llm_complete",
@@ -514,10 +537,8 @@ class SweepTests(unittest.TestCase):
 class DispatchTests(unittest.TestCase):
     def _run(self, row):
         with patch.object(
-            consistency_gate, "_fetch_neighbours_vector", return_value=[]
-        ) as vec, patch.object(
-            consistency_gate, "_fetch_neighbours_fulltext", return_value=[]
-        ) as ft:
+            consistency_gate, "_fetch_neighbours_hybrid", return_value=[]
+        ) as hybrid:
             consistency_gate._gate_one_label(
                 _FakeDriver(),
                 "neo4j",
@@ -530,17 +551,17 @@ class DispatchTests(unittest.TestCase):
                 model=None,
                 timestamp="2026-07-01T00:00:00Z",
             )
-        return vec, ft
+        return hybrid
 
-    def test_embedding_uses_vector_path(self):
-        vec, ft = self._run({"id": "l1", "text": "t", "embedding": [0.1], "scope": "project"})
-        self.assertEqual(vec.call_count, 1)
-        self.assertEqual(ft.call_count, 0)
+    def test_embedding_uses_hybrid_path_with_vector(self):
+        hybrid = self._run({"id": "l1", "text": "t", "embedding": [0.1], "scope": "project"})
+        self.assertEqual(hybrid.call_count, 1)
+        self.assertEqual(hybrid.call_args.kwargs["vector"], [0.1])
 
-    def test_no_embedding_uses_fulltext_path(self):
-        vec, ft = self._run({"id": "l1", "text": "t", "scope": "project"})
-        self.assertEqual(vec.call_count, 0)
-        self.assertEqual(ft.call_count, 1)
+    def test_no_embedding_uses_hybrid_path_without_vector(self):
+        hybrid = self._run({"id": "l1", "text": "t", "scope": "project"})
+        self.assertEqual(hybrid.call_count, 1)
+        self.assertIsNone(hybrid.call_args.kwargs["vector"])
 
 
 class GateGuardTests(unittest.TestCase):

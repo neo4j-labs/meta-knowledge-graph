@@ -9,10 +9,11 @@ approval gate*. It runs only at Stop, never at SessionEnd:
 2. Retrieve the top-K closest stored items — **approved** plus other pending
    **candidates** — in the *same project and scope*, excluding the candidate
    itself. Including candidates is what lets restatements collapse instead of
-   piling up side by side in the review queue. With an embedding this is a
-   semantic vector-index search; without one (no embedding model configured) it
-   falls back to the lexical fulltext index. Either way retrieval only
-   nominates candidates for the judge — it is not the decision step.
+   piling up side by side in the review queue. With an embedding this uses a
+   hybrid vector + keyword search and reciprocal-rank fusion (RRF); without an
+   embedding, or if the vector path is unavailable, it falls back to the lexical
+   fulltext index. Either way retrieval only nominates candidates for the judge
+   — it is not the decision step.
 3. An LLM judge decides whether the candidate genuinely *contradicts* any of
    those neighbours (as opposed to merely resembling them) and, per conflict,
    which side is more likely correct. It also flags whether the candidate is
@@ -36,9 +37,9 @@ gate run — ``project_add_learning`` MCP tool writes, and rows left behind by a
 earlier judge or retrieval failure — backfilling and persisting their
 embeddings first.
 
-Only the LLM judge is required. Without an embedding model the gate uses fulltext
-retrieval; without the judge (or with the gate disabled) candidates keep
-``status = 'candidate'``.
+Only the LLM judge is required. Without an embedding model the gate uses
+fulltext-only retrieval; without the judge (or with the gate disabled)
+candidates keep ``status = 'candidate'``.
 
 Vector retrieval uses Neo4j's native **pre-filtered** vector search: the
 ``SEARCH`` clause applies ``project_id`` / ``scope`` as an in-index ``WHERE`` so
@@ -54,13 +55,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 from project_common import (
     ProjectRef,
     embed_texts,
     embedding_dimensions,
-    embeddings_ready,
     extraction_model_label,
     llm_complete,
     llm_readiness_status,
@@ -71,6 +72,7 @@ _VECTOR_INDEXES: list[tuple[str, str]] = [
     ("Decision", "project_decision_vector"),
 ]
 
+_HYBRID_RRF_K = 60.0
 _FALSEY = {"0", "false", "off", "no", ""}
 
 
@@ -151,13 +153,9 @@ def attach_candidate_embeddings(*row_groups: list[dict[str, Any]]) -> bool:
 # --------------------------------------------------------------------------- #
 # Retrieval
 #
-# Two interchangeable paths return the same neighbour shape: semantic (vector
-# index) when the candidate has an embedding, lexical (fulltext index) otherwise.
-# A run therefore uses embeddings when the embedding model is available and
-# falls back to fulltext when it is not, with no other behaviour change.
-# --------------------------------------------------------------------------- #
-import re as _re
-
+# Retrieval returns the same neighbour shape for hybrid and fallback paths. When
+# the candidate has an embedding, vector and keyword hits are unioned and ranked
+# with RRF. Without an embedding, keyword/fulltext is the fallback.
 _NEIGHBOUR_RETURN = """
         RETURN node.id AS id,
                node.text AS text,
@@ -176,7 +174,7 @@ def _lucene_query(*texts: str, limit: int = 16) -> str:
     words: list[str] = []
     seen: set[str] = set()
     for text in texts:
-        for word in _re.findall(r"[a-zA-Z0-9]{3,}", (text or "").lower()):
+        for word in re.findall(r"[a-zA-Z0-9]{3,}", (text or "").lower()):
             if word in seen:
                 continue
             seen.add(word)
@@ -199,12 +197,10 @@ def _fetch_neighbours_vector(
     candidate_id: str,
 ) -> list[dict[str, Any]]:
     # In-index pre-filter (Neo4j 2026.02+): the WHERE lives inside the SEARCH so
-    # the walk only visits this project/scope. No status predicate is needed:
-    # the gate removes the embedding when it rejects or folds an item, so the
-    # vector index only ever contains live memory (approved + candidate). The
-    # candidate finds itself (its embedding is already written), so it is
-    # dropped by id after the search; the index LIMIT is one higher to keep
-    # topk real neighbours.
+    # the walk only visits live memory in this project/scope. The candidate
+    # finds itself (its embedding is already written), so it is dropped by id
+    # after the search; the index LIMIT is one higher to keep topk real
+    # neighbours.
     query = f"""
         MATCH (node:{label})
         SEARCH node IN (
@@ -212,6 +208,7 @@ def _fetch_neighbours_vector(
             FOR $vector
             WHERE node.project_id = $project_id
               AND node.scope = $scope
+              AND node.status IN ['approved', 'candidate']
             LIMIT $limit
         ) SCORE AS score
         WITH node, score
@@ -226,6 +223,99 @@ def _fetch_neighbours_vector(
             project_id=project_id,
             scope=scope,
             limit=topk + 1,
+            candidate_id=candidate_id,
+        )
+        return [dict(record) for record in result]
+
+
+def _fetch_neighbours_hybrid_vector_keyword(
+    driver,
+    database: str,
+    *,
+    label: str,
+    index_name: str,
+    fulltext_index: str,
+    project_id: str,
+    scope: str,
+    vector: list[float],
+    text: str,
+    topk: int,
+    candidate_id: str,
+) -> list[dict[str, Any]]:
+    lucene = _lucene_query(text)
+    if not lucene:
+        return _fetch_neighbours_vector(
+            driver,
+            database,
+            label=label,
+            index_name=index_name,
+            project_id=project_id,
+            scope=scope,
+            vector=vector,
+            topk=topk,
+            candidate_id=candidate_id,
+        )
+    query = f"""
+        CALL {{
+            MATCH (node:{label})
+            SEARCH node IN (
+                VECTOR INDEX {index_name}
+                FOR $vector
+                WHERE node.project_id = $project_id
+                  AND node.scope = $scope
+                  AND node.status IN ['approved', 'candidate']
+                LIMIT $vector_limit
+            ) SCORE AS raw_score
+            WITH node, raw_score
+            WHERE node.id <> $candidate_id
+            ORDER BY raw_score DESC
+            WITH collect({{node: node, raw_score: raw_score}}) AS rows
+            UNWIND range(0, size(rows) - 1) AS idx
+            WITH rows[idx] AS row, idx + 1 AS rank
+            RETURN row.node AS node,
+                   rank,
+                   row.raw_score AS raw_score,
+                   'vector' AS source
+
+            UNION ALL
+
+            CALL db.index.fulltext.queryNodes($index, $lucene)
+            YIELD node, score AS raw_score
+            WHERE node:{label}
+              AND node.project_id = $project_id
+              AND node.scope = $scope
+              AND node.status IN ['approved', 'candidate']
+              AND node.id <> $candidate_id
+            WITH node, raw_score
+            ORDER BY raw_score DESC
+            LIMIT $keyword_limit
+            WITH collect({{node: node, raw_score: raw_score}}) AS rows
+            UNWIND range(0, size(rows) - 1) AS idx
+            WITH rows[idx] AS row, idx + 1 AS rank
+            RETURN row.node AS node,
+                   rank,
+                   row.raw_score AS raw_score,
+                   'keyword' AS source
+        }}
+        WITH node,
+             sum(1.0 / ($rrf_k + rank)) AS score,
+             collect(source) AS sources
+        {_NEIGHBOUR_RETURN}
+        ORDER BY score DESC
+        LIMIT $limit
+    """
+    with driver.session(database=database) as session:
+        result = session.run(
+            query,
+            vector=vector,
+            index=fulltext_index,
+            lucene=lucene,
+            project_id=project_id,
+            scope=scope,
+            vector_limit=topk + 1,
+            keyword_limit=topk,
+            limit=topk,
+            rrf_k=_HYBRID_RRF_K,
             candidate_id=candidate_id,
         )
         return [dict(record) for record in result]
@@ -268,6 +358,50 @@ def _fetch_neighbours_fulltext(
             candidate_id=candidate_id,
         )
         return [dict(record) for record in result]
+
+
+def _fetch_neighbours_hybrid(
+    driver,
+    database: str,
+    *,
+    label: str,
+    index_name: str,
+    fulltext_index: str,
+    project_id: str,
+    scope: str,
+    vector: list[float] | None,
+    text: str,
+    topk: int,
+    candidate_id: str,
+) -> list[dict[str, Any]]:
+    if vector:
+        try:
+            return _fetch_neighbours_hybrid_vector_keyword(
+                driver,
+                database,
+                label=label,
+                index_name=index_name,
+                fulltext_index=fulltext_index,
+                project_id=project_id,
+                scope=scope,
+                vector=vector,
+                text=text,
+                topk=topk,
+                candidate_id=candidate_id,
+            )
+        except Exception:
+            pass
+    return _fetch_neighbours_fulltext(
+        driver,
+        database,
+        label=label,
+        fulltext_index=fulltext_index,
+        project_id=project_id,
+        scope=scope,
+        text=text,
+        topk=topk,
+        candidate_id=candidate_id,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -535,30 +669,19 @@ def _gate_one_label(
         vector = row.get("embedding")
         scope = str(row.get("scope") or "project")
         try:
-            if vector:
-                neighbours = _fetch_neighbours_vector(
-                    driver,
-                    database,
-                    label=label,
-                    index_name=index_name,
-                    project_id=project.id,
-                    scope=scope,
-                    vector=vector,
-                    topk=topk,
-                    candidate_id=candidate_id,
-                )
-            else:
-                neighbours = _fetch_neighbours_fulltext(
-                    driver,
-                    database,
-                    label=label,
-                    fulltext_index=fulltext_index,
-                    project_id=project.id,
-                    scope=scope,
-                    text=row.get("text") or "",
-                    topk=topk,
-                    candidate_id=candidate_id,
-                )
+            neighbours = _fetch_neighbours_hybrid(
+                driver,
+                database,
+                label=label,
+                index_name=index_name,
+                fulltext_index=fulltext_index,
+                project_id=project.id,
+                scope=scope,
+                vector=vector,
+                text=row.get("text") or "",
+                topk=topk,
+                candidate_id=candidate_id,
+            )
         except Exception as exc:
             print(
                 f"[consistency_gate] neighbour search failed for {label} {candidate_id} "

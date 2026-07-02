@@ -31,6 +31,7 @@ from project_common import (  # noqa: E402
     decision_id,
     decision_namespace,
     ensure_project_schema,
+    embed_text,
     extraction_model_label,
     fetch_project_decisions,
     fetch_project_learnings,
@@ -147,26 +148,6 @@ Return JSON only with this shape:
   ]
 }
 """
-
-
-def _search_query(*values: object) -> str:
-    words: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        for word in re_words(str(value or "")):
-            if word in seen:
-                continue
-            seen.add(word)
-            words.append(word)
-            if len(words) >= 12:
-                return " ".join(words)
-    return " ".join(words)
-
-
-def re_words(value: str) -> list[str]:
-    import re
-
-    return re.findall(r"[a-zA-Z0-9]{3,}", value.lower())
 
 
 def _read_payload() -> dict[str, Any]:
@@ -927,21 +908,23 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     )
                     prompt_template = DEFAULT_MEMORY_EXTRACTION_PROMPT
                 corpus = _event_corpus(events)
-                search_query = _search_query(corpus)
+                query_vector = embed_text(corpus)
                 similar_learnings = fetch_project_learnings(
                     driver,
                     database,
                     project_id=project.id,
-                    query=search_query,
+                    query=corpus,
                     statuses=["approved", "candidate"],
                     limit=8,
+                    query_vector=query_vector,
                 )
                 similar_decisions = fetch_project_decisions(
                     driver,
                     database,
                     project_id=project.id,
-                    query=search_query,
+                    query=corpus,
                     limit=8,
+                    query_vector=query_vector,
                 )
                 prompt = build_memory_extraction_prompt(
                     project,

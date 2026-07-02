@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["neo4j>=5.26.0"]
+# dependencies = ["neo4j>=5.26.0", "litellm>=1.40.0"]
 # ///
 """Inject scoped memory for the current prompt/session."""
 
@@ -17,6 +17,7 @@ if str(HOOK_DIR) not in sys.path:
 
 from project_common import (  # noqa: E402
     ensure_project_schema,
+    embed_text,
     fetch_project_decisions,
     fetch_project_learnings,
     fetch_user_decisions,
@@ -61,6 +62,7 @@ def main() -> int:
         return 0
 
     prompt = payload.get("prompt") or payload.get("last_assistant_message") or ""
+    query_vector = embed_text(prompt) if prompt else None
     context_scope = context_scope_for_hook(hook_event)
     user_learnings: list[dict] = []
     user_decisions: list[dict] = []
@@ -82,6 +84,7 @@ def main() -> int:
                         statuses=["approved", "candidate"],
                         limit=5,
                         exclude_session_id=exclude_session_id,
+                        query_vector=query_vector,
                     )
                     user_decisions = fetch_user_decisions(
                         driver,
@@ -89,6 +92,7 @@ def main() -> int:
                         query=prompt,
                         limit=5,
                         exclude_session_id=exclude_session_id,
+                        query_vector=query_vector,
                     )
                 else:
                     learnings = fetch_project_learnings(
@@ -99,6 +103,7 @@ def main() -> int:
                         statuses=["approved", "candidate"],
                         limit=5,
                         exclude_session_id=exclude_session_id,
+                        query_vector=query_vector,
                     )
                     decisions = fetch_project_decisions(
                         driver,
@@ -107,6 +112,7 @@ def main() -> int:
                         query=prompt,
                         limit=3,
                         exclude_session_id=exclude_session_id,
+                        query_vector=query_vector,
                     )
                 learning_ids = [
                     learning["id"]
