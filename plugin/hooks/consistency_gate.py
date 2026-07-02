@@ -70,6 +70,9 @@ from project_common import (
 _VECTOR_INDEXES: list[tuple[str, str]] = [
     ("Learning", "project_learning_vector"),
     ("Decision", "project_decision_vector"),
+    # Episodic observations are indexed for search but never gated: the gate
+    # queries :Learning / :Decision explicitly and ignores this label.
+    ("Observation", "project_observation_vector"),
 ]
 
 _HYBRID_RRF_K = 60.0
@@ -92,7 +95,7 @@ def _topk() -> int:
 # Schema
 # --------------------------------------------------------------------------- #
 def ensure_memory_vector_indexes(driver, database: str) -> None:
-    """Create cosine vector indexes on :Learning / :Decision ``embedding``.
+    """Create cosine vector indexes on :Learning / :Decision / :Observation ``embedding``.
 
     ``project_id`` / ``scope`` / ``status`` are declared as index metadata
     (``WITH [...]``) so the ``SEARCH`` clause can pre-filter on them in-index.

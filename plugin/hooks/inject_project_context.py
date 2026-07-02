@@ -20,6 +20,7 @@ from project_common import (  # noqa: E402
     embed_text,
     fetch_project_decisions,
     fetch_project_learnings,
+    fetch_recent_observations,
     fetch_user_decisions,
     fetch_user_learnings,
     format_learning_context,
@@ -68,6 +69,7 @@ def main() -> int:
     user_decisions: list[dict] = []
     learnings: list[dict] = []
     decisions: list[dict] = []
+    observations: list[dict] = []
 
     try:
         from neo4j import GraphDatabase
@@ -77,6 +79,14 @@ def main() -> int:
             with driver.session(database=database) as session:
                 session.execute_write(ensure_project_schema)
                 if context_scope == "user":
+                    # SessionStart also carries the episodic "previously on this
+                    # project" block: latest observations by recency, no query.
+                    observations = fetch_recent_observations(
+                        driver,
+                        database,
+                        project_id=project.id,
+                        limit=3,
+                    )
                     user_learnings = fetch_user_learnings(
                         driver,
                         database,
@@ -145,6 +155,7 @@ def main() -> int:
         decisions,
         user_learnings,
         user_decisions,
+        observations=observations,
     )
     if not context:
         return 0

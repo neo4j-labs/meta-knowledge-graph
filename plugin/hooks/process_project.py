@@ -32,6 +32,7 @@ from project_common import (  # noqa: E402
     decision_namespace,
     ensure_project_schema,
     embed_text,
+    embed_texts,
     extraction_model_label,
     fetch_project_decisions,
     fetch_project_learnings,
@@ -46,6 +47,7 @@ from project_common import (  # noqa: E402
     merge_project_and_session,
     neo4j_config,
     normalize_scope,
+    observation_id,
     project_env,
     resolve_llm_model,
     resolve_project,
@@ -147,6 +149,49 @@ Return JSON only with this shape:
     }
   ]
 }
+"""
+
+
+# Episodic observations: unconditional per-window timeline records. Unlike the
+# memory extraction prompt this template is a code constant, not a stored /
+# user-evolvable :MemoryExtractionPrompt — "be selective" (memory) and "always
+# record" (episodes) must never share a template.
+OBSERVATION_TYPES = (
+    "change",
+    "bugfix",
+    "feature",
+    "refactor",
+    "discovery",
+    "decision",
+    "problem",
+)
+DEFAULT_OBSERVATION_TYPE = "change"
+MAX_OBSERVATIONS_PER_WINDOW = 3
+MAX_OBSERVATION_FACTS = 6
+
+DEFAULT_OBSERVATION_EXTRACTION_PROMPT = """Project: [[PROJECT_NAME]] ([[PROJECT_ID]])
+
+Completed work window:
+[[CORPUS]]
+
+Write an episodic record of this work window for the project timeline.
+Unlike durable memory, this is unconditional: always return at least one
+observation describing what happened, even for routine work. Return up to
+three when the window contains clearly distinct efforts.
+
+Each observation:
+- "type": one of change | bugfix | feature | refactor | discovery | decision | problem.
+  Use "decision" for the moment a choice was made, "discovery" for new
+  understanding gained, "problem" for an issue that was hit, otherwise the
+  closest work type.
+- "title": one short line naming what happened.
+- "facts": 2-6 short, concrete, self-contained statements about what was done,
+  found, or produced. No speculation.
+- "narrative": 2-4 sentences telling what was asked, what was done, and how it
+  ended (done, in progress, or blocked).
+
+Describe only what the window shows. Return JSON only with this shape:
+{"observations": [{"type": "...", "title": "...", "facts": ["..."], "narrative": "..."}]}
 """
 
 
@@ -609,6 +654,130 @@ def _memory_rows_from_actions(
     return learning_rows[:3], decision_rows[:5]
 
 
+def _window_digest(events: list[dict[str, Any]]) -> str:
+    event_ids = [event["event_id"] for event in events if event.get("event_id")]
+    return sha1("\n".join(event_ids).encode("utf-8")).hexdigest()[:16]
+
+
+def _window_bounds(events: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+    timestamps = sorted(
+        _ts_sort_key(event.get("timestamp"))
+        for event in events
+        if event.get("timestamp")
+    )
+    if not timestamps:
+        return None, None
+    return timestamps[0], timestamps[-1]
+
+
+def build_observation_prompt(project: ProjectRef, corpus: str) -> str:
+    return (
+        DEFAULT_OBSERVATION_EXTRACTION_PROMPT.replace("[[PROJECT_NAME]]", project.name)
+        .replace("[[PROJECT_ID]]", project.id)
+        .replace("[[CORPUS]]", corpus)
+    )
+
+
+def _observation_items_from_text(text: str) -> list[dict[str, Any]]:
+    parsed = _json_from_llm_text(text)
+    items = parsed.get("observations")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def ask_llm_for_observations(
+    prompt: str,
+    model: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
+    """One unconditional episodic-record call. No fallback: when the LLM is
+    unavailable or fails, the window simply gets no observation."""
+    model_name = model or llm_model()
+    ready, reason = llm_readiness_status(model_name)
+    if not ready:
+        return [], {"status": "skipped", "skip_reason": reason}
+
+    content = llm_complete(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "You write concise episodic records of completed agent work. "
+                    "Return strict JSON only."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        model=model_name,
+    )
+    return _observation_items_from_text(content), {"status": "called", "skip_reason": None}
+
+
+def _observation_rows_from_items(
+    project: ProjectRef,
+    session_id: str,
+    events: list[dict[str, Any]],
+    items: list[dict[str, Any]],
+    llm_model: str | None = None,
+) -> list[dict[str, Any]]:
+    digest = _window_digest(events)
+    started_at, ended_at = _window_bounds(events)
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        title = truncate(str(item.get("title") or "").strip(), 200)
+        if not title:
+            continue
+        type_value = str(item.get("type") or "").strip().lower()
+        if type_value not in OBSERVATION_TYPES:
+            type_value = DEFAULT_OBSERVATION_TYPE
+        raw_facts = item.get("facts") if isinstance(item.get("facts"), list) else []
+        facts = [
+            truncate(str(fact).strip(), 300)
+            for fact in raw_facts
+            if isinstance(fact, (str, int, float)) and str(fact).strip()
+        ][:MAX_OBSERVATION_FACTS]
+        narrative = truncate(str(item.get("narrative") or "").strip(), 1000) or None
+        rows.append(
+            {
+                "id": observation_id(project.id, session_id, digest, len(rows)),
+                "type": type_value,
+                "title": title,
+                "facts": facts,
+                "narrative": narrative,
+                "source": HOOK_LEARNING_SOURCE,
+                "llm_model": llm_model,
+                "started_at": started_at,
+                "ended_at": ended_at,
+            }
+        )
+        if len(rows) >= MAX_OBSERVATIONS_PER_WINDOW:
+            break
+    return rows
+
+
+def attach_observation_embeddings(rows: list[dict[str, Any]]) -> None:
+    """Embed title + facts + narrative so observations are hybrid-searchable.
+    Failures leave ``embedding`` unset; the write degrades gracefully."""
+    if not rows:
+        return
+    texts = [
+        "\n".join(
+            part
+            for part in (
+                str(row.get("title") or ""),
+                " ".join(row.get("facts") or []),
+                str(row.get("narrative") or ""),
+            )
+            if part.strip()
+        )
+        for row in rows
+    ]
+    vectors = embed_texts(texts)
+    for row, vector in zip(rows, vectors):
+        if vector:
+            row["embedding"] = vector
+
+
 def _fetch_unprocessed_events(
     driver,
     database: str,
@@ -658,13 +827,16 @@ def _write_processing(
     llm_skip_reason: str | None,
     llm_error: str | None,
     timestamp: str,
+    observation_rows: list[dict[str, Any]] | None = None,
 ) -> None:
+    observation_rows = observation_rows or []
     event_ids = [event["event_id"] for event in events if event.get("event_id")]
-    digest = sha1("\n".join(event_ids).encode("utf-8")).hexdigest()[:16]
+    digest = _window_digest(events)
     processing_id = f"processing:{project.id}:{session_id}:{mode}:{digest}"
     summary = (
         f"Processed {len(event_ids)} {mode} events and produced "
-        f"{len(learning_rows)} learning actions and {len(decision_rows)} decision actions."
+        f"{len(learning_rows)} learning actions, {len(decision_rows)} decision actions, "
+        f"and {len(observation_rows)} observations."
     )
 
     tx.run(
@@ -686,6 +858,7 @@ def _write_processing(
             pp.event_count = $event_count,
             pp.learning_count = $learning_count,
             pp.decision_count = $decision_count,
+            pp.observation_count = $observation_count,
             pp.memory_extraction_prompt_name = $memory_extraction_prompt_name,
             pp.memory_extraction_prompt_version = $memory_extraction_prompt_version,
             pp.llm_model = $llm_model,
@@ -708,6 +881,7 @@ def _write_processing(
         event_count=len(event_ids),
         learning_count=len(learning_rows),
         decision_count=len(decision_rows),
+        observation_count=len(observation_rows),
         memory_extraction_prompt_name=memory_extraction_prompt_name,
         memory_extraction_prompt_version=memory_extraction_prompt_version,
         llm_model=llm_model,
@@ -938,6 +1112,85 @@ def _write_processing(
             learnings=learning_rows,
         )
 
+    if observation_rows:
+        # Episodic timeline entries: append-only, never gated, never deduped.
+        # Written in this transaction so an observation can never be lost after
+        # the window's events are marked PROCESSED_EVENT.
+        tx.run(
+            """
+            MATCH (p:Project {id: $project_id})
+            MATCH (s:Session {session_id: $session_id})
+            MATCH (pp:ProjectProcessing {id: $processing_id})
+            UNWIND $observations AS row
+            MERGE (o:Observation {id: row.id})
+            ON CREATE SET o.created_at = datetime($timestamp)
+            SET o.type = row.type,
+                o.title = row.title,
+                o.facts = row.facts,
+                o.narrative = row.narrative,
+                o.embedding = coalesce(row.embedding, o.embedding),
+                o.project_id = $project_id,
+                o.session_id = $session_id,
+                o.scope = 'project',
+                o.status = 'recorded',
+                o.source = row.source,
+                o.created_by_model = coalesce(row.llm_model, o.created_by_model),
+                o.started_at = CASE
+                    WHEN row.started_at IS NULL THEN o.started_at
+                    ELSE datetime(row.started_at)
+                END,
+                o.ended_at = CASE
+                    WHEN row.ended_at IS NULL THEN o.ended_at
+                    ELSE datetime(row.ended_at)
+                END,
+                o.updated_at = datetime($timestamp)
+            MERGE (p)-[:HAS_OBSERVATION]->(o)
+            MERGE (o)-[:FROM_SESSION]->(s)
+            MERGE (pp)-[:PRODUCED_OBSERVATION]->(o)
+            """,
+            project_id=project.id,
+            session_id=session_id,
+            processing_id=processing_id,
+            observations=observation_rows,
+            timestamp=timestamp,
+        )
+        pairs = [
+            {"prev": before["id"], "next": after["id"]}
+            for before, after in zip(observation_rows, observation_rows[1:])
+        ]
+        if pairs:
+            tx.run(
+                """
+                UNWIND $pairs AS pair
+                MATCH (a:Observation {id: pair.prev})
+                MATCH (b:Observation {id: pair.next})
+                MERGE (a)-[:NEXT]->(b)
+                """,
+                pairs=pairs,
+            )
+        tx.run(
+            """
+            MATCH (p:Project {id: $project_id})
+            OPTIONAL MATCH (p)-[latest:LATEST_OBSERVATION]->(prev:Observation)
+            DELETE latest
+            WITH p, prev
+            MATCH (head:Observation {id: $head_id})
+            FOREACH (_ IN CASE
+                WHEN prev IS NOT NULL
+                     AND NOT prev.id IN $window_ids
+                THEN [1] ELSE [] END |
+                MERGE (prev)-[:NEXT]->(head)
+            )
+            WITH p
+            MATCH (tail:Observation {id: $tail_id})
+            MERGE (p)-[:LATEST_OBSERVATION]->(tail)
+            """,
+            project_id=project.id,
+            head_id=observation_rows[0]["id"],
+            tail_id=observation_rows[-1]["id"],
+            window_ids=[row["id"] for row in observation_rows],
+        )
+
 
 def _write_processing_error(
     tx,
@@ -1110,6 +1363,28 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                 # Embed candidates before the write so each is stored searchable
                 # and the consistency gate can retrieve prior approved neighbours.
                 attach_candidate_embeddings(learning_rows, decision_rows)
+                # Episodic observation for the same window. Failures must not
+                # block semantic memory: the window then has no observation.
+                observation_rows: list[dict[str, Any]] = []
+                try:
+                    observation_items, _observation_meta = ask_llm_for_observations(
+                        build_observation_prompt(project, corpus),
+                        model=model_name,
+                    )
+                    observation_rows = _observation_rows_from_items(
+                        project,
+                        session_id,
+                        events,
+                        observation_items,
+                        llm_model=llm_model_used,
+                    )
+                    attach_observation_embeddings(observation_rows)
+                except Exception as observation_exc:
+                    observation_rows = []
+                    print(
+                        f"[process_project] observation extraction failed: {observation_exc}",
+                        file=sys.stderr,
+                    )
                 session.execute_write(
                     _write_processing,
                     project,
@@ -1125,6 +1400,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     llm_skip_reason,
                     llm_error,
                     timestamp,
+                    observation_rows=observation_rows,
                 )
                 # Auto-approval gate: promote consistent candidates, invalidate
                 # older items they supersede. No-op if embeddings/judge/index

@@ -1889,5 +1889,280 @@ class ProjectHookTests(unittest.TestCase):
                 )
 
 
+class ObservationTests(unittest.TestCase):
+    EVENTS = [
+        {
+            "event_id": "event-1",
+            "event_name": "UserPromptSubmit",
+            "timestamp": "2026-07-02T10:00:00Z",
+            "prompt": "Fix the failing hook",
+        },
+        {
+            "event_id": "event-2",
+            "event_name": "Stop",
+            "timestamp": "2026-07-02T10:05:00+00:00",
+            "last_assistant_message": "Done.",
+        },
+    ]
+
+    def test_observation_prompt_replaces_tokens(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        prompt = process_project.build_observation_prompt(project, "corpus text here")
+
+        self.assertIn("MKG (mkg)", prompt)
+        self.assertIn("corpus text here", prompt)
+        self.assertNotIn("[[PROJECT_NAME]]", prompt)
+        self.assertNotIn("[[CORPUS]]", prompt)
+
+    def test_observation_items_parse_from_llm_text(self) -> None:
+        text = (
+            "Here you go:\n"
+            '{"observations": [{"type": "bugfix", "title": "Fixed hook"}, "junk", '
+            '{"type": "discovery", "title": "Found race"}]}'
+        )
+        items = process_project._observation_items_from_text(text)
+
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["title"], "Fixed hook")
+
+        self.assertEqual(process_project._observation_items_from_text("no json"), [])
+        self.assertEqual(
+            process_project._observation_items_from_text('{"learnings": []}'), []
+        )
+
+    def test_observation_rows_validate_and_cap(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        items = [
+            {"type": "weird-type", "title": "First", "facts": [f"f{i}" for i in range(9)]},
+            {"type": "bugfix", "title": "", "narrative": "skipped, no title"},
+            {"type": "decision", "title": "Second", "narrative": "n2"},
+            {"type": "discovery", "title": "Third", "facts": ["a", "", 42]},
+            {"type": "change", "title": "Fourth (over cap)"},
+        ]
+
+        rows = process_project._observation_rows_from_items(
+            project, "session-1", self.EVENTS, items, llm_model="model-x"
+        )
+
+        self.assertEqual(len(rows), process_project.MAX_OBSERVATIONS_PER_WINDOW)
+        self.assertEqual(rows[0]["type"], process_project.DEFAULT_OBSERVATION_TYPE)
+        self.assertEqual(len(rows[0]["facts"]), process_project.MAX_OBSERVATION_FACTS)
+        self.assertEqual(rows[1]["title"], "Second")
+        self.assertEqual(rows[2]["facts"], ["a", "42"])
+        self.assertEqual(rows[0]["started_at"], "2026-07-02T10:00:00+00:00")
+        self.assertEqual(rows[0]["ended_at"], "2026-07-02T10:05:00+00:00")
+        for row in rows:
+            self.assertEqual(row["source"], process_project.HOOK_LEARNING_SOURCE)
+            self.assertEqual(row["llm_model"], "model-x")
+
+    def test_observation_ids_are_deterministic_per_window(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        items = [{"type": "change", "title": "Only"}]
+
+        first = process_project._observation_rows_from_items(
+            project, "session-1", self.EVENTS, items
+        )
+        second = process_project._observation_rows_from_items(
+            project, "session-1", self.EVENTS, items
+        )
+
+        self.assertEqual(first[0]["id"], second[0]["id"])
+        digest = process_project._window_digest(self.EVENTS)
+        self.assertEqual(first[0]["id"], f"observation:mkg:session-1:{digest}:0")
+
+    def test_ask_llm_for_observations_skips_when_llm_not_ready(self) -> None:
+        with patch.object(
+            process_project, "llm_readiness_status", return_value=(False, "no key")
+        ):
+            items, meta = process_project.ask_llm_for_observations("prompt")
+
+        self.assertEqual(items, [])
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["skip_reason"], "no key")
+
+    def test_write_processing_writes_observations_and_chain(self) -> None:
+        queries: list[str] = []
+        params: list[dict] = []
+
+        class FakeTx:
+            def run(self, query: str, **kwargs):
+                queries.append(query)
+                params.append(kwargs)
+
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        observation_rows = [
+            {
+                "id": "observation:mkg:session-1:abc:0",
+                "type": "bugfix",
+                "title": "Fixed hook",
+                "facts": ["fact"],
+                "narrative": "n",
+                "source": "hooks-stop",
+                "llm_model": "model-x",
+                "started_at": "2026-07-02T10:00:00+00:00",
+                "ended_at": "2026-07-02T10:05:00+00:00",
+            },
+            {
+                "id": "observation:mkg:session-1:abc:1",
+                "type": "decision",
+                "title": "Chose approach",
+                "facts": [],
+                "narrative": None,
+                "source": "hooks-stop",
+                "llm_model": "model-x",
+                "started_at": "2026-07-02T10:00:00+00:00",
+                "ended_at": "2026-07-02T10:05:00+00:00",
+            },
+        ]
+
+        process_project._write_processing(
+            FakeTx(),
+            project,
+            "session-1",
+            "turn",
+            [{"event_id": "event-1"}],
+            [],
+            [],
+            "default",
+            1,
+            "model-x",
+            "called",
+            None,
+            None,
+            "2026-07-02T10:06:00+00:00",
+            observation_rows=observation_rows,
+        )
+
+        joined = "\n".join(queries)
+        self.assertIn("pp.observation_count = $observation_count", queries[0])
+        self.assertEqual(params[0]["observation_count"], 2)
+        self.assertIn("MERGE (o:Observation {id: row.id})", joined)
+        self.assertIn("MERGE (p)-[:HAS_OBSERVATION]->(o)", joined)
+        self.assertIn("MERGE (pp)-[:PRODUCED_OBSERVATION]->(o)", joined)
+        self.assertIn("MERGE (a)-[:NEXT]->(b)", joined)
+        self.assertIn("LATEST_OBSERVATION", joined)
+
+        pair_params = next(p for p in params if "pairs" in p)
+        self.assertEqual(
+            pair_params["pairs"],
+            [
+                {
+                    "prev": "observation:mkg:session-1:abc:0",
+                    "next": "observation:mkg:session-1:abc:1",
+                }
+            ],
+        )
+        pointer_params = next(p for p in params if "head_id" in p)
+        self.assertEqual(pointer_params["head_id"], "observation:mkg:session-1:abc:0")
+        self.assertEqual(pointer_params["tail_id"], "observation:mkg:session-1:abc:1")
+        self.assertEqual(
+            pointer_params["window_ids"],
+            ["observation:mkg:session-1:abc:0", "observation:mkg:session-1:abc:1"],
+        )
+
+    def test_write_processing_without_observations_writes_none(self) -> None:
+        queries: list[str] = []
+
+        class FakeTx:
+            def run(self, query: str, **kwargs):
+                queries.append(query)
+
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        process_project._write_processing(
+            FakeTx(),
+            project,
+            "session-1",
+            "turn",
+            [{"event_id": "event-1"}],
+            [],
+            [],
+            "default",
+            1,
+            None,
+            "skipped",
+            "no key",
+            None,
+            "2026-07-02T10:06:00+00:00",
+        )
+
+        joined = "\n".join(queries)
+        self.assertNotIn(":Observation", joined)
+        self.assertNotIn("LATEST_OBSERVATION", joined)
+
+    def test_learning_context_includes_recent_activity(self) -> None:
+        import time
+
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        context = project_common.format_learning_context(
+            project,
+            [],
+            observations=[
+                {
+                    "type": "bugfix",
+                    "title": "Fixed the Stop hook",
+                    "narrative": "Traced and fixed the failure.",
+                    "ended_epoch": time.time() - 7200,
+                },
+                {
+                    "type": "decision",
+                    "title": "Chose recency injection",
+                    "narrative": None,
+                    "ended_epoch": None,
+                },
+            ],
+        )
+
+        self.assertIn("Recent project activity (most recent first):", context)
+        self.assertIn("- [bugfix, 2h ago] Fixed the Stop hook — Traced and fixed", context)
+        self.assertIn("- [decision] Chose recency injection", context)
+        self.assertIn("historical record of past work", context)
+
+    def test_observation_age_label(self) -> None:
+        now = 1_000_000_000.0
+        self.assertEqual(
+            project_common.observation_age_label(now - 120, now_epoch=now), "2m ago"
+        )
+        self.assertEqual(
+            project_common.observation_age_label(now - 7200, now_epoch=now), "2h ago"
+        )
+        self.assertEqual(
+            project_common.observation_age_label(now - 3 * 86400, now_epoch=now), "3d ago"
+        )
+        self.assertEqual(project_common.observation_age_label(None), "")
+        self.assertEqual(project_common.observation_age_label("bogus"), "")
+
+    def test_fetch_recent_observations_query_shape(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        rows = project_common.fetch_recent_observations(
+            FakeDriver(), "neo4j", project_id="mkg", limit=3
+        )
+
+        self.assertEqual(rows, [])
+        query, params = captured[0]
+        self.assertIn("HAS_OBSERVATION", query)
+        self.assertIn("ORDER BY coalesce(o.ended_at, o.created_at) DESC", query)
+        self.assertEqual(params["project_id"], "mkg")
+        self.assertEqual(params["limit"], 3)
+
+    def test_ensure_project_schema_creates_observation_constraint(self) -> None:
+        statements: list[str] = []
+
+        class FakeTx:
+            def run(self, query: str, **kwargs):
+                statements.append(query)
+
+        project_common.ensure_project_schema(FakeTx())
+
+        joined = "\n".join(statements)
+        self.assertIn("FOR (o:Observation) REQUIRE o.id IS UNIQUE", joined)
+        self.assertIn("project_observation_fulltext", joined)
+
+
 if __name__ == "__main__":
     unittest.main()

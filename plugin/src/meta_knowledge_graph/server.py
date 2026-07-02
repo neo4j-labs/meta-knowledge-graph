@@ -993,11 +993,12 @@ def create_mcp_server(
         ),
         limit: int = Field(5, description="Max learnings AND max decisions to return."),
     ) -> str:
-        """Return scoped project/user learnings and decisions for the given project.
+        """Return scoped project/user learnings, decisions, and recent episodic
+        observations for the given project.
 
         Use this to self-bootstrap before answering questions about the active project,
-        or to recall what the agent has learned across sessions. Mirrors the data the
-        UserPromptSubmit hook injects, but on demand.
+        or to recall what the agent has learned and recently worked on across sessions.
+        Mirrors the data the SessionStart/UserPromptSubmit hooks inject, but on demand.
         """
         resolved_pid = _resolve_project_id(project_id)
         resolved_statuses = statuses or ["approved", "candidate"]
@@ -1166,6 +1167,26 @@ def create_mcp_server(
                     timestamp=timestamp,
                 )
 
+            # Episodic timeline: latest observations by recency. No status
+            # filter and no usage marking — the timeline is an append-only
+            # record, not gated memory.
+            observation_records = await _execute_query(
+                """
+                MATCH (:Project {id: $project_id})-[:HAS_OBSERVATION]->(o:Observation)
+                RETURN o.id AS id,
+                       o.type AS type,
+                       o.title AS title,
+                       o.facts AS facts,
+                       o.narrative AS narrative,
+                       toString(coalesce(o.ended_at, o.created_at)) AS ended_at
+                ORDER BY coalesce(o.ended_at, o.created_at) DESC
+                LIMIT $limit
+                """,
+                project_id=resolved_pid,
+                limit=limit,
+            )
+            recent_observations = [dict(r) for r in observation_records]
+
         payload = {
             "project": dict(project_record) if project_record else {"id": resolved_pid},
             "query": normalized_query or None,
@@ -1174,6 +1195,7 @@ def create_mcp_server(
             "user_decisions": user_decisions,
             "learnings": learnings,
             "decisions": decisions,
+            "recent_observations": recent_observations,
         }
         return json.dumps(payload, default=str)
 
