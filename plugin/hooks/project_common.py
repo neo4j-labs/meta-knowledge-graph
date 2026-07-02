@@ -1415,11 +1415,11 @@ def _ranked_vector_branch(
             VECTOR INDEX {vector_index}
             FOR $query_vector
             WHERE node.scope = $scope
-              AND node.status IN $statuses
               {project_filter}
             LIMIT $rank_limit
         ) SCORE AS raw_score
-        WHERE {post_filter}
+        WHERE node.status IN $statuses
+          AND {post_filter}
         WITH node, raw_score
         ORDER BY raw_score DESC
         WITH collect({{node: node, raw_score: raw_score}}) AS rows
@@ -1531,7 +1531,7 @@ def _fetch_memory_hybrid(
                 )
             )
         query_text = f"""
-            CALL {{
+            CALL () {{
                 {'UNION ALL'.join(branches)}
             }}
             WITH node,
@@ -1553,12 +1553,14 @@ def _fetch_memory_hybrid(
 
     if keyword_query:
         query_text = f"""
-            {_ranked_fulltext_branch(
-                label=label,
-                fulltext_index=fulltext_index,
-                project_match=project_match,
-                post_filter=post_filter,
-            )}
+            CALL () {{
+                {_ranked_fulltext_branch(
+                    label=label,
+                    fulltext_index=fulltext_index,
+                    project_match=project_match,
+                    post_filter=post_filter,
+                )}
+            }}
             WITH node,
                  1.0 / ($rrf_k + rank) AS score,
                  [source] AS sources
