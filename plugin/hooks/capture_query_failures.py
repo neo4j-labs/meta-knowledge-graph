@@ -46,6 +46,32 @@ MAX_TEXT = 4000
 BIGQUERY_SUFFIX = "bigquery_execute_query"
 NEO4J_SUFFIX = "neo4j_read_cypher"
 
+# Issue classes the query-error consolidation pipeline may fold into durable
+# (:QueryErrorPattern) guidance: failures deterministically caused by the query
+# text itself, plus the generic error bucket (the consolidation LLM discards
+# transient one-offs from it). Transient/environmental classes never
+# consolidate — re-running the same query can succeed, so there is no durable
+# fix to teach.
+CONSOLIDATABLE_ISSUE_TYPES = frozenset(
+    {
+        "syntax_error",
+        "schema_mismatch",
+        "capability_unavailable",
+        "serialization_issue",
+        "query_execution_error",
+    }
+)
+TRANSIENT_ISSUE_TYPES = frozenset(
+    {
+        "timeout",
+        "resource_limit",
+        "result_size_limit",
+        "permission_error",
+        "empty_result",
+        "tool_output_shape_error",
+    }
+)
+
 PERMISSION_PATTERNS = (
     "permission denied",
     "access denied",
@@ -443,6 +469,22 @@ def _engine(tool_name: str) -> str | None:
     return None
 
 
+def tool_key(tool_name: str) -> str | None:
+    """Client-independent identity of a query tool.
+
+    The same MCP tool mounts under different full names per client and install
+    mode (``mcp__meta-knowledge-graph__neo4j_read_cypher``,
+    ``mcp__plugin_..._meta-knowledge-graph__neo4j_read_cypher``, ...), so error
+    patterns are grouped on the canonical tool suffix instead of the raw name.
+    """
+    lowered = tool_name.lower()
+    if BIGQUERY_SUFFIX in lowered:
+        return BIGQUERY_SUFFIX
+    if NEO4J_SUFFIX in lowered:
+        return NEO4J_SUFFIX
+    return None
+
+
 def _query_text(tool_input: Any) -> str | None:
     if isinstance(tool_input, dict) and isinstance(tool_input.get("query"), str):
         return tool_input["query"]
@@ -493,6 +535,7 @@ def build_failure_projection(payload: dict[str, Any]) -> dict[str, Any] | None:
             "id": query_id,
             "engine": engine,
             "tool_name": tool_name,
+            "tool_key": tool_key(tool_name),
             "tool_use_id": str(tool_use_id) if tool_use_id else None,
             "query_text": query,
             "query_hash": query_hash,

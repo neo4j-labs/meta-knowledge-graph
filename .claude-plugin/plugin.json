@@ -1,6 +1,6 @@
 {
   "name": "meta-knowledge-graph",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "MKG: Neo4j-backed agent memory — capture/recall hooks + MCP server (Neo4j, BigQuery, neocarta).",
   "author": { "name": "Tomaz Bratanic" },
   "repository": "https://github.com/neo4j-labs/meta-knowledge-graph",

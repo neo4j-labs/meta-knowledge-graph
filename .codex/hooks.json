@@ -77,6 +77,10 @@
           {
             "type": "command",
             "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/capture_query_failures.py\""
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/inject_query_error_context.py\""
           }
         ]
       }
@@ -139,6 +143,10 @@
           {
             "type": "command",
             "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/consolidate_system_prompt.py\" --background"
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/consolidate_query_errors.py\" --background"
           }
         ]
       }

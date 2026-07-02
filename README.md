@@ -311,6 +311,8 @@ to the plugin directory.
 | `Stop`, `SessionEnd` | `hooks/consolidate_system_prompt.py` | Runs in the background, rate-limited. The system-prompt consolidation service: it only does work when **more than 5** user-profile memories are in need of review — user-scoped `candidate` learnings not yet folded into the prompt (`MKG_PROMPT_CONSOLIDATION_THRESHOLD`) — and not more than once per cooldown window (`MKG_PROMPT_CONSOLIDATION_INTERVAL_HOURS`, default 24h, tracked via `last_consolidated_at` on the node). When both gates pass, it sends the current `(:SystemPrompt {name: 'default'})` plus the pending user facts to the LLM, which folds those facts into the persona, then archives the outgoing prompt as a `(:SystemPromptVersion)` history node before overwriting the active one and bumping its version. The folded learnings are stamped `consolidated_at` so they drop out of the backlog; their `candidate` status is left untouched, so the human promotion gate still owns `candidate → approved`. |
 | `PostToolUse` (matcher on the Diffbot tools `enhance_entity` / `search_news`) | `hooks/ingest_diffbot.py` | Builds Diffbot tool results back into the graph instead of letting them evaporate with the conversation. `enhance_entity` firmographics become `(:Account)-[:HAS_ENRICHMENT]→(:DiffbotOrganization)` or `(:DiffbotPerson)` (matched on domain, name/`allNames`, and employer hints); `search_news` articles become `(:NewsArticle)-[:MENTIONS]→(:Account)` plus `[:MENTIONS]→(:DiffbotOrganization)` when organization tags or account matches identify companies, and `[:TAGGED]→(:NewsTag)`. Only entities carrying a real Diffbot id are stored — references without one are dropped instead of being keyed on synthetic hashes. Diffbot entities and articles link `[:CAPTURED_IN]→(:Session)` for provenance. Handles the harness's response wrappers, including oversized results that arrive as a saved-to-file notice. |
 | `PostToolUse` (matcher on the query tools `bigquery_execute_query` / `neo4j_read_cypher`) | `hooks/capture_query_failures.py` | Captures failed or suspicious query outputs as structured `(:QueryExecution)-[:HAS_ISSUE]→(:QueryIssue)` artifacts. The first pass records issues visible in PostToolUse payloads: empty result sets, parser/schema/permission/resource/capability errors, malformed outputs, and Neo4j serialization cases such as temporal values returned as `{}`. Clean successful query results are ignored. |
+| `Stop`, `SessionEnd` | `hooks/consolidate_query_errors.py` | Runs in the background, rate-limited **per tool**. The query-error consolidation service: it folds unconsolidated *invalid-query* failures — the consolidatable issue classes (`syntax_error`, `schema_mismatch`, `capability_unavailable`, `serialization_issue`, plus the generic error bucket) — into durable `(:QueryErrorPattern)` nodes carrying the error signature, root cause, and actionable fix. Transient/environmental classes (`timeout`, `resource_limit`, `result_size_limit`, `permission_error`) never consolidate, and the LLM is additionally instructed to discard transient one-offs hiding in the generic bucket. Failures are grouped by the client-independent `tool_key`; a tool consolidates only when **more than** `MKG_QUERY_ERROR_CONSOLIDATION_THRESHOLD` (default 1) of its failures are pending and not more than once per `MKG_QUERY_ERROR_CONSOLIDATION_INTERVAL_HOURS` (default 6h, tracked on the per-tool `(:ToolErrorProfile)`). The LLM merges same-root-cause failures into one pattern and updates existing patterns instead of duplicating them; patterns are embedded for semantic recall, keep `[:DERIVED_FROM]` provenance, and consumed executions are stamped `error_consolidated_at` so they leave the queue. |
+| `PostToolUse`, `PostToolUseFailure` (matcher on the query tools `bigquery_execute_query` / `neo4j_read_cypher`) | `hooks/inject_query_error_context.py` | Recall counterpart of the consolidation service. When a query tool fails with a consolidatable invalid-query error (never on successes, timeouts, or other transient failures), it hybrid-searches (vector + fulltext, RRF) the failing query text *and* the error message against the `(:QueryErrorPattern)` library **of that same tool only**, and feeds the top matching fixes back to the model — so guidance is recalled both when the error looks similar and when the query looks similar, and one tool's guidance never leaks into another's failures. Delivery adapts to the event: `PostToolUse` gets `hookSpecificOutput.additionalContext`; `PostToolUseFailure` (no `additionalContext` support) gets `decision: "block"` + `reason`, which simply shows the guidance to the model since the call already failed. Served patterns track `use_count` / `last_used_at` and link `[:INJECTED_IN]` to the session, without per-session dedup — a recurring error should resurface its fix every time. |
 
 ### Graph model
 
@@ -359,6 +361,13 @@ to the plugin directory.
 # Produced by hooks/capture_query_failures.py (PostToolUse on query tools):
 (:Project)─[:HAS_QUERY_EXECUTION]→ (:QueryExecution) ←[:HAS_QUERY_EXECUTION]─(:Session)
 (:QueryExecution)─[:HAS_ISSUE]→ (:QueryIssue)
+
+# Produced by hooks/consolidate_query_errors.py (Stop/SessionEnd, background),
+# recalled by hooks/inject_query_error_context.py (PostToolUse/PostToolUseFailure):
+(:Project)─[:HAS_TOOL_ERROR_PROFILE]→ (:ToolErrorProfile {tool_key, last_consolidated_at})
+(:ToolErrorProfile)─[:HAS_ERROR_PATTERN]→ (:QueryErrorPattern {error_signature, resolution, status})
+(:QueryErrorPattern)─[:DERIVED_FROM]→ (:QueryExecution)   # provenance
+(:QueryErrorPattern)─[:INJECTED_IN]→ (:Session)           # recall observability
 ```
 
 Candidate learnings flow through retrieval but are review-gated. Project-scoped
@@ -403,6 +412,13 @@ tombstones but drop out of retrieval. Run
 live nodes become retrievable (it skips tombstones). Tunables: `MKG_CONSISTENCY_GATE` (default on),
 `MKG_CONSISTENCY_TOPK` (default 15), `MKG_CONSISTENCY_SWEEP_LIMIT` (default 8),
 and `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS`.
+The query-error pattern library follows the same hybrid retrieval shape with its
+own indexes: `query_error_pattern_fulltext` over the pattern's
+title/signature/root-cause/resolution/example query, and the cosine vector index
+`query_error_pattern_vector` pre-filtering `project_id` / `tool_key` in-index so
+recall never crosses tools. Its tunables are
+`MKG_QUERY_ERROR_CONSOLIDATION_THRESHOLD` (default 1) and
+`MKG_QUERY_ERROR_CONSOLIDATION_INTERVAL_HOURS` (default 6).
 The persisted system prompt and memory extraction prompt are frozen at runtime —
 read on session start but never self-modified mid-session. Improving the system
 prompt from the accumulated learning corpus is the job of the rate-limited
