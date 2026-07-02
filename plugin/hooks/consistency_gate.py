@@ -208,11 +208,11 @@ def _fetch_neighbours_vector(
             FOR $vector
             WHERE node.project_id = $project_id
               AND node.scope = $scope
-              AND node.status IN ['approved', 'candidate']
             LIMIT $limit
         ) SCORE AS score
         WITH node, score
         WHERE node.id <> $candidate_id
+          AND node.status IN ['approved', 'candidate']
         {_NEIGHBOUR_RETURN}
         ORDER BY score DESC
     """
@@ -256,18 +256,18 @@ def _fetch_neighbours_hybrid_vector_keyword(
             candidate_id=candidate_id,
         )
     query = f"""
-        CALL {{
+        CALL () {{
             MATCH (node:{label})
             SEARCH node IN (
                 VECTOR INDEX {index_name}
                 FOR $vector
                 WHERE node.project_id = $project_id
                   AND node.scope = $scope
-                  AND node.status IN ['approved', 'candidate']
                 LIMIT $vector_limit
             ) SCORE AS raw_score
             WITH node, raw_score
             WHERE node.id <> $candidate_id
+              AND node.status IN ['approved', 'candidate']
             ORDER BY raw_score DESC
             WITH collect({{node: node, raw_score: raw_score}}) AS rows
             UNWIND range(0, size(rows) - 1) AS idx

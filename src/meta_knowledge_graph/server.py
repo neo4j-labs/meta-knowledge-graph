@@ -608,11 +608,11 @@ def create_mcp_server(
                     VECTOR INDEX {vector_index}
                     FOR $query_vector
                     WHERE node.scope = $scope
-                      AND node.status IN $statuses
                       {project_filter}
                     LIMIT $rank_limit
                 ) SCORE AS raw_score
-                WHERE {post_filter}
+                WHERE node.status IN $statuses
+                  AND {post_filter}
                 WITH node, raw_score
                 ORDER BY raw_score DESC
                 WITH collect({{node: node, raw_score: raw_score}}) AS rows
@@ -647,7 +647,7 @@ def create_mcp_server(
                     """
                 )
             hybrid_query = f"""
-                CALL {{
+                CALL () {{
                     {'UNION ALL'.join(branches)}
                 }}
                 WITH node,
