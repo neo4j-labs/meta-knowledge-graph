@@ -782,6 +782,22 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(learning_rows[0]["llm_model"], "anthropic/claude-haiku-4-5")
         self.assertEqual(decision_rows[0]["llm_model"], "anthropic/claude-haiku-4-5")
 
+    def test_llm_action_rows_use_unified_hook_source(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        actions = {
+            "learnings": [{"action": "create", "text": "A durable fact.", "confidence": 0.8}],
+            "decisions": [{"action": "create", "text": "A durable decision.", "confidence": 0.9}],
+        }
+
+        # The verbose source tag is uniform regardless of processing mode so
+        # hook-written memory is always identifiable as `hooks-stop`.
+        for mode in ("turn", "session"):
+            learning_rows, decision_rows = process_project._memory_rows_from_actions(
+                project, mode, actions
+            )
+            self.assertEqual(learning_rows[0]["source"], "hooks-stop")
+            self.assertEqual(decision_rows[0]["source"], "hooks-stop")
+
     def test_processing_events_default_to_claude_model_for_claude_client(self) -> None:
         with patch.dict(
             os.environ,
@@ -821,7 +837,7 @@ class ProjectHookTests(unittest.TestCase):
                 "confidence": 0.8,
                 "status": "candidate",
                 "scope": "project",
-                "source": "project_turn_llm",
+                "source": "hooks-stop",
                 "summary": "MKG stores model provenance.",
                 "reason": "Reusable implementation fact.",
                 "llm_model": model,
@@ -836,7 +852,7 @@ class ProjectHookTests(unittest.TestCase):
                 "task_pattern": "model provenance",
                 "confidence": 0.9,
                 "scope": "project",
-                "source": "project_turn_llm",
+                "source": "hooks-stop",
                 "summary": "Store extraction model on produced memory.",
                 "related_learning_id": None,
                 "reason": "Implementation decision.",

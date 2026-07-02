@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import sys
 from pathlib import Path
@@ -67,3 +68,24 @@ def test_mcp_project_resolver_uses_claude_project_dir(monkeypatch) -> None:
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/test/work/claims-service")
 
     assert server._resolve_project_id(None) == "claims-service"
+
+
+def test_mcp_learning_source_is_stable_verbose_tag() -> None:
+    # MCP-written memory is always tagged with this stable verbose source so it
+    # is uniform across Codex and Claude, paralleling the hook's `hooks-stop`.
+    assert server.MCP_LEARNING_SOURCE == "agent-mcp"
+
+
+def test_project_add_learning_has_no_source_parameter() -> None:
+    # The writer provenance is fixed by the tool, not caller-supplied. The tool
+    # is a closure inside create_mcp_server, so inspect its definition via AST.
+    tree = ast.parse(Path(server.__file__).read_text())
+    defs = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "project_add_learning"
+    ]
+    assert len(defs) == 1
+    arg_names = {arg.arg for arg in defs[0].args.args + defs[0].args.kwonlyargs}
+    assert "source" not in arg_names

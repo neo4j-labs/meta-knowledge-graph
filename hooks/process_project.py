@@ -59,6 +59,12 @@ from consistency_gate import (  # noqa: E402
 )
 
 
+# Stable, verbose provenance tag for memory written by the Stop-hook extractor.
+# Kept uniform across modes and clients (Codex and Claude) so learnings/decisions
+# minted by the hook are always identifiable as `hooks-stop`, paralleling the
+# MCP tool's `agent-mcp` tag.
+HOOK_LEARNING_SOURCE = "hooks-stop"
+
 DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME = "default"
 MEMORY_EXTRACTION_PROMPT_TOKENS = (
     "[[PROJECT_NAME]]",
@@ -417,7 +423,7 @@ def _memory_rows_from_actions(
                 "confidence": _confidence(item.get("confidence")),
                 "status": "candidate",
                 "scope": scope,
-                "source": f"project_{mode}_llm",
+                "source": HOOK_LEARNING_SOURCE,
                 "summary": text or item.get("reason"),
                 "reason": item.get("reason"),
                 "llm_model": llm_model,
@@ -452,7 +458,7 @@ def _memory_rows_from_actions(
                 "task_pattern": item.get("task_pattern"),
                 "confidence": _confidence(item.get("confidence")),
                 "scope": scope,
-                "source": f"project_{mode}_llm",
+                "source": HOOK_LEARNING_SOURCE,
                 "summary": text or item.get("reason"),
                 "related_learning_id": item.get("related_learning_id"),
                 "reason": item.get("reason"),

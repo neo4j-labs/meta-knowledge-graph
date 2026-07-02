@@ -99,6 +99,12 @@ def _resolve_project_id(explicit: Optional[str]) -> str:
 USER_LEARNING_NAMESPACE = "user"
 LEARNING_SCOPES = ("project", "user")
 
+# Stable, verbose provenance tag for memory written through the MCP tool surface.
+# Kept uniform across clients (Codex and Claude) so learnings/decisions created
+# via the tool are always identifiable as `agent-mcp`, paralleling the Stop-hook
+# extractor's `hooks-stop` tag.
+MCP_LEARNING_SOURCE = "agent-mcp"
+
 
 def _normalize_scope(value: Optional[str]) -> str:
     scope = (value or "").strip().lower()
@@ -952,10 +958,6 @@ def create_mcp_server(
             0.6,
             description="Confidence 0.0-1.0. Existing higher confidence is preserved.",
         ),
-        source: str = Field(
-            "agent",
-            description="Provenance tag for the writer (e.g. 'agent', 'user', '<tool>_llm').",
-        ),
     ) -> str:
         """Persist a durable learning. Idempotent on (scope namespace, text)."""
         clean_text = _truncate((text or "").strip())
@@ -1024,7 +1026,7 @@ def create_mcp_server(
                 task_pattern=task_pattern,
                 status=normalized_status,
                 scope=normalized_scope,
-                source=source,
+                source=MCP_LEARNING_SOURCE,
                 confidence=clamped_confidence,
                 timestamp=timestamp,
             )
