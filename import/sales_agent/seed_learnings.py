@@ -136,18 +136,18 @@ DECISIONS: list[dict[str, str | float]] = [
 
 MERGE_PROJECT = """
 MERGE (p:Project {id: $project_id})
-ON CREATE SET p.created_at = $now,
+ON CREATE SET p.created_at = datetime($now),
               p.name = $project_name,
               p.status = 'active',
               p.source = 'seed'
-SET p.updated_at = $now
+SET p.updated_at = datetime($now)
 """
 
 MERGE_LEARNINGS = """
 MATCH (p:Project {id: $project_id})
 UNWIND $rows AS row
 MERGE (l:Learning {id: row.id})
-ON CREATE SET l.created_at = $now,
+ON CREATE SET l.created_at = datetime($now),
               l.use_count = 0,
               l.support_count = 1
 SET l.text = row.text,
@@ -158,7 +158,7 @@ SET l.text = row.text,
     l.source = 'seed',
     l.last_source = 'seed',
     l.project_id = $project_id,
-    l.updated_at = $now,
+    l.updated_at = datetime($now),
     l.confidence = CASE
         WHEN coalesce(l.confidence, 0.0) < row.confidence THEN row.confidence
         ELSE l.confidence
@@ -170,7 +170,7 @@ MERGE_DECISIONS = """
 MATCH (p:Project {id: $project_id})
 UNWIND $rows AS row
 MERGE (d:Decision {id: row.id})
-ON CREATE SET d.created_at = $now,
+ON CREATE SET d.created_at = datetime($now),
               d.support_count = 1
 SET d.text = row.text,
     d.rationale = row.rationale,
@@ -181,7 +181,7 @@ SET d.text = row.text,
     d.source = 'seed',
     d.last_source = 'seed',
     d.project_id = $project_id,
-    d.updated_at = $now,
+    d.updated_at = datetime($now),
     d.confidence = CASE
         WHEN coalesce(d.confidence, 0.0) < row.confidence THEN row.confidence
         ELSE d.confidence

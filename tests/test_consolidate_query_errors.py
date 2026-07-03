@@ -138,6 +138,19 @@ class ConsolidationGateTests(unittest.TestCase):
         )
         self.assertTrue(proceed)
 
+    def test_neo4j_datetime_last_run_blocks_recent_run(self) -> None:
+        from neo4j.time import DateTime
+
+        proceed, reason = consolidate_query_errors.consolidation_gate(
+            pending_count=5,
+            threshold=1,
+            last_consolidated_at=DateTime.from_native(NOW - timedelta(hours=1)),
+            interval_hours=6.0,
+            now=NOW,
+        )
+        self.assertFalse(proceed)
+        self.assertIn("rate-limited", reason)
+
 
 class GroupingTests(unittest.TestCase):
     def test_groups_by_canonical_tool_key(self) -> None:

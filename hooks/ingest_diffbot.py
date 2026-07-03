@@ -59,28 +59,28 @@ KIND_LABELS = {"organization": "DiffbotOrganization", "person": "DiffbotPerson"}
 ENHANCE_CYPHER_TEMPLATE = """
 UNWIND $rows AS row
 MERGE (e:__LABEL__ {id: row.id})
-ON CREATE SET e.first_seen_at = $timestamp
+ON CREATE SET e.first_seen_at = datetime($timestamp)
 SET e += row.props,
     e.source = 'diffbot',
-    e.last_enriched_at = $timestamp
+    e.last_enriched_at = datetime($timestamp)
 WITH e, row
 FOREACH (ceo IN CASE WHEN row.ceo IS NULL THEN [] ELSE [row.ceo] END |
     MERGE (p:DiffbotPerson {id: ceo.id})
-    ON CREATE SET p.first_seen_at = $timestamp
+    ON CREATE SET p.first_seen_at = datetime($timestamp)
     SET p.name = coalesce(ceo.name, p.name),
         p.source = 'diffbot',
-        p.last_seen_at = $timestamp
+        p.last_seen_at = datetime($timestamp)
     MERGE (e)-[cr:HAS_CEO]->(p)
-    ON CREATE SET cr.created_at = $timestamp
+    ON CREATE SET cr.created_at = datetime($timestamp)
 )
 FOREACH (employer IN row.employer_refs |
     MERGE (o:DiffbotOrganization {id: employer.id})
-    ON CREATE SET o.first_seen_at = $timestamp
+    ON CREATE SET o.first_seen_at = datetime($timestamp)
     SET o.name = coalesce(employer.name, o.name),
         o.source = 'diffbot',
-        o.last_seen_at = $timestamp
+        o.last_seen_at = datetime($timestamp)
     MERGE (e)-[er:EMPLOYED_BY]->(o)
-    ON CREATE SET er.created_at = $timestamp
+    ON CREATE SET er.created_at = datetime($timestamp)
 )
 WITH e, row
 CALL (e, row) {
@@ -88,7 +88,7 @@ CALL (e, row) {
     WHERE (row.domain IS NOT NULL AND a.domain = row.domain)
        OR toLower(a.name) IN row.name_keys
     MERGE (a)-[r:HAS_ENRICHMENT]->(e)
-    SET r.updated_at = $timestamp
+    SET r.updated_at = datetime($timestamp)
     RETURN count(a) AS linked
 }
 RETURN count(e) AS stored, sum(linked) AS links
@@ -101,10 +101,10 @@ def _enhance_cypher(kind: str) -> str:
 NEWS_CYPHER = """
 UNWIND $rows AS row
 MERGE (n:NewsArticle {url: row.url})
-ON CREATE SET n.first_seen_at = $timestamp
+ON CREATE SET n.first_seen_at = datetime($timestamp)
 SET n += row.props,
     n.source = 'diffbot',
-    n.last_seen_at = $timestamp
+    n.last_seen_at = datetime($timestamp)
 WITH n, row
 FOREACH (label IN row.tags |
     MERGE (t:NewsTag {label: label})
@@ -113,12 +113,12 @@ FOREACH (label IN row.tags |
 WITH n, row
 FOREACH (company IN row.companies |
     MERGE (c:DiffbotOrganization {id: company.id})
-    ON CREATE SET c.first_seen_at = $timestamp
+    ON CREATE SET c.first_seen_at = datetime($timestamp)
     SET c += company.props,
         c.source = 'diffbot',
-        c.last_seen_at = $timestamp
+        c.last_seen_at = datetime($timestamp)
     MERGE (n)-[cr:MENTIONS]->(c)
-    ON CREATE SET cr.created_at = $timestamp
+    ON CREATE SET cr.created_at = datetime($timestamp)
 )
 WITH n, row
 CALL (n, row) {
@@ -126,7 +126,7 @@ CALL (n, row) {
     WHERE toLower(a.name) IN row.account_keys
        OR toLower(coalesce(a.domain, '')) IN row.account_keys
     MERGE (n)-[r:MENTIONS]->(a)
-    ON CREATE SET r.created_at = $timestamp
+    ON CREATE SET r.created_at = datetime($timestamp)
     WITH n, a
     OPTIONAL MATCH (existing:DiffbotOrganization)
     WHERE (a.domain IS NOT NULL AND existing.domain = a.domain)
@@ -134,7 +134,7 @@ CALL (n, row) {
     WITH n, a, collect(existing)[0] AS existing
     FOREACH (c IN CASE WHEN existing IS NULL THEN [] ELSE [existing] END |
         MERGE (n)-[cr:MENTIONS]->(c)
-        ON CREATE SET cr.created_at = $timestamp
+        ON CREATE SET cr.created_at = datetime($timestamp)
     )
     RETURN count(a) AS linked
 }
@@ -143,7 +143,7 @@ RETURN count(n) AS stored, sum(linked + size(row.companies)) AS links
 
 SESSION_LINK_ENHANCE = """
 MERGE (s:Session {session_id: $session_id})
-ON CREATE SET s.created_at = $timestamp
+ON CREATE SET s.created_at = datetime($timestamp)
 WITH s
 MATCH (e)
 WHERE (e:DiffbotPerson OR e:DiffbotOrganization) AND e.id IN $keys
@@ -152,7 +152,7 @@ MERGE (e)-[:CAPTURED_IN]->(s)
 
 SESSION_LINK_NEWS = """
 MERGE (s:Session {session_id: $session_id})
-ON CREATE SET s.created_at = $timestamp
+ON CREATE SET s.created_at = datetime($timestamp)
 WITH s
 MATCH (n:NewsArticle)
 WHERE n.url IN $keys

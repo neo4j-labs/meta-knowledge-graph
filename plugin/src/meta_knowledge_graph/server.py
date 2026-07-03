@@ -1144,7 +1144,7 @@ def create_mcp_server(
                 await _execute_query(
                     """
                     MATCH (l:Learning) WHERE l.id IN $ids
-                    SET l.last_used_at = $timestamp,
+                    SET l.last_used_at = datetime($timestamp),
                         l.use_count = coalesce(l.use_count, 0) + 1
                     """,
                     ids=ids,
@@ -1160,7 +1160,7 @@ def create_mcp_server(
                 await _execute_query(
                     """
                     MATCH (d:Decision) WHERE d.id IN $ids
-                    SET d.last_used_at = $timestamp,
+                    SET d.last_used_at = datetime($timestamp),
                         d.use_count = coalesce(d.use_count, 0) + 1
                     """,
                     ids=decision_ids,
@@ -1256,13 +1256,13 @@ def create_mcp_server(
             record = await _execute_query_single(
                 """
                 MERGE (p:Project {id: $project_id})
-                ON CREATE SET p.created_at = $timestamp,
+                ON CREATE SET p.created_at = datetime($timestamp),
                               p.name = $project_id,
                               p.source = 'agent'
-                SET p.updated_at = $timestamp,
-                    p.last_activity_at = $timestamp
+                SET p.updated_at = datetime($timestamp),
+                    p.last_activity_at = datetime($timestamp)
                 MERGE (l:Learning {id: $row_id})
-                ON CREATE SET l.created_at = $timestamp,
+                ON CREATE SET l.created_at = datetime($timestamp),
                               l.use_count = 0,
                               l.support_count = 0
                 SET l.text = $text,
@@ -1277,7 +1277,7 @@ def create_mcp_server(
                     l.source = coalesce(l.source, $source),
                     l.last_source = $source,
                     l.project_id = $project_id,
-                    l.updated_at = $timestamp,
+                    l.updated_at = datetime($timestamp),
                     l.support_count = coalesce(l.support_count, 0) + 1,
                     l.confidence = CASE
                         WHEN coalesce(l.confidence, 0.0) < $confidence THEN $confidence
@@ -1362,13 +1362,13 @@ def create_mcp_server(
             record = await _execute_query_single(
                 """
                 MERGE (p:Project {id: $project_id})
-                ON CREATE SET p.created_at = $timestamp,
+                ON CREATE SET p.created_at = datetime($timestamp),
                               p.name = $project_id,
                               p.source = 'agent'
-                SET p.updated_at = $timestamp,
-                    p.last_activity_at = $timestamp
+                SET p.updated_at = datetime($timestamp),
+                    p.last_activity_at = datetime($timestamp)
                 MERGE (d:Decision {id: $row_id})
-                ON CREATE SET d.created_at = $timestamp,
+                ON CREATE SET d.created_at = datetime($timestamp),
                               d.use_count = 0,
                               d.support_count = 0
                 SET d.text = $text,
@@ -1384,7 +1384,7 @@ def create_mcp_server(
                     d.source = coalesce(d.source, $source),
                     d.last_source = $source,
                     d.project_id = $project_id,
-                    d.updated_at = $timestamp,
+                    d.updated_at = datetime($timestamp),
                     d.support_count = coalesce(d.support_count, 0) + 1,
                     d.confidence = CASE
                         WHEN coalesce(d.confidence, 0.0) < $confidence THEN $confidence

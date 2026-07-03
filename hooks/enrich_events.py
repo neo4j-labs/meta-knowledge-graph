@@ -403,7 +403,9 @@ def build_event_enrichment_projection(
                 "is_subagent": agent_fields.get("is_subagent", False),
                 "prompt": truncate(prompt, MAX_TEXT) if prompt else None,
                 "prompt_event_id": prompt_ref.get("prompt_event_id"),
-                "first_seen_at": prompt_ref.get("timestamp") or _event_time(pre_event),
+                "first_seen_at": prompt_ref.get("timestamp")
+                or _event_time(pre_event)
+                or None,
             }
 
         call_id = _call_node_id(session_id, pre_event)
@@ -616,14 +618,14 @@ def _write_event_enrichment(
     tx.run(
         """
         MERGE (p:Project {id: $project_id})
-        ON CREATE SET p.created_at = $timestamp
-        SET p.updated_at = $timestamp,
-            p.last_activity_at = $timestamp
+        ON CREATE SET p.created_at = datetime($timestamp)
+        SET p.updated_at = datetime($timestamp),
+            p.last_activity_at = datetime($timestamp)
         MERGE (s:Session {session_id: $session_id})
-        ON CREATE SET s.created_at = $timestamp
+        ON CREATE SET s.created_at = datetime($timestamp)
         MERGE (p)-[:HAS_SESSION]->(s)
         MERGE (ee:EventEnrichment {id: $enrichment_id})
-        ON CREATE SET ee.created_at = $timestamp
+        ON CREATE SET ee.created_at = datetime($timestamp)
         SET ee.project_id = $project_id,
             ee.session_id = $session_id,
             ee.mode = $mode,
@@ -633,7 +635,7 @@ def _write_event_enrichment(
             ee.tool_call_count = size($tool_calls),
             ee.rationale_count = size($rationales),
             ee.resource_count = size($resources),
-            ee.updated_at = $timestamp
+            ee.updated_at = datetime($timestamp)
         MERGE (p)-[:HAS_EVENT_ENRICHMENT]->(ee)
         MERGE (s)-[:HAS_EVENT_ENRICHMENT]->(ee)
         WITH ee
@@ -660,7 +662,7 @@ def _write_event_enrichment(
             MATCH (s:Session {session_id: $session_id})
             UNWIND $turns AS row
             MERGE (t:Turn {id: row.id})
-            ON CREATE SET t.created_at = $timestamp
+            ON CREATE SET t.created_at = datetime($timestamp)
             SET t.session_id = row.session_id,
                 t.turn_id = row.turn_id,
                 t.agent_kind = row.agent_kind,
@@ -669,8 +671,8 @@ def _write_event_enrichment(
                 t.parent_session_id = row.parent_session_id,
                 t.is_subagent = row.is_subagent,
                 t.prompt = row.prompt,
-                t.first_seen_at = row.first_seen_at,
-                t.updated_at = $timestamp
+                t.first_seen_at = datetime(row.first_seen_at),
+                t.updated_at = datetime($timestamp)
             MERGE (s)-[:HAS_TURN]->(t)
             WITH t, row
             OPTIONAL MATCH (promptEvent:SessionEvent {event_id: row.prompt_event_id})
@@ -692,13 +694,13 @@ def _write_event_enrichment(
             MATCH (preEvent:SessionEvent {event_id: row.pre_event_id})
             OPTIONAL MATCH (postEvent:SessionEvent {event_id: row.post_event_id})
             MERGE (tool:Tool {id: row.tool_id})
-            ON CREATE SET tool.created_at = $timestamp
+            ON CREATE SET tool.created_at = datetime($timestamp)
             SET tool.name = row.tool_name,
                 tool.namespace = row.tool_namespace,
                 tool.kind = row.tool_kind,
-                tool.updated_at = $timestamp
+                tool.updated_at = datetime($timestamp)
             MERGE (call:ToolCall {id: row.id})
-            ON CREATE SET call.created_at = $timestamp
+            ON CREATE SET call.created_at = datetime($timestamp)
             SET call.session_id = row.session_id,
                 call.turn_id = row.turn_id,
                 call.agent_kind = row.agent_kind,
@@ -712,14 +714,14 @@ def _write_event_enrichment(
                 call.operation = row.operation,
                 call.input_summary = row.input_summary,
                 call.tool_input = row.tool_input,
-                call.started_at = row.started_at,
-                call.ended_at = row.ended_at,
+                call.started_at = datetime(row.started_at),
+                call.ended_at = datetime(row.ended_at),
                 call.intent = row.intent,
                 call.expected_output = row.expected_output,
                 call.observable_rationale = row.observable_rationale,
                 call.rationale_confidence = row.rationale_confidence,
                 call.call_order = row.order,
-                call.updated_at = $timestamp
+                call.updated_at = datetime($timestamp)
             MERGE (t)-[:ISSUED]->(call)
             MERGE (call)-[:USES_TOOL]->(tool)
             MERGE (call)-[:LOGGED_BY]->(preEvent)
@@ -740,12 +742,12 @@ def _write_event_enrichment(
             MATCH (call:ToolCall {id: row.call_id})
             MATCH (postEvent:SessionEvent {event_id: row.post_event_id})
             MERGE (result:ToolResult {id: row.id})
-            ON CREATE SET result.created_at = $timestamp
+            ON CREATE SET result.created_at = datetime($timestamp)
             SET result.summary = row.summary,
                 result.response_chars = row.response_chars,
                 result.succeeded = row.succeeded,
-                result.result_at = row.created_at,
-                result.updated_at = $timestamp
+                result.result_at = datetime(row.created_at),
+                result.updated_at = datetime($timestamp)
             MERGE (call)-[:RETURNED]->(result)
             MERGE (result)-[:LOGGED_BY]->(postEvent)
             """,
@@ -759,13 +761,13 @@ def _write_event_enrichment(
             UNWIND $rationales AS row
             MATCH (call:ToolCall {id: row.call_id})
             MERGE (rationale:ToolRationale {id: row.id})
-            ON CREATE SET rationale.created_at = $timestamp
+            ON CREATE SET rationale.created_at = datetime($timestamp)
             SET rationale.intent = row.intent,
                 rationale.expected_output = row.expected_output,
                 rationale.observable_rationale = row.observable_rationale,
                 rationale.confidence = row.confidence,
                 rationale.source = row.source,
-                rationale.updated_at = $timestamp
+                rationale.updated_at = datetime($timestamp)
             MERGE (call)-[:HAS_RATIONALE]->(rationale)
             """,
             rationales=projection["rationales"],
@@ -778,15 +780,15 @@ def _write_event_enrichment(
             UNWIND $resources AS row
             MATCH (call:ToolCall {id: row.call_id})
             MERGE (resource:Resource {id: row.id})
-            ON CREATE SET resource.created_at = $timestamp
+            ON CREATE SET resource.created_at = datetime($timestamp)
             SET resource.type = row.type,
                 resource.name = row.name,
                 resource.value = row.value,
-                resource.updated_at = $timestamp
+                resource.updated_at = datetime($timestamp)
             MERGE (call)-[target:TARGETS]->(resource)
             SET target.confidence = row.confidence,
                 target.source = 'event_enrichment',
-                target.updated_at = $timestamp
+                target.updated_at = datetime($timestamp)
             """,
             resources=projection["resources"],
             timestamp=timestamp,
@@ -802,7 +804,7 @@ def _write_event_enrichment(
             SET r.turn_id = row.turn_node_id,
                 r.confidence = row.confidence,
                 r.source = row.source,
-                r.updated_at = $timestamp
+                r.updated_at = datetime($timestamp)
             """,
             follows=projection["follows"],
             timestamp=timestamp,
@@ -819,7 +821,7 @@ def _write_event_enrichment(
                 r.resource_ids = row.resource_ids,
                 r.confidence = row.confidence,
                 r.source = row.source,
-                r.updated_at = $timestamp
+                r.updated_at = datetime($timestamp)
             """,
             dependencies=projection["dependencies"],
             timestamp=timestamp,

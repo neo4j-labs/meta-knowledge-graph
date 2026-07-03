@@ -95,7 +95,7 @@ DURABLE USER-PROFILE FACTS TO FOLD IN:
 def consolidation_gate(
     pending_count: int,
     threshold: int,
-    last_consolidated_at: str | None,
+    last_consolidated_at: Any,
     interval_hours: float,
     now: datetime,
 ) -> tuple[bool, str]:
@@ -123,11 +123,16 @@ def consolidation_gate(
     )
 
 
-def _parse_iso(value: str) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
+def _parse_iso(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif hasattr(value, "to_native"):  # neo4j.time.DateTime
+        parsed = value.to_native()
+    else:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed

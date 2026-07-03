@@ -1342,7 +1342,7 @@ def count_user_profile_memories_pending(driver, database: str) -> int:
         """
         MATCH (l:Learning {scope: 'user', status: 'candidate'})
         WHERE l.consolidated_at IS NULL
-           OR toString(coalesce(l.updated_at, l.created_at)) > l.consolidated_at
+           OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
         RETURN count(l) AS pending
         """
     )
@@ -1361,7 +1361,7 @@ def fetch_user_profile_memories_pending(
         """
         MATCH (l:Learning {scope: 'user', status: 'candidate'})
         WHERE l.consolidated_at IS NULL
-           OR toString(coalesce(l.updated_at, l.created_at)) > l.consolidated_at
+           OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
         RETURN l.id AS id,
                l.text AS text,
                l.confidence AS confidence,
@@ -1379,9 +1379,9 @@ def fetch_user_profile_memories_pending(
 def read_system_prompt_state(driver, database: str, name: str) -> dict[str, Any]:
     """Read the active prompt's content, version, and last consolidation time.
 
-    ``last_consolidated_at`` is stored as an ISO string (unlike the node's
-    datetime-typed created_at/updated_at) so the rate-limit math can stay in
-    Python on the hook side."""
+    ``last_consolidated_at`` is datetime-typed like every other timestamp in
+    the graph; the consuming hooks' rate-limit math converts it to a native
+    datetime (legacy ISO strings still parse)."""
     record = _execute_query_single(
         driver,
         database,
@@ -1442,7 +1442,7 @@ def snapshot_and_update_system_prompt(
         SET sp.content = $new_content,
             sp.version = old_version + 1,
             sp.updated_at = datetime($now),
-            sp.last_consolidated_at = $now,
+            sp.last_consolidated_at = datetime($now),
             sp.last_source = 'consolidation',
             sp.last_consolidation_model = $model
         MERGE (nv:SystemPromptVersion {id: $name + ':v' + toString(old_version + 1)})
@@ -1477,7 +1477,7 @@ def snapshot_and_update_system_prompt(
             MATCH (nv:SystemPromptVersion {id: $name + ':v' + toString($new_version)})
             UNWIND $folded_ids AS lid
             MATCH (l:Learning {id: lid})
-            SET l.consolidated_at = $now,
+            SET l.consolidated_at = datetime($now),
                 l.consolidated_prompt_version = $new_version,
                 l.last_consolidated_model = $model
             MERGE (nv)-[:FOLDED_LEARNING]->(l)
@@ -1908,7 +1908,7 @@ def fetch_user_learnings(
         MATCH (l:Learning {scope: 'user'})
         WHERE l.status IN $statuses
           AND (l.consolidated_at IS NULL
-               OR toString(coalesce(l.updated_at, l.created_at)) > l.consolidated_at)
+               OR coalesce(l.updated_at, l.created_at) > l.consolidated_at)
           AND ($session_id IS NULL OR (
                NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                AND NOT (l)-[:FROM_SESSION]->(:Session {session_id: $session_id})))

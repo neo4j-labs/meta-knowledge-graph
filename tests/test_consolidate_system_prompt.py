@@ -89,6 +89,20 @@ class ConsolidationGateTests(unittest.TestCase):
         )
         self.assertTrue(proceed)
 
+    def test_neo4j_datetime_timestamp_is_rate_limited(self) -> None:
+        from neo4j.time import DateTime
+
+        recent = DateTime.from_native(NOW - timedelta(hours=3))
+        proceed, reason = consolidate.consolidation_gate(
+            pending_count=20,
+            threshold=5,
+            last_consolidated_at=recent,
+            interval_hours=24.0,
+            now=NOW,
+        )
+        self.assertFalse(proceed)
+        self.assertIn("rate-limited", reason)
+
 
 class ConsolidationPromptTests(unittest.TestCase):
     def test_prompt_includes_current_prompt_and_user_facts(self) -> None:
@@ -169,11 +183,11 @@ class SnapshotHistoryTests(unittest.TestCase):
         self.assertIn("SystemPromptVersion", archive_query)
         self.assertIn("ov.content = old_content", archive_query)
         self.assertIn("sp.content = $new_content", archive_query)
-        self.assertIn("sp.last_consolidated_at = $now", archive_query)
+        self.assertIn("sp.last_consolidated_at = datetime($now)", archive_query)
         self.assertIn("is_current = true", archive_query)
         # The folded learnings are stamped consolidated (status left untouched).
         fold_query = queries[1]
-        self.assertIn("l.consolidated_at = $now", fold_query)
+        self.assertIn("l.consolidated_at = datetime($now)", fold_query)
         self.assertIn("l.last_consolidated_model = $model", fold_query)
         self.assertIn("FOLDED_LEARNING", fold_query)
         self.assertNotIn("l.status", fold_query)

@@ -184,7 +184,7 @@ def pattern_id(project_id: str, tool: str, signature: str) -> str:
 def consolidation_gate(
     pending_count: int,
     threshold: int,
-    last_consolidated_at: str | None,
+    last_consolidated_at: Any,
     interval_hours: float,
     now: datetime,
 ) -> tuple[bool, str]:
@@ -208,11 +208,16 @@ def consolidation_gate(
     )
 
 
-def _parse_iso(value: str) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
+def _parse_iso(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif hasattr(value, "to_native"):  # neo4j.time.DateTime
+        parsed = value.to_native()
+    else:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
@@ -565,7 +570,7 @@ def write_consolidation(
             t.tool_key = $tool_key,
             t.engine = $engine,
             t.updated_at = datetime($timestamp),
-            t.last_consolidated_at = $timestamp,
+            t.last_consolidated_at = datetime($timestamp),
             t.last_consolidation_model = $model
         MERGE (p)-[:HAS_TOOL_ERROR_PROFILE]->(t)
         """,
@@ -598,7 +603,7 @@ def write_consolidation(
                 e.embedding = coalesce(row.embedding, e.embedding),
                 e.last_consolidation_model = $model,
                 e.updated_at = datetime($timestamp),
-                e.last_consolidated_at = $timestamp
+                e.last_consolidated_at = datetime($timestamp)
             MERGE (t)-[:HAS_ERROR_PATTERN]->(e)
             WITH e, row
             UNWIND coalesce(row.source_execution_ids, []) AS execution_id
@@ -623,7 +628,7 @@ def write_consolidation(
             """
             UNWIND $execution_ids AS execution_id
             MATCH (q:QueryExecution {id: execution_id})
-            SET q.error_consolidated_at = $timestamp
+            SET q.error_consolidated_at = datetime($timestamp)
             """,
             execution_ids=consumed_execution_ids,
             timestamp=timestamp,
