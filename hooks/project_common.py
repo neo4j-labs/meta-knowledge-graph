@@ -1120,10 +1120,6 @@ def ensure_project_schema(tx) -> None:
         "REQUIRE sp.name IS UNIQUE"
     )
     tx.run(
-        "CREATE CONSTRAINT IF NOT EXISTS FOR (p:MemoryExtractionPrompt) "
-        "REQUIRE p.name IS UNIQUE"
-    )
-    tx.run(
         "CREATE CONSTRAINT IF NOT EXISTS FOR (p:ProjectProcessing) "
         "REQUIRE p.id IS UNIQUE"
     )
@@ -1238,13 +1234,13 @@ def observation_id(project_id: str, session_id: str, digest: str, index: int) ->
     return f"observation:{project_id}:{session_id}:{digest}:{index}"
 
 
-PROMPT_LABELS = ("SystemPrompt", "MemoryExtractionPrompt")
+PROMPT_LABELS = ("SystemPrompt",)
 
 
 def upsert_prompt_node(tx, label: str, name: str, content: str, now: str) -> dict[str, Any]:
-    """MERGE a frozen prompt node (``SystemPrompt`` / ``MemoryExtractionPrompt``).
+    """MERGE a frozen prompt node (``SystemPrompt``).
 
-    The prompts no longer rewrite themselves at runtime, so this only sets the
+    The prompt no longer rewrites itself at runtime, so this only sets the
     content and bumps a version counter when it actually changes; it keeps no
     version-history snapshot. The seed scripts use this for plain (re)seeds; the
     system-prompt consolidation service instead goes through

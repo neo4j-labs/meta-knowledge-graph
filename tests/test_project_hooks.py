@@ -745,18 +745,21 @@ class ProjectHookTests(unittest.TestCase):
         self.assertNotIn("system_prompt_updates", prompt)
         self.assertNotIn("memory_extraction_prompt_updates", prompt)
 
-    def test_memory_prompt_falls_back_when_template_lacks_required_tokens(self) -> None:
+    def test_memory_prompt_renders_the_code_constant(self) -> None:
+        # The prompt is a fixed code constant — no Neo4j fetch, no template
+        # override — rendered with the project, corpus, and existing memory.
         prompt = process_project.build_memory_extraction_prompt(
             project_common.ProjectRef(id="mkg", name="MKG"),
             "turn",
             [{"event_name": "UserPromptSubmit", "prompt": "remember duplicate handling"}],
             [],
-            template="Missing the dynamic placeholders.",
         )
 
         self.assertIn("Project: MKG (mkg)", prompt)
         self.assertIn("remember duplicate handling", prompt)
         self.assertIn("Existing similar learnings", prompt)
+        # No leftover placeholder tokens once rendered.
+        self.assertNotIn("[[", prompt)
 
     def test_event_corpus_excludes_tool_output(self) -> None:
         events = [
@@ -777,7 +780,6 @@ class ProjectHookTests(unittest.TestCase):
             project_common.ProjectRef(id="mkg", name="MKG"),
             "turn",
             events,
-            [],
             [],
         )
         self.assertNotIn("TOOL-OUTPUT-MUST-NOT-LEAK", prompt)
@@ -1261,8 +1263,6 @@ class ProjectHookTests(unittest.TestCase):
             "turn",
             [{"event_id": "event-1"}],
             learning_rows,
-            "default",
-            3,
             model,
             "called",
             None,
@@ -1275,11 +1275,12 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("pp.llm_status = $llm_status", queries[0])
         self.assertEqual(params[0]["llm_model"], model)
         self.assertEqual(params[0]["llm_status"], "called")
-        self.assertIn("USED_MEMORY_EXTRACTION_PROMPT", queries[1])
-        self.assertIn("mep.last_used_model", queries[1])
-        self.assertIn("r.llm_status = $llm_status", queries[1])
         self.assertIn("l.created_by_model = row.llm_model", joined)
         self.assertIn("l.last_llm_model", joined)
+        # The memory-extraction prompt is a code constant now: no Neo4j-backed
+        # prompt node, and no prompt-usage provenance write.
+        self.assertNotIn("USED_MEMORY_EXTRACTION_PROMPT", joined)
+        self.assertNotIn("MemoryExtractionPrompt", joined)
         # Decisions are folded into learnings: no :Decision write path remains.
         self.assertNotIn("d.created_by_model", joined)
         self.assertNotIn("PRODUCED_DECISION", joined)
@@ -1300,8 +1301,6 @@ class ProjectHookTests(unittest.TestCase):
             "turn",
             [{"event_id": "event-1"}],
             [],
-            "default",
-            3,
             "anthropic/claude-haiku-4-5",
             "skipped",
             "Claude OAuth token unavailable",
@@ -1311,8 +1310,6 @@ class ProjectHookTests(unittest.TestCase):
 
         self.assertEqual(params[0]["llm_status"], "skipped")
         self.assertEqual(params[0]["llm_skip_reason"], "Claude OAuth token unavailable")
-        self.assertEqual(params[1]["llm_status"], "skipped")
-        self.assertEqual(params[1]["llm_skip_reason"], "Claude OAuth token unavailable")
 
     def test_user_scoped_learning_is_namespaced_above_the_project(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
@@ -2057,8 +2054,6 @@ class ObservationTests(unittest.TestCase):
             "turn",
             [{"event_id": "event-1"}],
             [],
-            "default",
-            1,
             "model-x",
             "called",
             None,
@@ -2109,8 +2104,6 @@ class ObservationTests(unittest.TestCase):
             "turn",
             [{"event_id": "event-1"}],
             [],
-            "default",
-            1,
             None,
             "skipped",
             "no key",

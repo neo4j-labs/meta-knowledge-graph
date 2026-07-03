@@ -68,15 +68,8 @@ from consistency_gate import (  # noqa: E402
 # `agent-mcp` tag.
 HOOK_LEARNING_SOURCE = "hooks-stop"
 
-DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME = "default"
-MEMORY_EXTRACTION_PROMPT_TOKENS = (
-    "[[PROJECT_NAME]]",
-    "[[PROJECT_ID]]",
-    "[[MODE]]",
-    "[[CORPUS]]",
-    "[[EXISTING_MEMORY]]",
-)
-
+# The memory-extraction prompt is a fixed code constant — there is no
+# Neo4j-backed, self-improving prompt loop. Edit the template here to change it.
 DEFAULT_MEMORY_EXTRACTION_PROMPT = """Project: [[PROJECT_NAME]] ([[PROJECT_ID]])
 Processing scope: [[MODE]]
 
@@ -130,10 +123,9 @@ Return JSON only with this shape:
 """
 
 
-# Episodic observations: unconditional per-window timeline records. Unlike the
-# memory extraction prompt this template is a code constant, not a stored /
-# user-evolvable :MemoryExtractionPrompt — "be selective" (memory) and "always
-# record" (episodes) must never share a template.
+# Episodic observations: unconditional per-window timeline records. This template
+# is a separate code constant from the memory-extraction prompt — "be selective"
+# (memory) and "always record" (episodes) must never share a template.
 OBSERVATION_TYPES = (
     "change",
     "bugfix",
@@ -299,10 +291,6 @@ def _format_existing_memory(
     return "\n".join(lines)
 
 
-def memory_extraction_prompt_is_valid(content: str) -> bool:
-    return all(token in content for token in MEMORY_EXTRACTION_PROMPT_TOKENS)
-
-
 def render_memory_extraction_prompt(
     template: str,
     project: ProjectRef,
@@ -325,45 +313,14 @@ def render_memory_extraction_prompt(
     return rendered
 
 
-def load_or_seed_memory_extraction_prompt(
-    tx,
-    name: str,
-    default_content: str,
-    now: str,
-) -> dict[str, Any]:
-    record = tx.run(
-        """
-        MERGE (p:MemoryExtractionPrompt {name: $name})
-        ON CREATE SET p.content = $default_content,
-                      p.version = 1,
-                      p.created_at = datetime($now),
-                      p.updated_at = datetime($now)
-        SET p.content = coalesce(p.content, $default_content),
-            p.version = coalesce(p.version, 1)
-        RETURN p.content AS content,
-               coalesce(p.version, 1) AS version
-        """,
-        name=name,
-        default_content=default_content,
-        now=now,
-    ).single()
-    if not record:
-        return {"content": default_content, "version": 1}
-    return {"content": str(record["content"] or default_content), "version": int(record["version"])}
-
-
 def build_memory_extraction_prompt(
     project: ProjectRef,
     mode: str,
     events: list[dict[str, Any]],
     similar_learnings: list[dict[str, Any]],
-    template: str | None = None,
 ) -> str:
-    active_template = template or DEFAULT_MEMORY_EXTRACTION_PROMPT
-    if not memory_extraction_prompt_is_valid(active_template):
-        active_template = DEFAULT_MEMORY_EXTRACTION_PROMPT
     return render_memory_extraction_prompt(
-        active_template,
+        DEFAULT_MEMORY_EXTRACTION_PROMPT,
         project,
         mode,
         events,
@@ -658,8 +615,6 @@ def _write_processing(
     mode: str,
     events: list[dict[str, Any]],
     learning_rows: list[dict[str, Any]],
-    memory_extraction_prompt_name: str,
-    memory_extraction_prompt_version: int,
     llm_model: str | None,
     llm_status: str | None,
     llm_skip_reason: str | None,
@@ -696,8 +651,6 @@ def _write_processing(
             pp.event_count = $event_count,
             pp.learning_count = $learning_count,
             pp.observation_count = $observation_count,
-            pp.memory_extraction_prompt_name = $memory_extraction_prompt_name,
-            pp.memory_extraction_prompt_version = $memory_extraction_prompt_version,
             pp.llm_model = $llm_model,
             pp.llm_status = $llm_status,
             pp.llm_skip_reason = $llm_skip_reason,
@@ -718,46 +671,12 @@ def _write_processing(
         event_count=len(event_ids),
         learning_count=len(learning_rows),
         observation_count=len(observation_rows),
-        memory_extraction_prompt_name=memory_extraction_prompt_name,
-        memory_extraction_prompt_version=memory_extraction_prompt_version,
         llm_model=llm_model,
         llm_status=llm_status,
         llm_skip_reason=truncate(str(llm_skip_reason or ""), 1000) or None,
         llm_error=truncate(str(llm_error or ""), 1000) or None,
         summary=summary,
         event_ids=event_ids,
-        timestamp=timestamp,
-    )
-
-    tx.run(
-        """
-        MATCH (pp:ProjectProcessing {id: $processing_id})
-        MATCH (mep:MemoryExtractionPrompt {name: $memory_extraction_prompt_name})
-        SET mep.last_used_at = datetime($timestamp),
-            mep.last_used_project_id = $project_id,
-            mep.last_used_session_id = $session_id,
-            mep.last_used_version = $memory_extraction_prompt_version,
-            mep.last_used_model = coalesce($llm_model, mep.last_used_model),
-            mep.last_used_llm_status = $llm_status,
-            mep.last_used_llm_skip_reason = $llm_skip_reason,
-            mep.last_used_llm_error = $llm_error
-        MERGE (pp)-[r:USED_MEMORY_EXTRACTION_PROMPT]->(mep)
-        SET r.version = $memory_extraction_prompt_version,
-            r.llm_model = $llm_model,
-            r.llm_status = $llm_status,
-            r.llm_skip_reason = $llm_skip_reason,
-            r.llm_error = $llm_error,
-            r.used_at = datetime($timestamp)
-        """,
-        project_id=project.id,
-        session_id=session_id,
-        processing_id=processing_id,
-        memory_extraction_prompt_name=memory_extraction_prompt_name,
-        memory_extraction_prompt_version=memory_extraction_prompt_version,
-        llm_model=llm_model,
-        llm_status=llm_status,
-        llm_skip_reason=truncate(str(llm_skip_reason or ""), 1000) or None,
-        llm_error=truncate(str(llm_error or ""), 1000) or None,
         timestamp=timestamp,
     )
 
@@ -1034,22 +953,6 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
             llm_skip_reason: str | None = None
             llm_error: str | None = None
             try:
-                prompt_name = DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME
-                prompt_record = session.execute_write(
-                    load_or_seed_memory_extraction_prompt,
-                    name=prompt_name,
-                    default_content=DEFAULT_MEMORY_EXTRACTION_PROMPT,
-                    now=timestamp,
-                )
-                prompt_template = str(prompt_record.get("content") or DEFAULT_MEMORY_EXTRACTION_PROMPT)
-                prompt_version = int(prompt_record.get("version") or 1)
-                if not memory_extraction_prompt_is_valid(prompt_template):
-                    print(
-                        "[process_project] stored memory extraction prompt is missing "
-                        "required tokens; using default template for this run",
-                        file=sys.stderr,
-                    )
-                    prompt_template = DEFAULT_MEMORY_EXTRACTION_PROMPT
                 corpus = _event_corpus(events)
                 query_vector = embed_text(corpus)
                 similar_learnings = fetch_project_learnings(
@@ -1066,7 +969,6 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     mode,
                     events,
                     similar_learnings,
-                    template=prompt_template,
                 )
                 model_name = resolve_llm_model(_llm_model_for_processing_events(events))
                 llm_model_used = extraction_model_label(model_name)
@@ -1115,8 +1017,6 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     mode,
                     events,
                     learning_rows,
-                    prompt_name,
-                    prompt_version,
                     llm_model_used,
                     llm_status,
                     llm_skip_reason,
