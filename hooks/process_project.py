@@ -30,6 +30,7 @@ from project_common import (  # noqa: E402
     ProjectRef,
     decision_id,
     decision_namespace,
+    dialog_entry,
     ensure_project_schema,
     embed_text,
     embed_texts,
@@ -51,6 +52,7 @@ from project_common import (  # noqa: E402
     project_env,
     resolve_llm_model,
     resolve_project,
+    transcript_records,
     truncate,
 )
 
@@ -215,97 +217,17 @@ def _ts_sort_key(value: Any) -> str:
     return text
 
 
-def _transcript_records(snapshot: str):
-    for line in snapshot.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            yield json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-
-def _dialog_entry(record: Any) -> tuple[str, str, str] | None:
-    """Classify a transcript record as ('user'|'assistant', timestamp, text).
-
-    Conversation text only: tool_use/tool_result blocks, Codex function_call /
-    mcp_tool_call_end records, and thinking blocks never produce an entry.
-    """
-    if not isinstance(record, dict):
-        return None
-    timestamp = str(record.get("timestamp") or "")
-
-    # Claude-style records: {message: {role, content}}.
-    message = record.get("message")
-    if isinstance(message, dict):
-        role = message.get("role")
-        content = message.get("content")
-        texts: list[str] = []
-        has_tool_result = False
-        if isinstance(content, str):
-            texts.append(content)
-        elif isinstance(content, list):
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type")
-                if block_type == "tool_result":
-                    has_tool_result = True
-                elif block_type in ("text", "output_text", "input_text"):
-                    if isinstance(block.get("text"), str):
-                        texts.append(block["text"])
-        text = "\n".join(part for part in texts if part.strip()).strip()
-        if role == "assistant" and text:
-            return ("assistant", timestamp, text)
-        # A user record carrying tool_result blocks is a tool output envelope,
-        # not a user message.
-        if role == "user" and text and not has_tool_result:
-            return ("user", timestamp, text)
-        return None
-
-    # Codex rollout records: {type, payload}.
-    payload = record.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    payload_type = payload.get("type")
-    if record.get("type") == "response_item" and payload_type == "message":
-        role = payload.get("role")
-        content = payload.get("content")
-        texts = []
-        if isinstance(content, list):
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") in ("text", "output_text", "input_text")
-                    and isinstance(block.get("text"), str)
-                ):
-                    texts.append(block["text"])
-        text = "\n".join(part for part in texts if part.strip()).strip()
-        if role == "assistant" and text:
-            return ("assistant", timestamp, text)
-        if role == "user" and text:
-            return ("user", timestamp, text)
-        return None
-    if record.get("type") == "event_msg" and payload_type in ("agent_message", "user_message"):
-        raw = payload.get("message")
-        if not isinstance(raw, str):
-            raw = payload.get("text") if isinstance(payload.get("text"), str) else ""
-        if raw.strip():
-            kind = "assistant" if payload_type == "agent_message" else "user"
-            return (kind, timestamp, raw.strip())
-    return None
-
-
 def _window_assistant_texts(events: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """(timestamp, text) of assistant messages written during this event window.
 
-    Sources the transcript snapshots log_event stores on events. Snapshots are
-    grouped per transcript file (parent and subagent sessions each have their
-    own); within a group the window's new content is the last snapshot minus
-    the first-snapshot prefix, falling back to everything after the last user
-    message when no prefix relation holds. Texts equal to a window event's
-    last_assistant_message are dropped — that field is already in the corpus.
+    Sources the dialog-only transcript snapshots log_event stores on events
+    (conversation text records only — see ``filter_dialog_transcript``).
+    Snapshots are grouped per transcript file (parent and subagent sessions
+    each have their own); within a group the window's new content is the last
+    snapshot minus the first-snapshot prefix, falling back to everything after
+    the last user message when no prefix relation holds. Texts equal to a
+    window event's last_assistant_message are dropped — that field is already
+    in the corpus.
     """
     try:
         known = {
@@ -328,14 +250,14 @@ def _window_assistant_texts(events: list[dict[str, Any]]) -> list[tuple[str, str
                 segment = last[len(first):]
                 entries = [
                     entry
-                    for entry in (_dialog_entry(r) for r in _transcript_records(segment))
+                    for entry in (dialog_entry(r) for r in transcript_records(segment))
                     if entry
                 ]
                 selected = [(ts, text) for kind, ts, text in entries if kind == "assistant"]
             else:
                 entries = [
                     entry
-                    for entry in (_dialog_entry(r) for r in _transcript_records(last))
+                    for entry in (dialog_entry(r) for r in transcript_records(last))
                     if entry
                 ]
                 last_user = -1

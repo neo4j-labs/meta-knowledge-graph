@@ -46,6 +46,7 @@ from project_common import (  # noqa: E402
     SUBAGENT_HOOK_EVENTS,
     agent_context_props,
     ensure_project_schema,
+    filter_dialog_transcript,
     in_extraction_subprocess,
     injection_window_start,
     link_event_to_project,
@@ -77,13 +78,20 @@ def _serialize_tool_response(value) -> str:
 
 
 def _read_transcript(path: str | None) -> str | None:
+    """Dialog-only snapshot of the transcript at event time.
+
+    Only conversation text records are stored — tool outputs, tool inputs,
+    attachments, thinking blocks, and meta records are dropped before the
+    event is written, so they never enter the graph.
+    """
     if not path:
         return None
     try:
         with open(path, "r") as f:
-            return f.read()
+            content = f.read()
     except Exception:
         return None
+    return filter_dialog_transcript(content) or None
 
 
 def _event_session_id(parent_session_id: str, event_props: dict) -> str:

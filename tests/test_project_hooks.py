@@ -959,6 +959,199 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("CODEX-NARRATION", corpus)
         self.assertNotIn("CODEX-TOOL-OUTPUT-MUST-NOT-LEAK", corpus)
 
+    def test_filter_dialog_transcript_keeps_only_conversation_text(self) -> None:
+        records = [
+            {
+                "type": "user",
+                "timestamp": "t1",
+                "message": {"role": "user", "content": "USER-ASK"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "t2",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "THINKING-MUST-NOT-BE-STORED"},
+                        {"type": "text", "text": "ASSISTANT-NARRATION"},
+                        {
+                            "type": "tool_use",
+                            "id": "tu_1",
+                            "name": "Bash",
+                            "input": {"command": "TOOL-INPUT-MUST-NOT-BE-STORED"},
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "timestamp": "t3",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu_1",
+                            "content": "TOOL-OUTPUT-MUST-NOT-BE-STORED",
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "attachment",
+                "timestamp": "t4",
+                "attachment": {"text": "ATTACHMENT-MUST-NOT-BE-STORED"},
+            },
+            {
+                "type": "file-history-snapshot",
+                "snapshot": "FILE-SNAPSHOT-MUST-NOT-BE-STORED",
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "t5",
+                "payload": {"type": "agent_message", "message": "CODEX-NARRATION"},
+            },
+        ]
+        snapshot = "\n".join(json.dumps(r) for r in records) + "\n"
+
+        filtered = project_common.filter_dialog_transcript(snapshot)
+
+        for leaked in (
+            "THINKING-MUST-NOT-BE-STORED",
+            "TOOL-INPUT-MUST-NOT-BE-STORED",
+            "TOOL-OUTPUT-MUST-NOT-BE-STORED",
+            "ATTACHMENT-MUST-NOT-BE-STORED",
+            "FILE-SNAPSHOT-MUST-NOT-BE-STORED",
+        ):
+            self.assertNotIn(leaked, filtered)
+        # Kept records round-trip through the same dialog classifier.
+        entries = [
+            project_common.dialog_entry(r)
+            for r in project_common.transcript_records(filtered)
+        ]
+        self.assertEqual(
+            entries,
+            [
+                ("user", "t1", "USER-ASK"),
+                ("assistant", "t2", "ASSISTANT-NARRATION"),
+                ("assistant", "t5", "CODEX-NARRATION"),
+            ],
+        )
+
+    def test_read_transcript_stores_dialog_only_snapshot(self) -> None:
+        records = [
+            {
+                "type": "user",
+                "timestamp": "t1",
+                "message": {"role": "user", "content": "USER-ASK"},
+            },
+            {
+                "type": "user",
+                "timestamp": "t2",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu_1",
+                            "content": "TOOL-OUTPUT-MUST-NOT-BE-STORED",
+                        }
+                    ],
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+            stored = log_event._read_transcript(str(path))
+
+        self.assertIsNotNone(stored)
+        self.assertIn("USER-ASK", stored)
+        self.assertNotIn("TOOL-OUTPUT-MUST-NOT-BE-STORED", stored)
+
+    def test_read_transcript_returns_none_without_dialog(self) -> None:
+        record = {
+            "type": "user",
+            "timestamp": "t1",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tu_1", "content": "OUTPUT"}
+                ],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text(json.dumps(record) + "\n")
+
+            self.assertIsNone(log_event._read_transcript(str(path)))
+
+    def test_event_corpus_diffs_filtered_snapshots(self) -> None:
+        """Filtering preserves the append-only prefix relation, so the window
+        diff still isolates this window's assistant messages."""
+        base_records = [
+            {
+                "type": "user",
+                "timestamp": "2026-07-02T10:00:00.000Z",
+                "message": {"role": "user", "content": "Optimize the seeder"},
+            }
+        ]
+        new_records = [
+            {
+                "type": "assistant",
+                "timestamp": "2026-07-02T10:00:05.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "INTERMEDIATE-NARRATION"},
+                        {
+                            "type": "tool_use",
+                            "id": "tu_1",
+                            "name": "Bash",
+                            "input": {"command": "TOOL-INPUT-MUST-NOT-LEAK"},
+                        },
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-07-02T10:00:09.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "FINAL-ANSWER"}],
+                },
+            },
+        ]
+        raw_first = "\n".join(json.dumps(r) for r in base_records) + "\n"
+        raw_last = raw_first + "\n".join(json.dumps(r) for r in new_records) + "\n"
+        first = project_common.filter_dialog_transcript(raw_first)
+        last = project_common.filter_dialog_transcript(raw_last)
+        self.assertTrue(last.startswith(first))
+
+        events = [
+            {
+                "event_name": "UserPromptSubmit",
+                "timestamp": "2026-07-02T10:00:00.000+00:00",
+                "prompt": "Optimize the seeder",
+                "transcript_path": "/tmp/session.jsonl",
+                "transcript": first,
+            },
+            {
+                "event_name": "Stop",
+                "timestamp": "2026-07-02T10:00:10.000+00:00",
+                "last_assistant_message": "FINAL-ANSWER",
+                "transcript_path": "/tmp/session.jsonl",
+                "transcript": last,
+            },
+        ]
+
+        corpus = process_project._event_corpus(events)
+
+        self.assertIn("INTERMEDIATE-NARRATION", corpus)
+        self.assertNotIn("TOOL-INPUT-MUST-NOT-LEAK", corpus)
+        self.assertEqual(corpus.count("FINAL-ANSWER"), 1)
+
     def test_llm_action_rows_skip_ignored_memory(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
         actions = {
