@@ -2146,7 +2146,7 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(rows, [])
         query, params = captured[0]
         self.assertIn("HAS_OBSERVATION", query)
-        self.assertIn("ORDER BY coalesce(o.ended_at, o.created_at) DESC", query)
+        self.assertIn("ORDER BY coalesce(o.ended_at, o.created_at) DESC, o.id DESC", query)
         self.assertEqual(params["project_id"], "mkg")
         self.assertEqual(params["limit"], 3)
 

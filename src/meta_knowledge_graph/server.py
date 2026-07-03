@@ -1179,7 +1179,7 @@ def create_mcp_server(
                        o.facts AS facts,
                        o.narrative AS narrative,
                        toString(coalesce(o.ended_at, o.created_at)) AS ended_at
-                ORDER BY coalesce(o.ended_at, o.created_at) DESC
+                ORDER BY coalesce(o.ended_at, o.created_at) DESC, o.id DESC
                 LIMIT $limit
                 """,
                 project_id=resolved_pid,

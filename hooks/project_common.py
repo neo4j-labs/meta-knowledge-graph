@@ -2009,7 +2009,7 @@ def fetch_recent_observations(
                o.facts AS facts,
                o.narrative AS narrative,
                coalesce(o.ended_at, o.created_at).epochSeconds AS ended_epoch
-        ORDER BY coalesce(o.ended_at, o.created_at) DESC
+        ORDER BY coalesce(o.ended_at, o.created_at) DESC, o.id DESC
         LIMIT $limit
         """,
         project_id=project_id,
