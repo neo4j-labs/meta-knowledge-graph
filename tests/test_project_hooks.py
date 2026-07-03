@@ -261,7 +261,7 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIsNone(credential)
 
     def test_memory_action_extraction_returns_model_used(self) -> None:
-        completion = '{"learnings": [], "decisions": []}'
+        completion = '{"learnings": []}'
         with (
             patch.object(
                 process_project,
@@ -275,7 +275,7 @@ class ProjectHookTests(unittest.TestCase):
                 model="anthropic/claude-haiku-4-5",
             )
 
-        self.assertEqual(actions, {"learnings": [], "decisions": []})
+        self.assertEqual(actions, {"learnings": []})
         self.assertEqual(model, "anthropic/claude-haiku-4-5")
         self.assertEqual(meta, {"status": "called", "skip_reason": None, "error": None})
         readiness.assert_called_once_with("anthropic/claude-haiku-4-5")
@@ -299,7 +299,7 @@ class ProjectHookTests(unittest.TestCase):
                 model="anthropic/claude-haiku-4-5",
             )
 
-        self.assertEqual(actions, {"learnings": [], "decisions": []})
+        self.assertEqual(actions, {"learnings": []})
         self.assertEqual(model, "anthropic/claude-haiku-4-5")
         self.assertEqual(
             meta,
@@ -727,28 +727,19 @@ class ProjectHookTests(unittest.TestCase):
                     "text": "Update similar learnings instead of duplicating them.",
                 }
             ],
-            [
-                {
-                    "id": "decision:mkg:existing",
-                    "task_pattern": "project memory duplicate suppression",
-                    "text": "Ask the LLM whether to update or create memory.",
-                    "rationale": "The LLM sees similar existing memory.",
-                }
-            ],
         )
 
         self.assertIn("Existing similar learnings", prompt)
         self.assertIn("learning:mkg:existing", prompt)
-        self.assertIn("Existing similar decisions", prompt)
-        self.assertIn("decision:mkg:existing", prompt)
+        # Decisions are folded into learnings: no separate decision bucket.
+        self.assertNotIn("Existing similar decisions", prompt)
+        self.assertNotIn('"decisions"', prompt)
         self.assertIn('"action": "create|update|ignore"', prompt)
-        self.assertIn("routing precedence", prompt)
-        self.assertIn("Do not also create a learning", prompt)
         self.assertIn("we decided", prompt)
+        self.assertIn("fold the reason it matters into the learning text", prompt)
         self.assertIn('"scope": "project|user"', prompt)
         self.assertIn("durable fact about the *person*", prompt)
-        self.assertIn("Every decision also has a scope", prompt)
-        self.assertIn("cross-project working preferences", prompt)
+        self.assertIn("collaborate with them", prompt)
         self.assertIn("sensitive personal data", prompt)
         # The self-rewriting prompt-suggestion buckets are gone.
         self.assertNotIn("system_prompt_updates", prompt)
@@ -759,7 +750,6 @@ class ProjectHookTests(unittest.TestCase):
             project_common.ProjectRef(id="mkg", name="MKG"),
             "turn",
             [{"event_name": "UserPromptSubmit", "prompt": "remember duplicate handling"}],
-            [],
             [],
             template="Missing the dynamic placeholders.",
         )
@@ -1164,29 +1154,25 @@ class ProjectHookTests(unittest.TestCase):
                     "confidence": 0.8,
                 },
                 {"action": "ignore", "reason": "Routine work."},
-            ],
-            "decisions": [
                 {
                     "action": "create",
                     "text": "Ask the LLM to extract memory writes.",
-                    "rationale": "It can compare against similar existing memory.",
                     "task_pattern": "project memory llm extraction",
                     "confidence": 0.9,
-                }
+                },
             ],
         }
 
-        learning_rows, decision_rows = process_project._memory_rows_from_actions(
+        learning_rows = process_project._memory_rows_from_actions(
             project, "turn", actions
         )
 
-        self.assertEqual(len(learning_rows), 1)
+        self.assertEqual(len(learning_rows), 2)
         self.assertEqual(learning_rows[0]["id"], "learning:mkg:existing")
         self.assertEqual(learning_rows[0]["action"], "update")
         self.assertEqual(learning_rows[0]["scope"], "project")
-        self.assertEqual(len(decision_rows), 1)
-        self.assertEqual(decision_rows[0]["action"], "create")
-        self.assertEqual(decision_rows[0]["scope"], "project")
+        self.assertEqual(learning_rows[1]["action"], "create")
+        self.assertEqual(learning_rows[1]["scope"], "project")
 
     def test_llm_action_rows_include_model_provenance(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
@@ -1198,16 +1184,9 @@ class ProjectHookTests(unittest.TestCase):
                     "confidence": 0.8,
                 }
             ],
-            "decisions": [
-                {
-                    "action": "create",
-                    "text": "Store extraction model on produced memory.",
-                    "confidence": 0.9,
-                }
-            ],
         }
 
-        learning_rows, decision_rows = process_project._memory_rows_from_actions(
+        learning_rows = process_project._memory_rows_from_actions(
             project,
             "turn",
             actions,
@@ -1215,23 +1194,20 @@ class ProjectHookTests(unittest.TestCase):
         )
 
         self.assertEqual(learning_rows[0]["llm_model"], "anthropic/claude-haiku-4-5")
-        self.assertEqual(decision_rows[0]["llm_model"], "anthropic/claude-haiku-4-5")
 
     def test_llm_action_rows_use_unified_hook_source(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
         actions = {
             "learnings": [{"action": "create", "text": "A durable fact.", "confidence": 0.8}],
-            "decisions": [{"action": "create", "text": "A durable decision.", "confidence": 0.9}],
         }
 
         # The verbose source tag is uniform regardless of processing mode so
         # hook-written memory is always identifiable as `hooks-stop`.
         for mode in ("turn", "session"):
-            learning_rows, decision_rows = process_project._memory_rows_from_actions(
+            learning_rows = process_project._memory_rows_from_actions(
                 project, mode, actions
             )
             self.assertEqual(learning_rows[0]["source"], "hooks-stop")
-            self.assertEqual(decision_rows[0]["source"], "hooks-stop")
 
     def test_processing_events_default_to_claude_model_for_claude_client(self) -> None:
         with patch.dict(
@@ -1278,23 +1254,6 @@ class ProjectHookTests(unittest.TestCase):
                 "llm_model": model,
             }
         ]
-        decision_rows = [
-            {
-                "id": "decision:mkg:a",
-                "action": "create",
-                "text": "Store extraction model on produced memory.",
-                "rationale": "It makes processing provenance queryable.",
-                "task_pattern": "model provenance",
-                "confidence": 0.9,
-                "scope": "project",
-                "source": "hooks-stop",
-                "summary": "Store extraction model on produced memory.",
-                "related_learning_id": None,
-                "reason": "Implementation decision.",
-                "llm_model": model,
-            }
-        ]
-
         process_project._write_processing(
             FakeTx(),
             project,
@@ -1302,7 +1261,6 @@ class ProjectHookTests(unittest.TestCase):
             "turn",
             [{"event_id": "event-1"}],
             learning_rows,
-            decision_rows,
             "default",
             3,
             model,
@@ -1322,9 +1280,9 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("r.llm_status = $llm_status", queries[1])
         self.assertIn("l.created_by_model = row.llm_model", joined)
         self.assertIn("l.last_llm_model", joined)
-        self.assertIn("d.created_by_model = row.llm_model", joined)
-        self.assertIn("d.last_llm_model", joined)
-        self.assertIn("produced.llm_model = row.llm_model", joined)
+        # Decisions are folded into learnings: no :Decision write path remains.
+        self.assertNotIn("d.created_by_model", joined)
+        self.assertNotIn("PRODUCED_DECISION", joined)
 
     def test_write_processing_stores_llm_skip_reason(self) -> None:
         queries: list[str] = []
@@ -1341,7 +1299,6 @@ class ProjectHookTests(unittest.TestCase):
             "session-1",
             "turn",
             [{"event_id": "event-1"}],
-            [],
             [],
             "default",
             3,
@@ -1374,10 +1331,9 @@ class ProjectHookTests(unittest.TestCase):
                     "confidence": 0.7,
                 },
             ],
-            "decisions": [],
         }
 
-        learning_rows, _ = process_project._memory_rows_from_actions(
+        learning_rows = process_project._memory_rows_from_actions(
             project, "turn", actions
         )
 
@@ -1388,46 +1344,14 @@ class ProjectHookTests(unittest.TestCase):
         self.assertTrue(by_scope["user"]["id"].startswith("learning:user:"))
         self.assertTrue(by_scope["project"]["id"].startswith("learning:mkg:"))
 
-    def test_user_scoped_decision_is_namespaced_above_the_project(self) -> None:
+    def test_folded_decision_is_born_a_candidate_learning(self) -> None:
+        # A decision is just a durable learning now: it carries the same
+        # lifecycle status from creation. Recall requires status IN
+        # ['approved','candidate'] and the consistency-gate sweep matches
+        # {status: 'candidate'}, so a status-less row would be invisible to both.
         project = project_common.ProjectRef(id="mkg", name="MKG")
         actions = {
-            "learnings": [],
-            "decisions": [
-                {
-                    "action": "create",
-                    "scope": "user",
-                    "text": "Use terse status updates across projects.",
-                    "rationale": "The user made this a durable working agreement.",
-                    "confidence": 0.9,
-                },
-                {
-                    "action": "create",
-                    "scope": "bogus-scope",
-                    "text": "Keep hook injection project-specific.",
-                    "rationale": "This is a project implementation policy.",
-                    "confidence": 0.8,
-                },
-            ],
-        }
-
-        _, decision_rows = process_project._memory_rows_from_actions(
-            project, "turn", actions
-        )
-
-        by_scope = {row["scope"]: row for row in decision_rows}
-        self.assertEqual(set(by_scope), {"user", "project"})
-        self.assertTrue(by_scope["user"]["id"].startswith("decision:user:"))
-        self.assertTrue(by_scope["project"]["id"].startswith("decision:mkg:"))
-
-    def test_decision_rows_are_born_candidates(self) -> None:
-        # Decisions carry an explicit lifecycle status from creation, exactly
-        # like learnings: recall requires status IN ['approved','candidate']
-        # and the consistency-gate sweep matches {status: 'candidate'}, so a
-        # status-less decision would be invisible to both.
-        project = project_common.ProjectRef(id="mkg", name="MKG")
-        actions = {
-            "learnings": [],
-            "decisions": [
+            "learnings": [
                 {
                     "action": "create",
                     "scope": "project",
@@ -1437,11 +1361,11 @@ class ProjectHookTests(unittest.TestCase):
             ],
         }
 
-        _, decision_rows = process_project._memory_rows_from_actions(
+        learning_rows = process_project._memory_rows_from_actions(
             project, "turn", actions
         )
 
-        self.assertEqual(decision_rows[0]["status"], "candidate")
+        self.assertEqual(learning_rows[0]["status"], "candidate")
 
     def test_learning_context_marks_candidates_as_hints(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
@@ -1460,28 +1384,11 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("Keep project learning simple", context)
         self.assertIn("candidate learnings as hints", context)
 
-    def test_learning_context_includes_decisions(self) -> None:
-        project = project_common.ProjectRef(id="mkg", name="MKG")
-        context = project_common.format_learning_context(
-            project,
-            [],
-            [
-                {
-                    "text": "Use repo folder name for project id.",
-                    "confidence": 0.9,
-                }
-            ],
-        )
-
-        self.assertIn("Relevant project decisions", context)
-        self.assertIn("Use repo folder name", context)
-
     def test_learning_context_includes_user_facts(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
         context = project_common.format_learning_context(
             project,
             [],
-            None,
             [
                 {
                     "text": "Prefers terse, data-grounded answers.",
@@ -1493,25 +1400,7 @@ class ProjectHookTests(unittest.TestCase):
 
         self.assertIn("What we know about the user", context)
         self.assertIn("Prefers terse", context)
-        self.assertIn("user facts and user-scoped decisions", context)
-
-    def test_learning_context_includes_user_decisions(self) -> None:
-        project = project_common.ProjectRef(id="mkg", name="MKG")
-        context = project_common.format_learning_context(
-            project,
-            [],
-            None,
-            None,
-            [
-                {
-                    "text": "Use user-scoped memory only at SessionStart.",
-                    "confidence": 0.8,
-                }
-            ],
-        )
-
-        self.assertIn("User-scoped decisions", context)
-        self.assertIn("SessionStart", context)
+        self.assertIn("Treat user facts as durable context", context)
 
     def test_fetch_learnings_excludes_injected_and_in_session_memory(self) -> None:
         captured: list[tuple[str, dict]] = []
@@ -1522,13 +1411,6 @@ class ProjectHookTests(unittest.TestCase):
                 return []
 
         project_common.fetch_project_learnings(
-            FakeDriver(),
-            "neo4j",
-            project_id="mkg",
-            query=None,
-            exclude_session_id="session-1",
-        )
-        project_common.fetch_project_decisions(
             FakeDriver(),
             "neo4j",
             project_id="mkg",
@@ -1583,24 +1465,6 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(params["query_vector"], [0.1, 0.2])
         self.assertEqual(params["search_query"], "use rest for the api and keep graph schema stable")
 
-    def test_fetch_project_decisions_restricts_to_project_scope(self) -> None:
-        captured: list[tuple[str, dict]] = []
-
-        class FakeDriver:
-            def execute_query(self, query: str, **params):
-                captured.append((query, params))
-                return []
-
-        project_common.fetch_project_decisions(
-            FakeDriver(), "neo4j", project_id="mkg", query=None
-        )
-
-        self.assertTrue(captured)
-        self.assertIn("d.scope = 'project'", captured[0][0])
-        # Decisions carry the same lifecycle as learnings: recall requires a
-        # live status, with no tolerance for status-less legacy nodes.
-        self.assertIn("d.status IN ['approved', 'candidate']", captured[0][0])
-
     def test_fetch_user_learnings_spans_projects_and_filters_scope(self) -> None:
         captured: list[tuple[str, dict]] = []
 
@@ -1649,25 +1513,6 @@ class ProjectHookTests(unittest.TestCase):
             self.assertIn("> ", query)
             self.assertIn("consolidated_at", query)
 
-    def test_fetch_user_decisions_spans_projects_and_filters_scope(self) -> None:
-        captured: list[tuple[str, dict]] = []
-
-        class FakeDriver:
-            def execute_query(self, query: str, **params):
-                captured.append((query, params))
-                return []
-
-        project_common.fetch_user_decisions(
-            FakeDriver(), "neo4j", query=None, exclude_session_id="session-1"
-        )
-
-        self.assertTrue(captured)
-        query, params = captured[0]
-        self.assertIn("(d:Decision {scope: 'user'})", query)
-        self.assertNotIn("HAS_DECISION", query)
-        self.assertIn("FROM_SESSION", query)
-        self.assertEqual(params["session_id"], "session-1")
-
     def test_context_injection_scope_follows_hook_event(self) -> None:
         self.assertEqual(
             inject_project_context.context_scope_for_hook("SessionStart"), "user"
@@ -1690,19 +1535,17 @@ class ProjectHookTests(unittest.TestCase):
             "neo4j",
             "session-1",
             ["learning:mkg:a"],
-            ["decision:mkg:b"],
             "UserPromptSubmit",
             prompt="show renewal risk",
         )
 
-        self.assertEqual(len(captured), 4)
+        self.assertEqual(len(captured), 2)
         learning_query, learning_params = captured[0]
-        decision_query, decision_params = captured[2]
         self.assertIn("MATCH (m:Learning {id: memory_id})", learning_query)
         self.assertIn("MERGE (m)-[r:INJECTED_IN]->(s)", learning_query)
         self.assertEqual(learning_params["ids"], ["learning:mkg:a"])
-        self.assertIn("MATCH (m:Decision {id: memory_id})", decision_query)
-        self.assertEqual(decision_params["ids"], ["decision:mkg:b"])
+        # Decisions are folded into learnings: only :Learning is linked.
+        self.assertNotIn("Decision", learning_query)
 
     def test_mark_injected_in_session_links_memory_to_hook_event(self) -> None:
         captured: list[tuple[str, dict]] = []
@@ -1717,7 +1560,6 @@ class ProjectHookTests(unittest.TestCase):
             "neo4j",
             "session-1",
             ["learning:mkg:a"],
-            [],
             "SessionStart",
             source="startup",
         )
@@ -1748,7 +1590,7 @@ class ProjectHookTests(unittest.TestCase):
             log_event.INJECTION_CONTEXT_EVENTS, {"SessionStart", "UserPromptSubmit"}
         )
         query, params = captured[0]
-        self.assertIn("(m:Learning OR m:Decision)", query)
+        self.assertIn("MATCH (m:Learning)-[inj:INJECTED_IN]->(s)", query)
         self.assertIn("inj.hook_event = $event_name", query)
         self.assertIn("MERGE (m)-[r:INJECTED_AT]->(e)", query)
         self.assertEqual(params["event_id"], "event-1")
@@ -1760,13 +1602,13 @@ class ProjectHookTests(unittest.TestCase):
                 raise AssertionError("should not write for unknown session")
 
         project_common.mark_injected_in_session(
-            ExplodingDriver(), "neo4j", "unknown", ["learning:mkg:a"], [], "SessionStart"
+            ExplodingDriver(), "neo4j", "unknown", ["learning:mkg:a"], "SessionStart"
         )
         project_common.mark_injected_in_session(
-            ExplodingDriver(), "neo4j", None, ["learning:mkg:a"], [], "SessionStart"
+            ExplodingDriver(), "neo4j", None, ["learning:mkg:a"], "SessionStart"
         )
         project_common.mark_injected_in_session(
-            ExplodingDriver(), "neo4j", "session-1", [], [], "SessionStart"
+            ExplodingDriver(), "neo4j", "session-1", [], "SessionStart"
         )
 
     def test_mark_learnings_used_casts_iso_timestamp(self) -> None:
@@ -2215,7 +2057,6 @@ class ObservationTests(unittest.TestCase):
             "turn",
             [{"event_id": "event-1"}],
             [],
-            [],
             "default",
             1,
             "model-x",
@@ -2267,7 +2108,6 @@ class ObservationTests(unittest.TestCase):
             "session-1",
             "turn",
             [{"event_id": "event-1"}],
-            [],
             [],
             "default",
             1,

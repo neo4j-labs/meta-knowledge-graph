@@ -1,11 +1,12 @@
-"""Seed bootstrap ``(:Learning)`` / ``(:Decision)`` nodes for the sales persona.
+"""Seed bootstrap ``(:Learning)`` nodes for the sales persona.
 
 A fresh environment starts with an empty project memory, so the first session
 re-discovers facts the demo already knows: where the warehouse lives, how to
 pick an engine per question, how to discover schema. This script seeds those
-as curated, approved learnings and decisions attached to the ``(:Project)``,
-using the same ids (``learning_id`` / ``decision_id``) and node shapes the
-Stop-hook memory extraction writes, so runtime captures dedupe against them.
+as curated, approved learnings attached to the ``(:Project)``, using the same
+ids (``learning_id``) and node shapes the Stop-hook memory extraction writes,
+so runtime captures dedupe against them. Durable decisions are learnings too:
+each carries its rationale folded into the learning text.
 
     uv run python import/sales_agent/seed_learnings.py
     uv run python import/sales_agent/seed_learnings.py --project my-project-id
@@ -36,7 +37,6 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 from _env import load_seed_env  # noqa: E402
 from project_common import (  # noqa: E402
     MAX_LEARNING_TEXT,
-    decision_id,
     ensure_project_schema,
     learning_id,
     resolve_project,
@@ -84,20 +84,15 @@ LEARNINGS: list[dict[str, str | float]] = [
         "task_pattern": "table discovery / metadata search",
         "confidence": 0.85,
     },
-]
-
-DECISIONS: list[dict[str, str | float]] = [
+    # Durable decisions, folded into learnings with the rationale in the text.
     {
         "text": (
             "Route questions by engine: BigQuery (acme_corp) for time-series, "
             "aggregates, and cohort SQL; the Neo4j graph for multi-hop "
             "relationship questions (contacts, CSM ownership, product "
             "footprint); Diffbot enhance_entity / search_news for external "
-            "signal."
-        ),
-        "rationale": (
-            "The same accounts are mirrored across all three planes and join "
-            "on account slug and domain, so the engine should match the "
+            "signal. The same accounts are mirrored across all three planes and "
+            "join on account slug and domain, so match the engine to the "
             "question shape instead of forcing one store to answer everything."
         ),
         "summary": "Match the engine to the question shape",
@@ -107,10 +102,8 @@ DECISIONS: list[dict[str, str | float]] = [
     {
         "text": (
             "Confirm warehouse schema through the neocarta catalog before "
-            "writing BigQuery SQL instead of guessing table or column names."
-        ),
-        "rationale": (
-            "Catalog context carries column types, example values, and "
+            "writing BigQuery SQL instead of guessing table or column names: "
+            "catalog context carries column types, example values, and "
             "foreign-key references, which prevents failed queries and silent "
             "wrong-column joins."
         ),
@@ -122,10 +115,8 @@ DECISIONS: list[dict[str, str | float]] = [
         "text": (
             "During session bootstrap, persist durable user-stated facts "
             "(role, project, goals, constraints) as learnings immediately "
-            "instead of waiting for end-of-session auto-capture."
-        ),
-        "rationale": (
-            "Bootstrap facts are needed by the very next session, and the "
+            "instead of waiting for end-of-session auto-capture, because "
+            "bootstrap facts are needed by the very next session and the "
             "Stop-hook memory extraction only runs if the session ends cleanly."
         ),
         "summary": "Capture bootstrap facts immediately",
@@ -164,29 +155,6 @@ SET l.text = row.text,
         ELSE l.confidence
     END
 MERGE (p)-[:HAS_LEARNING]->(l)
-"""
-
-MERGE_DECISIONS = """
-MATCH (p:Project {id: $project_id})
-UNWIND $rows AS row
-MERGE (d:Decision {id: row.id})
-ON CREATE SET d.created_at = datetime($now),
-              d.support_count = 1
-SET d.text = row.text,
-    d.rationale = row.rationale,
-    d.summary = row.summary,
-    d.task_pattern = row.task_pattern,
-    d.status = 'approved',
-    d.scope = 'project',
-    d.source = 'seed',
-    d.last_source = 'seed',
-    d.project_id = $project_id,
-    d.updated_at = datetime($now),
-    d.confidence = CASE
-        WHEN coalesce(d.confidence, 0.0) < row.confidence THEN row.confidence
-        ELSE d.confidence
-    END
-MERGE (p)-[:HAS_DECISION]->(d)
 """
 
 load_seed_env()
@@ -245,7 +213,6 @@ def main(argv: list[str]) -> int:
     project_id, project_name = _resolve_project(argv)
     print(f"  scoping bootstrap memory to (:Project {{id: '{project_id}'}})")
     learning_rows = _rows(LEARNINGS, learning_id, project_id)
-    decision_rows = _rows(DECISIONS, decision_id, project_id)
 
     uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
     user = os.environ.get("NEO4J_USERNAME", "neo4j")
@@ -270,15 +237,8 @@ def main(argv: list[str]) -> int:
             now=now,
             database_=database,
         )
-        driver.execute_query(
-            MERGE_DECISIONS,
-            project_id=project_id,
-            rows=decision_rows,
-            now=now,
-            database_=database,
-        )
 
-    print(f"  seeded {len(learning_rows)} learnings, {len(decision_rows)} decisions "
+    print(f"  seeded {len(learning_rows)} learnings "
           f"on (:Project {{id: '{project_id}'}})")
     return 0
 

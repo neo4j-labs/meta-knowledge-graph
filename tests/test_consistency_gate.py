@@ -186,7 +186,7 @@ class AttachEmbeddingsTests(unittest.TestCase):
         rows = [
             {"text": "a", "action": "create"},
             {"text": "", "action": "create"},
-            {"text": "c", "rationale": "why", "action": "create"},
+            {"text": "c", "action": "create"},
         ]
         with patch.object(
             consistency_gate, "embed_texts", return_value=[[0.1], [0.3]]
@@ -194,7 +194,7 @@ class AttachEmbeddingsTests(unittest.TestCase):
             produced = consistency_gate.attach_candidate_embeddings(rows)
         self.assertTrue(produced)
         # Only the two rows with text are embedded, in order.
-        self.assertEqual(embed.call_args.args[0], ["a", "c\nwhy"])
+        self.assertEqual(embed.call_args.args[0], ["a", "c"])
         self.assertEqual(rows[0]["embedding"], [0.1])
         self.assertNotIn("embedding", rows[1])
         self.assertEqual(rows[2]["embedding"], [0.3])
@@ -450,7 +450,7 @@ class SweepTests(unittest.TestCase):
             out = consistency_gate.sweep_ungated_candidates(
                 None, "neo4j", project=self._project(), model=None, timestamp="t"
             )
-        self.assertEqual(out, {"learnings": 0, "decisions": 0})
+        self.assertEqual(out, {"learnings": 0})
 
     def test_zero_sweep_limit_disables(self):
         with patch.dict(
@@ -460,7 +460,7 @@ class SweepTests(unittest.TestCase):
             out = consistency_gate.sweep_ungated_candidates(
                 None, "neo4j", project=self._project(), model=None, timestamp="t"
             )
-        self.assertEqual(out, {"learnings": 0, "decisions": 0})
+        self.assertEqual(out, {"learnings": 0})
 
     def test_judge_unavailable_skips(self):
         with patch.dict("os.environ", {"MKG_CONSISTENCY_GATE": "1"}), patch.object(
@@ -469,7 +469,7 @@ class SweepTests(unittest.TestCase):
             out = consistency_gate.sweep_ungated_candidates(
                 None, "neo4j", project=self._project(), model=None, timestamp="t"
             )
-        self.assertEqual(out, {"learnings": 0, "decisions": 0})
+        self.assertEqual(out, {"learnings": 0})
 
     def test_sweep_limit_env_override(self):
         with patch.dict("os.environ", {"MKG_CONSISTENCY_SWEEP_LIMIT": "3"}):
@@ -525,13 +525,13 @@ class SweepTests(unittest.TestCase):
                 exclude_ids=["fresh1"],
             )
 
-        self.assertEqual(out, {"learnings": 2, "decisions": 0})
+        self.assertEqual(out, {"learnings": 2})
         self.assertEqual(fetched["Learning"]["exclude_ids"], ["fresh1"])
         # Only the row without a stored embedding is embedded and persisted.
         self.assertEqual(persisted["Learning"], ["l1"])
         self.assertEqual(gated["Learning"], ["l1", "l2"])
-        # The decision label found nothing ungated, so nothing was persisted.
-        self.assertNotIn("Decision", persisted)
+        # Only :Learning is swept now; no other label is touched.
+        self.assertEqual(set(persisted), {"Learning"})
 
 
 class DispatchTests(unittest.TestCase):
@@ -572,11 +572,10 @@ class GateGuardTests(unittest.TestCase):
                 database="neo4j",
                 project=type("P", (), {"id": "proj"})(),
                 learning_rows=[],
-                decision_rows=[],
                 model=None,
                 timestamp="2026-07-01T00:00:00Z",
             )
-        self.assertEqual(result, {"learnings": 0, "decisions": 0})
+        self.assertEqual(result, {"learnings": 0})
 
     def test_only_project_scoped_creates_are_gated(self):
         captured = {}
@@ -600,14 +599,13 @@ class GateGuardTests(unittest.TestCase):
                 database="neo4j",
                 project=type("P", (), {"id": "proj"})(),
                 learning_rows=rows,
-                decision_rows=[],
                 model=None,
                 timestamp="2026-07-01T00:00:00Z",
             )
         # Project-scoped creates with text are gated (embedding or fulltext);
         # user-scoped, updates, and text-less rows are excluded.
         self.assertEqual(captured["Learning"], ["vec", "ft"])
-        self.assertEqual(captured["Decision"], [])
+        self.assertNotIn("Decision", captured)
 
     def test_skips_when_judge_unavailable(self):
         with patch.dict("os.environ", {"MKG_CONSISTENCY_GATE": "1"}), patch.object(
@@ -618,11 +616,10 @@ class GateGuardTests(unittest.TestCase):
                 database="neo4j",
                 project=type("P", (), {"id": "proj"})(),
                 learning_rows=[{"action": "create", "embedding": [0.1], "id": "l1"}],
-                decision_rows=[],
                 model=None,
                 timestamp="2026-07-01T00:00:00Z",
             )
-        self.assertEqual(result, {"learnings": 0, "decisions": 0})
+        self.assertEqual(result, {"learnings": 0})
 
 
 if __name__ == "__main__":

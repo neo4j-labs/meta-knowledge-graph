@@ -28,14 +28,11 @@ if str(HOOK_DIR) not in sys.path:
 
 from project_common import (  # noqa: E402
     ProjectRef,
-    decision_id,
-    decision_namespace,
     dialog_entry,
     ensure_project_schema,
     embed_text,
     embed_texts,
     extraction_model_label,
-    fetch_project_decisions,
     fetch_project_learnings,
     has_project_work_events,
     in_extraction_subprocess,
@@ -66,9 +63,9 @@ from consistency_gate import (  # noqa: E402
 
 
 # Stable, verbose provenance tag for memory written by the Stop-hook extractor.
-# Kept uniform across modes and clients (Codex and Claude) so learnings/decisions
-# minted by the hook are always identifiable as `hooks-stop`, paralleling the
-# MCP tool's `agent-mcp` tag.
+# Kept uniform across modes and clients (Codex and Claude) so learnings minted by
+# the hook are always identifiable as `hooks-stop`, paralleling the MCP tool's
+# `agent-mcp` tag.
 HOOK_LEARNING_SOURCE = "hooks-stop"
 
 DEFAULT_MEMORY_EXTRACTION_PROMPT_NAME = "default"
@@ -90,39 +87,31 @@ Current completed work:
 
 Decide whether this completed work contains durable memory worth storing.
 Prefer updating existing memory when it is materially the same idea. Create a new
-item only for a distinct reusable learning or major decision. Return ignore when
-the work is routine, transient, or already covered without needing reinforcement.
+item only for a distinct reusable learning. Return ignore when the work is
+routine, transient, or already covered without needing reinforcement.
 
-Classify each candidate into the most specific applicable bucket. Do not record
-the same signal in multiple buckets. Use this routing precedence:
-1. decisions: explicit decisions ("Decision:", "we decided", "going forward
-   must/should") or stable policy choices with implementation impact.
-   Do not also create a learning for the same signal.
-2. learnings: reusable facts, environment quirks, domain observations, durable
-   user preferences, or task patterns that are not better represented as a
-   decision.
+A learning is any durable, reusable fact worth recalling in a future session:
+reusable facts, environment quirks, domain observations, durable user
+preferences, task patterns, and decisions or stable policy choices with
+implementation impact ("Decision:", "we decided", "going forward must/should").
+When the signal is a decision, fold the reason it matters into the learning text
+rather than recording it separately.
 
 Every learning has a scope:
 - "user": a durable fact about the *person* you are working with that holds
   across projects — their role and identity, communication/workflow
   preferences, language and tooling preferences, coding and writing style,
-  broad interests, recurring constraints, or domain priorities. When the signal
-  is unambiguously about the person, scope it to "user" on the first explicit
-  mention; do not wait for it to be repeated. Require repetition only for
-  borderline traits you are inferring rather than ones the person stated.
-- "project": a fact, quirk, observation, or task pattern specific to this
-  project or its environment.
+  broad interests, recurring constraints, domain priorities, or a stable working
+  agreement about how to collaborate with them. When the signal is unambiguously
+  about the person, scope it to "user" on the first explicit mention; do not wait
+  for it to be repeated. Require repetition only for borderline traits you are
+  inferring rather than ones the person stated.
+- "project": a fact, quirk, observation, task pattern, or policy choice specific
+  to this project or its environment.
 Default to "project" only when it is genuinely unclear whether the signal is
 about the person or the project; a clearly personal fact always takes "user".
 Never store secrets, sensitive personal data, transient details, or one-off task
 context in either scope.
-
-Every decision also has a scope:
-- "user": a stable working agreement, preference, or operating policy about how
-  to collaborate with this person across projects.
-- "project": a project-specific policy or implementation choice.
-Default to "project" unless the decision is clearly about the person or their
-cross-project working preferences.
 
 Return JSON only with this shape:
 {
@@ -133,19 +122,6 @@ Return JSON only with this shape:
       "scope": "project|user",
       "text": "concise durable learning, or null",
       "task_pattern": "short reusable task pattern, or null",
-      "confidence": 0.0,
-      "reason": "why this action"
-    }
-  ],
-  "decisions": [
-    {
-      "action": "create|update|ignore",
-      "existing_id": "decision id when action is update, otherwise null",
-      "scope": "project|user",
-      "text": "concise major decision, or null",
-      "rationale": "why the decision matters, or null",
-      "task_pattern": "short reusable task pattern, or null",
-      "related_learning_id": "optional related learning id, or null",
       "confidence": 0.0,
       "reason": "why this action"
     }
@@ -306,7 +282,6 @@ def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
 
 def _format_existing_memory(
     learnings: list[dict[str, Any]],
-    decisions: list[dict[str, Any]],
 ) -> str:
     lines: list[str] = ["Existing similar learnings:"]
     if learnings:
@@ -318,21 +293,6 @@ def _format_existing_memory(
                 f"status={item.get('status')}; "
                 f"task_pattern={item.get('task_pattern')}; "
                 f"text={truncate(str(item.get('text') or ''), 300)}"
-            )
-    else:
-        lines.append("- none")
-
-    lines.append("")
-    lines.append("Existing similar decisions:")
-    if decisions:
-        for item in decisions:
-            lines.append(
-                "- "
-                f"id={item.get('id')}; "
-                f"scope={item.get('scope') or 'project'}; "
-                f"task_pattern={item.get('task_pattern')}; "
-                f"text={truncate(str(item.get('text') or ''), 260)}; "
-                f"rationale={truncate(str(item.get('rationale') or ''), 260)}"
             )
     else:
         lines.append("- none")
@@ -349,10 +309,9 @@ def render_memory_extraction_prompt(
     mode: str,
     events: list[dict[str, Any]],
     similar_learnings: list[dict[str, Any]],
-    similar_decisions: list[dict[str, Any]],
 ) -> str:
     corpus = _event_corpus(events)
-    existing = _format_existing_memory(similar_learnings, similar_decisions)
+    existing = _format_existing_memory(similar_learnings)
     replacements = {
         "[[PROJECT_NAME]]": project.name,
         "[[PROJECT_ID]]": project.id,
@@ -398,7 +357,6 @@ def build_memory_extraction_prompt(
     mode: str,
     events: list[dict[str, Any]],
     similar_learnings: list[dict[str, Any]],
-    similar_decisions: list[dict[str, Any]],
     template: str | None = None,
 ) -> str:
     active_template = template or DEFAULT_MEMORY_EXTRACTION_PROMPT
@@ -410,7 +368,6 @@ def build_memory_extraction_prompt(
         mode,
         events,
         similar_learnings,
-        similar_decisions,
     )
 
 
@@ -421,13 +378,13 @@ def _json_from_llm_text(text: str) -> dict[str, Any]:
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            return {"learnings": [], "decisions": []}
+            return {"learnings": []}
         try:
             parsed = json.loads(text[start : end + 1])
         except json.JSONDecodeError:
-            return {"learnings": [], "decisions": []}
+            return {"learnings": []}
     if not isinstance(parsed, dict):
-        return {"learnings": [], "decisions": []}
+        return {"learnings": []}
     return parsed
 
 
@@ -445,7 +402,7 @@ def ask_llm_for_memory_actions_with_model(
     ready, reason = llm_readiness_status(model_name)
     if not ready:
         return (
-            {"learnings": [], "decisions": []},
+            {"learnings": []},
             model_label,
             {"status": "skipped", "skip_reason": reason, "error": None},
         )
@@ -488,7 +445,7 @@ def _scope_from_action(item: dict[str, Any], existing_id: str) -> str:
     scope_value = str(item.get("scope") or "").strip().lower()
     if scope_value:
         return normalize_scope(scope_value)
-    if existing_id.startswith(("learning:user:", "decision:user:")):
+    if existing_id.startswith("learning:user:"):
         return "user"
     return "project"
 
@@ -498,10 +455,7 @@ def _memory_rows_from_actions(
     mode: str,
     actions: dict[str, Any],
     llm_model: str | None = None,
-) -> tuple[
-    list[dict[str, Any]],
-    list[dict[str, Any]],
-]:
+) -> list[dict[str, Any]]:
     learning_rows: list[dict[str, Any]] = []
     for item in actions.get("learnings") or []:
         if not isinstance(item, dict):
@@ -536,44 +490,7 @@ def _memory_rows_from_actions(
                 "llm_model": llm_model,
             }
         )
-
-    decision_rows: list[dict[str, Any]] = []
-    for item in actions.get("decisions") or []:
-        if not isinstance(item, dict):
-            continue
-        action = str(item.get("action") or "").lower()
-        if action not in {"create", "update"}:
-            continue
-        text = truncate(str(item.get("text") or "").strip())
-        existing_id = str(item.get("existing_id") or "").strip()
-        if action == "update" and not existing_id:
-            continue
-        if action == "create" and not text:
-            continue
-        scope = _scope_from_action(item, existing_id)
-        row_id = (
-            existing_id
-            if action == "update"
-            else decision_id(decision_namespace(project.id, scope), text)
-        )
-        decision_rows.append(
-            {
-                "id": row_id,
-                "action": action,
-                "text": text or None,
-                "rationale": truncate(str(item.get("rationale") or ""), 500) or None,
-                "task_pattern": item.get("task_pattern"),
-                "confidence": _confidence(item.get("confidence")),
-                "status": "candidate",
-                "scope": scope,
-                "source": HOOK_LEARNING_SOURCE,
-                "summary": text or item.get("reason"),
-                "related_learning_id": item.get("related_learning_id"),
-                "reason": item.get("reason"),
-                "llm_model": llm_model,
-            }
-        )
-    return learning_rows[:3], decision_rows[:5]
+    return learning_rows[:3]
 
 
 def _window_digest(events: list[dict[str, Any]]) -> str:
@@ -741,7 +658,6 @@ def _write_processing(
     mode: str,
     events: list[dict[str, Any]],
     learning_rows: list[dict[str, Any]],
-    decision_rows: list[dict[str, Any]],
     memory_extraction_prompt_name: str,
     memory_extraction_prompt_version: int,
     llm_model: str | None,
@@ -757,7 +673,7 @@ def _write_processing(
     processing_id = f"processing:{project.id}:{session_id}:{mode}:{digest}"
     summary = (
         f"Processed {len(event_ids)} {mode} events and produced "
-        f"{len(learning_rows)} learning actions, {len(decision_rows)} decision actions, "
+        f"{len(learning_rows)} learning actions "
         f"and {len(observation_rows)} observations."
     )
 
@@ -779,7 +695,6 @@ def _write_processing(
             pp.type = 'processing',
             pp.event_count = $event_count,
             pp.learning_count = $learning_count,
-            pp.decision_count = $decision_count,
             pp.observation_count = $observation_count,
             pp.memory_extraction_prompt_name = $memory_extraction_prompt_name,
             pp.memory_extraction_prompt_version = $memory_extraction_prompt_version,
@@ -802,7 +717,6 @@ def _write_processing(
         mode=mode,
         event_count=len(event_ids),
         learning_count=len(learning_rows),
-        decision_count=len(decision_rows),
         observation_count=len(observation_rows),
         memory_extraction_prompt_name=memory_extraction_prompt_name,
         memory_extraction_prompt_version=memory_extraction_prompt_version,
@@ -849,8 +763,6 @@ def _write_processing(
 
     learning_create_rows = [row for row in learning_rows if row.get("action") == "create"]
     learning_update_rows = [row for row in learning_rows if row.get("action") == "update"]
-    decision_create_rows = [row for row in decision_rows if row.get("action") == "create"]
-    decision_update_rows = [row for row in decision_rows if row.get("action") == "update"]
 
     if learning_create_rows:
         tx.run(
@@ -931,107 +843,6 @@ def _write_processing(
             processing_id=processing_id,
             learnings=learning_update_rows,
             timestamp=timestamp,
-        )
-
-    if decision_create_rows:
-        tx.run(
-            """
-            MATCH (p:Project {id: $project_id})
-            MATCH (s:Session {session_id: $session_id})
-            MATCH (pp:ProjectProcessing {id: $processing_id})
-            UNWIND $decisions AS row
-            MERGE (d:Decision {id: row.id})
-            ON CREATE SET d.created_at = datetime($timestamp),
-                          d.text = row.text,
-                          d.rationale = row.rationale,
-                          d.task_pattern = row.task_pattern,
-                          d.summary = row.summary,
-                          d.source = row.source,
-                          d.created_by_model = row.llm_model,
-                          d.status = row.status,
-                          d.scope = row.scope,
-                          d.support_count = 0
-            SET d.text = row.text,
-                d.rationale = row.rationale,
-                d.task_pattern = row.task_pattern,
-                d.summary = row.summary,
-                d.embedding = coalesce(row.embedding, d.embedding),
-                d.scope = row.scope,
-                d.last_source = row.source,
-                d.last_source_session_id = $session_id,
-                d.last_reason = row.reason,
-                d.last_llm_model = coalesce(row.llm_model, d.last_llm_model),
-                d.project_id = $project_id,
-                d.updated_at = datetime($timestamp),
-                d.support_count = coalesce(d.support_count, 0) + 1,
-                d.confidence = CASE
-                    WHEN coalesce(d.confidence, 0.0) < row.confidence THEN row.confidence
-                    ELSE d.confidence
-                END
-            MERGE (p)-[:HAS_DECISION]->(d)
-            MERGE (d)-[:FROM_SESSION]->(s)
-            MERGE (pp)-[produced:PRODUCED_DECISION]->(d)
-            SET produced.llm_model = row.llm_model,
-                produced.created_at = datetime($timestamp)
-            """,
-            project_id=project.id,
-            session_id=session_id,
-            processing_id=processing_id,
-            decisions=decision_create_rows,
-            timestamp=timestamp,
-        )
-
-    if decision_update_rows:
-        tx.run(
-            """
-            MATCH (p:Project {id: $project_id})
-            MATCH (s:Session {session_id: $session_id})
-            MATCH (pp:ProjectProcessing {id: $processing_id})
-            UNWIND $decisions AS row
-            MATCH (d:Decision {id: row.id})
-            SET d.text = coalesce(row.text, d.text),
-                d.rationale = coalesce(row.rationale, d.rationale),
-                d.task_pattern = coalesce(row.task_pattern, d.task_pattern),
-                d.summary = coalesce(row.summary, d.summary),
-                d.scope = row.scope,
-                d.last_source = row.source,
-                d.last_source_session_id = $session_id,
-                d.last_reason = row.reason,
-                d.last_llm_model = coalesce(row.llm_model, d.last_llm_model),
-                d.project_id = $project_id,
-                d.updated_at = datetime($timestamp),
-                d.support_count = coalesce(d.support_count, 0) + 1,
-                d.confidence = CASE
-                    WHEN coalesce(d.confidence, 0.0) < row.confidence THEN row.confidence
-                    ELSE d.confidence
-                END
-            MERGE (p)-[:HAS_DECISION]->(d)
-            MERGE (d)-[:FROM_SESSION]->(s)
-            MERGE (pp)-[updated:UPDATED_DECISION]->(d)
-            SET updated.llm_model = row.llm_model,
-                updated.updated_at = datetime($timestamp)
-            """,
-            project_id=project.id,
-            session_id=session_id,
-            processing_id=processing_id,
-            decisions=decision_update_rows,
-            timestamp=timestamp,
-        )
-
-    if learning_rows and decision_rows:
-        tx.run(
-            """
-            UNWIND $decisions AS decision
-            UNWIND $learnings AS learning
-            WITH decision, learning
-            WHERE decision.task_pattern IS NOT NULL
-              AND decision.task_pattern = learning.task_pattern
-            MATCH (d:Decision {id: decision.id})
-            MATCH (l:Learning {id: learning.id})
-            MERGE (d)-[:INFORMS_LEARNING]->(l)
-            """,
-            decisions=decision_rows,
-            learnings=learning_rows,
         )
 
     if observation_rows:
@@ -1161,7 +972,6 @@ def _write_processing_error(
             pp.type = 'error',
             pp.event_count = $event_count,
             pp.learning_count = 0,
-            pp.decision_count = 0,
             pp.llm_model = $llm_model,
             pp.llm_status = $llm_status,
             pp.llm_skip_reason = $llm_skip_reason,
@@ -1251,20 +1061,11 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     limit=8,
                     query_vector=query_vector,
                 )
-                similar_decisions = fetch_project_decisions(
-                    driver,
-                    database,
-                    project_id=project.id,
-                    query=corpus,
-                    limit=8,
-                    query_vector=query_vector,
-                )
                 prompt = build_memory_extraction_prompt(
                     project,
                     mode,
                     events,
                     similar_learnings,
-                    similar_decisions,
                     template=prompt_template,
                 )
                 model_name = resolve_llm_model(_llm_model_for_processing_events(events))
@@ -1276,7 +1077,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                 llm_status = llm_meta.get("status")
                 llm_skip_reason = llm_meta.get("skip_reason")
                 llm_error = llm_meta.get("error")
-                learning_rows, decision_rows = _memory_rows_from_actions(
+                learning_rows = _memory_rows_from_actions(
                     project,
                     mode,
                     actions,
@@ -1284,7 +1085,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                 )
                 # Embed candidates before the write so each is stored searchable
                 # and the consistency gate can retrieve prior approved neighbours.
-                attach_candidate_embeddings(learning_rows, decision_rows)
+                attach_candidate_embeddings(learning_rows)
                 # Episodic observation for the same window. Failures must not
                 # block semantic memory: the window then has no observation.
                 observation_rows: list[dict[str, Any]] = []
@@ -1314,7 +1115,6 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     mode,
                     events,
                     learning_rows,
-                    decision_rows,
                     prompt_name,
                     prompt_version,
                     llm_model_used,
@@ -1334,7 +1134,6 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                         database,
                         project=project,
                         learning_rows=learning_rows,
-                        decision_rows=decision_rows,
                         model=model_name,
                         timestamp=timestamp,
                     )
@@ -1351,7 +1150,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                         timestamp=timestamp,
                         exclude_ids=[
                             row["id"]
-                            for row in (*learning_rows, *decision_rows)
+                            for row in learning_rows
                             if row.get("id")
                         ],
                     )

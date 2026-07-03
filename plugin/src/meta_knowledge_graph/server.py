@@ -18,7 +18,6 @@ from pydantic import Field
 
 
 MAX_LEARNING_TEXT = 500
-MAX_DECISION_TEXT = MAX_LEARNING_TEXT
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 HYBRID_RRF_K = 60.0
 HYBRID_KEYWORD_TERMS = 16
@@ -101,12 +100,11 @@ def _resolve_project_id(explicit: Optional[str]) -> str:
 
 
 USER_LEARNING_NAMESPACE = "user"
-USER_DECISION_NAMESPACE = "user"
 LEARNING_SCOPES = ("project", "user")
 
 # Stable, verbose provenance tag for memory written through the MCP tool surface.
-# Kept uniform across clients (Codex and Claude) so learnings/decisions created
-# via the tool are always identifiable as `agent-mcp`, paralleling the Stop-hook
+# Kept uniform across clients (Codex and Claude) so learnings created via the
+# tool are always identifiable as `agent-mcp`, paralleling the Stop-hook
 # extractor's `hooks-stop` tag.
 MCP_LEARNING_SOURCE = "agent-mcp"
 
@@ -120,18 +118,9 @@ def _learning_namespace(project_id: str, scope: str) -> str:
     return USER_LEARNING_NAMESPACE if _normalize_scope(scope) == "user" else project_id
 
 
-def _decision_namespace(project_id: str, scope: str) -> str:
-    return USER_DECISION_NAMESPACE if _normalize_scope(scope) == "user" else project_id
-
-
 def _learning_id(namespace: str, text: str) -> str:
     digest = sha1(f"{namespace}\n{text.strip()}".encode("utf-8")).hexdigest()[:16]
     return f"learning:{namespace}:{digest}"
-
-
-def _decision_id(namespace: str, text: str) -> str:
-    digest = sha1(f"{namespace}\n{text.strip()}".encode("utf-8")).hexdigest()[:16]
-    return f"decision:{namespace}:{digest}"
 
 
 def _truncate(value: str, limit: int = MAX_LEARNING_TEXT) -> str:
@@ -536,9 +525,7 @@ def create_mcp_server(
         records = await _execute_query(query, **params)
         return records[0] if records else None
 
-    def _context_memory_projection(label: str) -> str:
-        if label == "Learning":
-            return """
+    _CONTEXT_LEARNING_PROJECTION = """
                    node.id AS id,
                    node.text AS text,
                    node.status AS status,
@@ -548,29 +535,9 @@ def create_mcp_server(
                    score,
                    sources
             """
-        return """
-               node.id AS id,
-               node.text AS text,
-               node.rationale AS rationale,
-               node.confidence AS confidence,
-               node.task_pattern AS task_pattern,
-               node.scope AS scope,
-               score,
-               sources
-        """
-
-    def _context_memory_rel(label: str) -> str:
-        return "HAS_LEARNING" if label == "Learning" else "HAS_DECISION"
-
-    def _context_vector_index(label: str) -> str:
-        return "project_learning_vector" if label == "Learning" else "project_decision_vector"
-
-    def _context_fulltext_index(label: str) -> str:
-        return "project_learning_fulltext" if label == "Learning" else "project_decision_fulltext"
 
     async def _fetch_context_memory_hybrid(
         *,
-        label: str,
         query_text: str,
         query_vector: Optional[List[float]],
         scope: str,
@@ -583,12 +550,12 @@ def create_mcp_server(
         if not query_vector and not keyword_query:
             return []
 
-        vector_index = _context_vector_index(label)
-        fulltext_index = _context_fulltext_index(label)
-        projection = _context_memory_projection(label)
+        vector_index = "project_learning_vector"
+        fulltext_index = "project_learning_fulltext"
+        projection = _CONTEXT_LEARNING_PROJECTION
         project_filter = "AND node.project_id = $project_id" if project_id else ""
         project_match = (
-            f"MATCH (:Project {{id: $project_id}})-[:{_context_memory_rel(label)}]->(node)"
+            "MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)"
             if project_id
             else ""
         )
@@ -614,7 +581,7 @@ def create_mcp_server(
         if query_vector:
             branches = [
                 f"""
-                MATCH (node:{label})
+                MATCH (node:Learning)
                 SEARCH node IN (
                     VECTOR INDEX {vector_index}
                     FOR $query_vector
@@ -641,7 +608,7 @@ def create_mcp_server(
                     CALL db.index.fulltext.queryNodes('{fulltext_index}', $search_query)
                     YIELD node, score AS raw_score
                     {project_match}
-                    WHERE node:{label}
+                    WHERE node:Learning
                       AND node.scope = $scope
                       AND node.status IN $statuses
                       AND {post_filter}
@@ -681,7 +648,7 @@ def create_mcp_server(
             CALL db.index.fulltext.queryNodes('{fulltext_index}', $search_query)
             YIELD node, score AS raw_score
             {project_match}
-            WHERE node:{label}
+            WHERE node:Learning
               AND node.scope = $scope
               AND node.status IN $statuses
               AND {post_filter}
@@ -985,15 +952,15 @@ def create_mcp_server(
         ),
         query: Optional[str] = Field(
             None,
-            description="Optional free-text query for hybrid ranking of learnings and decisions.",
+            description="Optional free-text query for hybrid ranking of learnings.",
         ),
         statuses: Optional[List[str]] = Field(
             None,
             description="Learning statuses to include. Defaults to ['approved', 'candidate'].",
         ),
-        limit: int = Field(5, description="Max learnings AND max decisions to return."),
+        limit: int = Field(5, description="Max learnings to return."),
     ) -> str:
-        """Return scoped project/user learnings, decisions, and recent episodic
+        """Return scoped project/user learnings and recent episodic
         observations for the given project.
 
         Use this to self-bootstrap before answering questions about the active project,
@@ -1018,7 +985,6 @@ def create_mcp_server(
             learnings: list[dict] = []
             if normalized_query:
                 learnings = await _fetch_context_memory_hybrid(
-                    label="Learning",
                     query_text=normalized_query,
                     query_vector=query_vector,
                     scope="project",
@@ -1049,7 +1015,6 @@ def create_mcp_server(
             user_learnings: list[dict] = []
             if normalized_query:
                 user_learnings = await _fetch_context_memory_hybrid(
-                    label="Learning",
                     query_text=normalized_query,
                     query_vector=query_vector,
                     scope="user",
@@ -1077,63 +1042,6 @@ def create_mcp_server(
                 )
                 user_learnings = [dict(r) for r in records]
 
-            user_decisions: list[dict] = []
-            if normalized_query:
-                user_decisions = await _fetch_context_memory_hybrid(
-                    label="Decision",
-                    query_text=normalized_query,
-                    query_vector=query_vector,
-                    scope="user",
-                    statuses=["approved", "candidate"],
-                    limit=limit,
-                )
-
-            if not user_decisions:
-                records = await _execute_query(
-                    """
-                    MATCH (d:Decision {scope: 'user'})
-                    WHERE d.status IN ['approved', 'candidate']
-                    RETURN d.id AS id, d.text AS text, d.rationale AS rationale,
-                           d.confidence AS confidence, d.task_pattern AS task_pattern,
-                           d.scope AS scope,
-                           0.0 AS score
-                    ORDER BY coalesce(d.updated_at, d.created_at) DESC
-                    LIMIT $limit
-                    """,
-                    limit=limit,
-                )
-                user_decisions = [dict(r) for r in records]
-
-            decisions: list[dict] = []
-            if normalized_query:
-                decisions = await _fetch_context_memory_hybrid(
-                    label="Decision",
-                    query_text=normalized_query,
-                    query_vector=query_vector,
-                    scope="project",
-                    statuses=["approved", "candidate"],
-                    limit=limit,
-                    project_id=resolved_pid,
-                )
-
-            if not decisions:
-                records = await _execute_query(
-                    """
-                    MATCH (:Project {id: $project_id})-[:HAS_DECISION]->(d:Decision)
-                    WHERE d.status IN ['approved', 'candidate']
-                      AND d.scope = 'project'
-                    RETURN d.id AS id, d.text AS text, d.rationale AS rationale,
-                           d.confidence AS confidence, d.task_pattern AS task_pattern,
-                           d.scope AS scope,
-                           0.0 AS score
-                    ORDER BY coalesce(d.updated_at, d.created_at) DESC
-                    LIMIT $limit
-                    """,
-                    project_id=resolved_pid,
-                    limit=limit,
-                )
-                decisions = [dict(r) for r in records]
-
             ids = [
                 item["id"]
                 for item in (*user_learnings, *learnings)
@@ -1148,22 +1056,6 @@ def create_mcp_server(
                         l.use_count = coalesce(l.use_count, 0) + 1
                     """,
                     ids=ids,
-                    timestamp=timestamp,
-                )
-            decision_ids = [
-                item["id"]
-                for item in (*user_decisions, *decisions)
-                if item.get("id")
-            ]
-            if decision_ids:
-                timestamp = _now_iso()
-                await _execute_query(
-                    """
-                    MATCH (d:Decision) WHERE d.id IN $ids
-                    SET d.last_used_at = datetime($timestamp),
-                        d.use_count = coalesce(d.use_count, 0) + 1
-                    """,
-                    ids=decision_ids,
                     timestamp=timestamp,
                 )
 
@@ -1192,9 +1084,7 @@ def create_mcp_server(
             "query": normalized_query or None,
             "statuses": resolved_statuses,
             "user_learnings": user_learnings,
-            "user_decisions": user_decisions,
             "learnings": learnings,
-            "decisions": decisions,
             "recent_observations": recent_observations,
         }
         return json.dumps(payload, default=str)
@@ -1293,115 +1183,6 @@ def create_mcp_server(
                 project_id=resolved_pid,
                 row_id=row_id,
                 text=clean_text,
-                task_pattern=task_pattern,
-                status=normalized_status,
-                scope=normalized_scope,
-                source=MCP_LEARNING_SOURCE,
-                confidence=clamped_confidence,
-                embedding=embedding,
-                timestamp=timestamp,
-            )
-
-        return json.dumps(dict(record) if record else {}, default=str)
-
-    @mcp.tool(name="project_add_decision")
-    async def project_add_decision(
-        text: str = Field(..., description="Durable, reusable decision text (<=500 chars)."),
-        rationale: Optional[str] = Field(
-            None,
-            description="Optional concise rationale for why the decision matters.",
-        ),
-        project_id: Optional[str] = Field(
-            None,
-            description="Project id (slug). Defaults to the MCP server's CWD folder name.",
-        ),
-        task_pattern: Optional[str] = Field(
-            None,
-            description="Short reusable task pattern this decision applies to.",
-        ),
-        scope: str = Field(
-            "project",
-            description=(
-                "'project' (default) for a decision about this project/environment, "
-                "or 'user' for a durable decision about the person that holds "
-                "across projects."
-            ),
-        ),
-        confidence: float = Field(
-            0.6,
-            description="Confidence 0.0-1.0. Existing higher confidence is preserved.",
-        ),
-    ) -> str:
-        """Persist a durable decision. Idempotent on (scope namespace, text)."""
-        clean_text = _truncate((text or "").strip(), MAX_DECISION_TEXT)
-        if not clean_text:
-            return json.dumps({"status": "error", "error": "text is required"})
-        clean_rationale = _truncate((rationale or "").strip(), MAX_DECISION_TEXT) or None
-        normalized_scope = _normalize_scope(scope)
-        normalized_status = "candidate"
-        clamped_confidence = max(0.0, min(1.0, float(confidence)))
-        resolved_pid = _resolve_project_id(project_id)
-        row_id = _decision_id(
-            _decision_namespace(resolved_pid, normalized_scope), clean_text
-        )
-        timestamp = _now_iso()
-        embedding_input = (
-            f"{clean_text}\n{clean_rationale}" if clean_rationale else clean_text
-        )
-        embedding = await _embed_learning_text(embedding_input)
-
-        async with neo4j_driver.session(database=database):
-            for stmt in (
-                "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE",
-                "CREATE CONSTRAINT IF NOT EXISTS FOR (d:Decision) REQUIRE d.id IS UNIQUE",
-                "CREATE FULLTEXT INDEX project_decision_fulltext IF NOT EXISTS "
-                "FOR (d:Decision) ON EACH [d.text, d.rationale, d.task_pattern, d.summary]",
-            ):
-                await _execute_query(stmt)
-
-            record = await _execute_query_single(
-                """
-                MERGE (p:Project {id: $project_id})
-                ON CREATE SET p.created_at = datetime($timestamp),
-                              p.name = $project_id,
-                              p.source = 'agent'
-                SET p.updated_at = datetime($timestamp),
-                    p.last_activity_at = datetime($timestamp)
-                MERGE (d:Decision {id: $row_id})
-                ON CREATE SET d.created_at = datetime($timestamp),
-                              d.use_count = 0,
-                              d.support_count = 0
-                SET d.text = $text,
-                    d.rationale = coalesce($rationale, d.rationale),
-                    d.summary = $text,
-                    d.embedding = coalesce($embedding, d.embedding),
-                    d.task_pattern = coalesce($task_pattern, d.task_pattern),
-                    d.status = CASE
-                        WHEN d.status = 'approved' THEN d.status
-                        ELSE $status
-                    END,
-                    d.scope = $scope,
-                    d.source = coalesce(d.source, $source),
-                    d.last_source = $source,
-                    d.project_id = $project_id,
-                    d.updated_at = datetime($timestamp),
-                    d.support_count = coalesce(d.support_count, 0) + 1,
-                    d.confidence = CASE
-                        WHEN coalesce(d.confidence, 0.0) < $confidence THEN $confidence
-                        ELSE d.confidence
-                    END
-                MERGE (p)-[:HAS_DECISION]->(d)
-                RETURN d.id AS id, d.text AS text, d.status AS status,
-                       d.scope AS scope,
-                       d.confidence AS confidence, d.rationale AS rationale,
-                       d.task_pattern AS task_pattern,
-                       d.support_count AS support_count,
-                       CASE WHEN d.created_at = d.updated_at THEN 'created' ELSE 'updated' END AS action
-                """,
-                project_id=resolved_pid,
-                row_id=row_id,
-                text=clean_text,
-                rationale=clean_rationale,
                 task_pattern=task_pattern,
                 status=normalized_status,
                 scope=normalized_scope,

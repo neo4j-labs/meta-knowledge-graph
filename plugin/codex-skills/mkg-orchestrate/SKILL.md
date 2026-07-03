@@ -23,7 +23,7 @@ this skill file as the Codex adapter layer, not a fork of the workflow.
   main session: recall first, plan, implement one phase at a time, verify with
   commands, then capture only durable signal.
 - Keep subagents read-only against MKG. The main orchestrator owns any
-  `project_add_learning` / `project_add_decision` writes to avoid duplicate or
+  `project_add_learning` writes to avoid duplicate or
   conflicting captures.
 - When querying Neo4j through MCP, wrap temporal values with `toString(...)` so
   date/datetime values do not serialize as `{}`.

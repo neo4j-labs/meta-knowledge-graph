@@ -26,8 +26,8 @@ re-derive context the graph already holds or repeat a past mistake.
 
 1. **Get scoped context.** Call
    `mcp__meta-knowledge-graph__project_get_context` with a `query` built from the
-   task ($ARGUMENTS) to fulltext-rank the most relevant `:Learning` and
-   `:Decision` nodes for this project, plus durable user-scoped learnings.
+   task ($ARGUMENTS) to fulltext-rank the most relevant `:Learning` nodes for
+   this project, plus durable user-scoped learnings.
    - If the read-only **`mkg-recall`** subagent is available, prefer it for a
      ranked, summarized lookup; it returns only the relevant facts with their
      status and confidence. Otherwise call the MCP tool directly.
@@ -40,7 +40,8 @@ re-derive context the graph already holds or repeat a past mistake.
      source of anti-patterns to grep for later.
    - `candidate` `:Learning` → **hints.** Useful, but review-gated — don't treat
      as binding law.
-   - `:Decision` → **context**, not policy. Prior choices and their rationale.
+   - A learning that records a past **decision** → **context**, not policy: a
+     prior choice and its rationale, folded into the learning text.
    - Respect scope: `project` learnings are about this repo/environment; `user`
      learnings are durable facts about the person and apply across every project.
 3. **Build a memory brief** — a short, ranked list of the constraints, decisions,
@@ -107,17 +108,19 @@ fresh but carry the plan context and the memory brief.
 ## Phase 3 — Capture (close the loop)
 
 The Stop / SessionEnd hooks already run an LLM extractor over the whole session
-and write `:Learning` / `:Decision` **candidates** automatically — so **do not**
-dump a transcript or double-record routine work. Capture deliberately, only the
-**durable signal future sessions will need** that the extractor might miss:
+and write `:Learning` **candidates** automatically (durable facts and decisions
+alike) — so **do not** dump a transcript or double-record routine work. Capture
+deliberately, only the **durable signal future sessions will need** that the
+extractor might miss:
 
 - A constraint the user asserted or a correction they made mid-run.
 - A design **decision** taken during execution and its rationale.
 - A non-obvious anti-pattern verification surfaced (e.g. "API X has no `foo`
   param; calling it errors at runtime").
 
-Write facts/corrections with `mcp__meta-knowledge-graph__project_add_learning`
-and design decisions with `mcp__meta-knowledge-graph__project_add_decision`:
+Write facts, corrections, and design decisions with
+`mcp__meta-knowledge-graph__project_add_learning` (fold a decision's rationale
+into the learning text):
 
 - Keep it **small, durable, and reusable** (<=500 chars). No ephemeral state.
 - Set `scope: "project"` for a fact about this repo/environment, or

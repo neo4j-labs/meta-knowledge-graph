@@ -16,7 +16,7 @@ optional add-ons.
 | `seed_bigquery.py` | Loads `accounts`, `products`, `account_product_usage`, `account_contacts`, `account_renewals`. |
 | `run_neocarta.py` | Builds the Neocarta catalog from the seeded BigQuery dataset, then backfills LiteLLM embeddings. |
 | `seed_neo4j.py` | Loads `:Account` / `:Product` / `:Contact` / `:CSM` nodes **and the relationships** (`USES_PRODUCT`, `HAS_CONTACT`, `OWNS`). |
-| `seed_learnings.py` | Seeds bootstrap `:Learning` / `:Decision` nodes so the first session starts with scoped project memory. |
+| `seed_learnings.py` | Seeds bootstrap `:Learning` nodes (durable facts and decisions alike) so the first session starts with scoped project memory. |
 | `seed_system_prompt.py` | Persists `system_prompt.md` to a `(:SystemPrompt)` node. |
 | `system_prompt.md` | The sales-assistant persona prompt. |
 | `seed_all.py` | Runs the mandatory Neo4j-backed seeders, plus BigQuery/Neocarta when configured and reachable. |

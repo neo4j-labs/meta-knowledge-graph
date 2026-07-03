@@ -193,7 +193,7 @@ uv run --project "$ROOT" python "$ROOT/import/sales_agent/run_neocarta.py"
 
 ### Project scoping of bootstrap memory
 
-`seed_learnings.py` attaches its `:Learning` / `:Decision` nodes to the **same
+`seed_learnings.py` attaches its `:Learning` nodes to the **same
 project the SessionStart hook will scope recall to**, resolved the same way the
 hook does: it honors `MKG_PROJECT_ID` if the hooks have pinned it, otherwise
 derives the project from your active project dir (`CLAUDE_PROJECT_DIR` → nearest

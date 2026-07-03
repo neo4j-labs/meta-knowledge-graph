@@ -27,14 +27,17 @@ exists from prior context — the mounted set varies per session and per `.env`.
    prefix may be `mcp__plugin_meta-knowledge-graph_meta-knowledge-graph__*`).
 2. **If none are present**, the MCP server is not mounted. Stop the flow and tell
    the user to set `NEO4J_URI` / `NEO4J_USERNAME` / `NEO4J_PASSWORD` (and an LLM
-   provider key) in `~/.config/meta-knowledge-graph/.env`, then restart the
-   session. Do not continue until the tools appear.
+   credential — a `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` to reuse the
+   Claude subscription, or any litellm provider key such as `OPENAI_API_KEY` /
+   `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` as the fallback) in
+   `~/.config/meta-knowledge-graph/.env`, then restart the session. Do not
+   continue until the tools appear.
 3. **If they are present**, report which capability groups are live by what you
    see — this is a fact about the environment, not a guess:
 
    | Group | Tools | Mounted when |
    |---|---|---|
-   | Project memory & graph | `project_get_context`, `project_add_learning`, `project_add_decision`, `neo4j_get_schema`, `neo4j_read_cypher` | Always |
+   | Project memory & graph | `project_get_context`, `project_add_learning`, `neo4j_get_schema`, `neo4j_read_cypher` | Always |
    | Diffbot research | `search_news`, `enhance_entity` | `DIFFBOT_TOKEN` set |
    | BigQuery warehouse | `bigquery_execute_query` | `BIGQUERY_MCP_URL` set |
    | Neocarta catalog | `neocarta_*` | `GCP_PROJECT_ID` + `BIGQUERY_DATASET_ID` + embedding key set |

@@ -233,11 +233,9 @@ def _known_tool_intent(tool_name: str, tool_input: dict[str, Any]) -> tuple[str,
         return "run a shell command for project work", "command output", 0.62
 
     if "project_get_context" in lowered_name:
-        return "recall scoped project memory", "relevant learnings and decisions", 0.9
+        return "recall scoped project memory", "relevant learnings", 0.9
     if "project_add_learning" in lowered_name:
         return "persist durable project context", "created or updated learning", 0.92
-    if "project_add_decision" in lowered_name:
-        return "persist durable project context", "created or updated decision", 0.92
     if "neo4j_get_schema" in lowered_name:
         return "inspect live graph schema", "node labels, relationships, and properties", 0.9
     if "neo4j_read_cypher" in lowered_name:

@@ -37,7 +37,7 @@ exists from prior context — the mounted set varies per session and per `.env`.
 
    | Group | Tools | Mounted when |
    |---|---|---|
-   | Project memory & graph | `project_get_context`, `project_add_learning`, `project_add_decision`, `neo4j_get_schema`, `neo4j_read_cypher` | Always |
+   | Project memory & graph | `project_get_context`, `project_add_learning`, `neo4j_get_schema`, `neo4j_read_cypher` | Always |
    | Diffbot research | `search_news`, `enhance_entity` | `DIFFBOT_TOKEN` set |
    | BigQuery warehouse | `bigquery_execute_query` | `BIGQUERY_MCP_URL` set |
    | Neocarta catalog | `neocarta_*` | `GCP_PROJECT_ID` + `BIGQUERY_DATASET_ID` + embedding key set |

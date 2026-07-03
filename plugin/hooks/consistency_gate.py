@@ -1,4 +1,4 @@
-"""Consistency gate for freshly-extracted :Learning / :Decision candidates.
+"""Consistency gate for freshly-extracted :Learning candidates.
 
 The Stop extractor (``--mode turn``) writes candidates with
 ``status = 'candidate'``. This module turns that status into an *automated
@@ -69,9 +69,8 @@ from project_common import (
 
 _VECTOR_INDEXES: list[tuple[str, str]] = [
     ("Learning", "project_learning_vector"),
-    ("Decision", "project_decision_vector"),
     # Episodic observations are indexed for search but never gated: the gate
-    # queries :Learning / :Decision explicitly and ignores this label.
+    # queries :Learning explicitly and ignores this label.
     ("Observation", "project_observation_vector"),
 ]
 
@@ -95,7 +94,7 @@ def _topk() -> int:
 # Schema
 # --------------------------------------------------------------------------- #
 def ensure_memory_vector_indexes(driver, database: str) -> None:
-    """Create cosine vector indexes on :Learning / :Decision / :Observation ``embedding``.
+    """Create cosine vector indexes on :Learning / :Observation ``embedding``.
 
     ``project_id`` / ``scope`` / ``status`` are declared as index metadata
     (``WITH [...]``) so the ``SEARCH`` clause can pre-filter on them in-index.
@@ -123,10 +122,7 @@ def ensure_memory_vector_indexes(driver, database: str) -> None:
 # --------------------------------------------------------------------------- #
 def _embedding_input(row: dict[str, Any]) -> str | None:
     text = (row.get("text") or "").strip()
-    if not text:
-        return None
-    rationale = (row.get("rationale") or "").strip()
-    return f"{text}\n{rationale}".strip() if rationale else text
+    return text or None
 
 
 def attach_candidate_embeddings(*row_groups: list[dict[str, Any]]) -> bool:
@@ -456,7 +452,7 @@ the two statements cannot both be true at the same time (e.g. "we use REST" vs \
 "we use GraphQL", "deploy on Fridays" vs "never deploy on Fridays")?
 
 (2) ALREADY LEARNED: is the candidate simply a RESTATEMENT of one existing item — \
-the same fact/decision in different words, adding no materially new constraint or \
+the same fact in different words, adding no materially new constraint or \
 detail (a paraphrase, or a strict subset of what the existing item already says)? \
 This applies whether the existing item is approved or itself a candidate. \
 If it refines or adds a genuinely new constraint, it is NOT already learned and \
@@ -745,7 +741,6 @@ def run_consistency_gate(
     *,
     project: ProjectRef,
     learning_rows: list[dict[str, Any]],
-    decision_rows: list[dict[str, Any]],
     model: str | None,
     timestamp: str,
 ) -> dict[str, int]:
@@ -762,11 +757,11 @@ def run_consistency_gate(
     keep ``status = 'candidate'``.
     """
     if not consistency_gate_enabled():
-        return {"learnings": 0, "decisions": 0}
+        return {"learnings": 0}
     ready, reason = llm_readiness_status(model)
     if not ready:
         print(f"[consistency_gate] judge unavailable ({reason}); leaving candidates", flush=True)
-        return {"learnings": 0, "decisions": 0}
+        return {"learnings": 0}
 
     def _gatable(row: dict[str, Any]) -> bool:
         return (
@@ -776,7 +771,6 @@ def run_consistency_gate(
         )
 
     learning_creates = [r for r in learning_rows if _gatable(r)]
-    decision_creates = [r for r in decision_rows if _gatable(r)]
 
     checked_learnings = _gate_one_label(
         driver,
@@ -790,19 +784,7 @@ def run_consistency_gate(
         model=model,
         timestamp=timestamp,
     )
-    checked_decisions = _gate_one_label(
-        driver,
-        database,
-        project=project,
-        label="Decision",
-        index_name="project_decision_vector",
-        fulltext_index="project_decision_fulltext",
-        kind="decision",
-        rows=decision_creates,
-        model=model,
-        timestamp=timestamp,
-    )
-    return {"learnings": checked_learnings, "decisions": checked_decisions}
+    return {"learnings": checked_learnings}
 
 
 # --------------------------------------------------------------------------- #
@@ -812,7 +794,6 @@ DEFAULT_SWEEP_LIMIT = 8
 
 _SWEEP_LABELS = (
     ("learnings", "Learning", "project_learning_vector", "project_learning_fulltext", "learning"),
-    ("decisions", "Decision", "project_decision_vector", "project_decision_fulltext", "decision"),
 )
 
 
@@ -851,7 +832,6 @@ def _fetch_ungated_candidates(
           AND NOT n.id IN $exclude_ids
         RETURN n.id AS id,
                n.text AS text,
-               n.rationale AS rationale,
                n.confidence AS confidence,
                n.scope AS scope,
                n.embedding AS embedding
@@ -923,14 +903,14 @@ def sweep_ungated_candidates(
     excluded for the same reason as in :func:`run_consistency_gate`.
     """
     if not consistency_gate_enabled():
-        return {"learnings": 0, "decisions": 0}
+        return {"learnings": 0}
     limit = sweep_limit()
     if limit <= 0:
-        return {"learnings": 0, "decisions": 0}
+        return {"learnings": 0}
     ready, reason = llm_readiness_status(model)
     if not ready:
         print(f"[consistency_gate] sweep skipped: judge unavailable ({reason})", flush=True)
-        return {"learnings": 0, "decisions": 0}
+        return {"learnings": 0}
 
     counts: dict[str, int] = {}
     for key, label, index_name, fulltext_index, kind in _SWEEP_LABELS:

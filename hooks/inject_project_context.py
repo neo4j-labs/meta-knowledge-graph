@@ -18,10 +18,8 @@ if str(HOOK_DIR) not in sys.path:
 from project_common import (  # noqa: E402
     ensure_project_schema,
     embed_text,
-    fetch_project_decisions,
     fetch_project_learnings,
     fetch_recent_observations,
-    fetch_user_decisions,
     fetch_user_learnings,
     format_learning_context,
     load_mkg_env,
@@ -66,9 +64,7 @@ def main() -> int:
     query_vector = embed_text(prompt) if prompt else None
     context_scope = context_scope_for_hook(hook_event)
     user_learnings: list[dict] = []
-    user_decisions: list[dict] = []
     learnings: list[dict] = []
-    decisions: list[dict] = []
     observations: list[dict] = []
 
     try:
@@ -96,14 +92,6 @@ def main() -> int:
                         exclude_session_id=exclude_session_id,
                         query_vector=query_vector,
                     )
-                    user_decisions = fetch_user_decisions(
-                        driver,
-                        database,
-                        query=prompt,
-                        limit=5,
-                        exclude_session_id=exclude_session_id,
-                        query_vector=query_vector,
-                    )
                 else:
                     learnings = fetch_project_learnings(
                         driver,
@@ -115,32 +103,17 @@ def main() -> int:
                         exclude_session_id=exclude_session_id,
                         query_vector=query_vector,
                     )
-                    decisions = fetch_project_decisions(
-                        driver,
-                        database,
-                        project_id=project.id,
-                        query=prompt,
-                        limit=3,
-                        exclude_session_id=exclude_session_id,
-                        query_vector=query_vector,
-                    )
                 learning_ids = [
                     learning["id"]
                     for learning in (*user_learnings, *learnings)
                     if learning.get("id")
                 ]
                 mark_learnings_used(driver, database, learning_ids)
-                decision_ids = [
-                    decision["id"]
-                    for decision in (*user_decisions, *decisions)
-                    if decision.get("id")
-                ]
                 mark_injected_in_session(
                     driver,
                     database,
                     session_id,
                     learning_ids,
-                    decision_ids,
                     hook_event,
                     source=payload.get("source"),
                     prompt=payload.get("prompt"),
@@ -152,9 +125,7 @@ def main() -> int:
     context = format_learning_context(
         project,
         learnings,
-        decisions,
         user_learnings,
-        user_decisions,
         observations=observations,
     )
     if not context:

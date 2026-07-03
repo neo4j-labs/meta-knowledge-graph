@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backfill embeddings on existing :Learning / :Decision nodes.
+"""Backfill embeddings on existing :Learning nodes.
 
 The consistency gate retrieves prior *approved* neighbours through a vector
 index, so items that predate the gate need an ``embedding`` property before they
@@ -101,7 +101,7 @@ def main() -> int:
         if not args.dry_run:
             ensure_memory_vector_indexes(driver, database)
         with driver.session(database=database) as session:
-            for label in ("Learning", "Decision"):
+            for label in ("Learning",):
                 total, embedded = backfill(
                     label, session, only_missing=not args.all, dry_run=args.dry_run
                 )

@@ -19,7 +19,7 @@ Graph shape::
     (Session)-[:LATEST_EVENT]->(latest SessionEvent)
     (Session)-[:HAS_SUBAGENT]->(Session)
     (SubagentSession)-[:TRIGGERED_BY|STARTED_AT|ENDED_AT]->(SessionEvent)
-    (Learning|Decision)-[:INJECTED_AT]->(SessionEvent)  # back-filled for
+    (Learning)-[:INJECTED_AT]->(SessionEvent)  # back-filled for
         SessionStart / UserPromptSubmit events whose parallel inject hook
         already marked memory as injected in this session.
 
@@ -340,9 +340,8 @@ def _link_injected_memory(tx, session_id: str, event_id: str, event_name: str) -
         """
         MATCH (e:SessionEvent {event_id: $event_id})
         MATCH (s:Session {session_id: $session_id})
-        MATCH (m)-[inj:INJECTED_IN]->(s)
-        WHERE (m:Learning OR m:Decision)
-          AND inj.hook_event = $event_name
+        MATCH (m:Learning)-[inj:INJECTED_IN]->(s)
+        WHERE inj.hook_event = $event_name
           AND inj.last_injected_at >= datetime($since)
           AND NOT EXISTS {
               MATCH (m)-[:INJECTED_AT]->(recent:SessionEvent)
