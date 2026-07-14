@@ -1311,6 +1311,83 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(params[0]["llm_status"], "skipped")
         self.assertEqual(params[0]["llm_skip_reason"], "Claude OAuth token unavailable")
 
+    def test_update_path_guards_ownership_and_demotes_approved(self) -> None:
+        queries: list[str] = []
+        params: list[dict] = []
+
+        class FakeTx:
+            def run(self, query: str, **kwargs):
+                queries.append(query)
+                params.append(kwargs)
+
+        update_rows = [
+            {
+                "id": "learning:mkg:existing",
+                "action": "update",
+                "text": "Revised claim.",
+                "task_pattern": None,
+                "confidence": 0.9,
+                "status": "candidate",
+                "scope": "project",
+                "source": "hooks-stop",
+                "summary": "Revised claim.",
+                "reason": "Refined.",
+                "llm_model": "anthropic/claude-haiku-4-5",
+            }
+        ]
+        process_project._write_processing(
+            FakeTx(),
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "session-1",
+            "turn",
+            [{"event_id": "event-1"}],
+            update_rows,
+            "anthropic/claude-haiku-4-5",
+            "called",
+            None,
+            None,
+            "2026-06-17T12:00:00+00:00",
+        )
+        update_query = next(q for q in queries if "UPDATED_LEARNING" in q)
+        # Ownership guard: user-scoped OR owned by this project — blocks a
+        # session rewriting another project's project-scoped memory (LG-01).
+        self.assertIn("WHERE l.scope = 'user' OR (p)-[:HAS_LEARNING]->(l)", update_query)
+        # A content change to an approved note demotes it back to candidate and
+        # strips its human provenance, forcing re-review.
+        self.assertIn("AS demoted", update_query)
+        self.assertIn("l.status = CASE WHEN demoted THEN 'candidate' ELSE l.status END", update_query)
+        self.assertIn("l.reviewed_by = CASE WHEN demoted THEN null", update_query)
+        # Demotion re-opens the item for the gate/sweep.
+        self.assertIn("l.consistency_checked_at = CASE WHEN demoted THEN null", update_query)
+
+    def test_review_queue_count_targets_unresolved_populations(self) -> None:
+        captured: dict = {}
+
+        class FakeDriver:
+            def execute_query(self, query, **kwargs):
+                captured["query"] = query
+                captured["params"] = kwargs
+                return [{"pending": 3}]
+
+        count = project_common.count_review_queue(FakeDriver(), "neo4j", "mkg")
+        self.assertEqual(count, 3)
+        # User candidates (any project) plus this project's ambiguous conflicts.
+        self.assertIn("l.scope = 'user'", captured["query"])
+        self.assertIn("l.consistency_status = 'ambiguous'", captured["query"])
+        self.assertEqual(captured["params"]["project_id"], "mkg")
+
+    def test_review_queue_fetch_orders_oldest_first_with_conflicts(self) -> None:
+        captured: dict = {}
+
+        class FakeDriver:
+            def execute_query(self, query, **kwargs):
+                captured["query"] = query
+                return []
+
+        project_common.fetch_review_queue(FakeDriver(), "neo4j", "mkg", limit=7)
+        self.assertIn("CONTRADICTS", captured["query"])
+        self.assertIn("ORDER BY updated_at ASC", captured["query"])
+
     def test_user_scoped_learning_is_namespaced_above_the_project(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
         actions = {
@@ -1398,6 +1475,28 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("What we know about the user", context)
         self.assertIn("Prefers terse", context)
         self.assertIn("Treat user facts as durable context", context)
+
+    def test_learning_context_nudges_when_review_pending(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        context = project_common.format_learning_context(
+            project, [], [], review_pending=3
+        )
+        self.assertIn("3 learning items awaiting your review", context)
+        self.assertIn("/mkg-review", context)
+
+    def test_learning_context_no_nudge_when_queue_empty(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        context = project_common.format_learning_context(
+            project,
+            [{"text": "A fact.", "status": "approved", "confidence": 0.9}],
+            review_pending=0,
+        )
+        self.assertNotIn("awaiting your review", context)
+        # An otherwise-empty context still surfaces solely to carry the nudge.
+        only_nudge = project_common.format_learning_context(
+            project, [], [], review_pending=1
+        )
+        self.assertIn("1 learning item awaiting your review", only_nudge)
 
     def test_fetch_learnings_excludes_injected_and_in_session_memory(self) -> None:
         captured: list[tuple[str, dict]] = []

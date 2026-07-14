@@ -1311,17 +1311,20 @@ def consolidation_interval_hours() -> float:
 
 
 def count_user_profile_memories_pending(driver, database: str) -> int:
-    """Count user-scoped candidate learnings still awaiting consolidation.
+    """Count human-approved user-scoped learnings still awaiting consolidation.
 
-    A learning counts as pending when it has never been folded into the prompt
-    (``consolidated_at`` unset) or has been edited since it last was, so a fact
-    that changes after consolidation re-enters the review backlog.
+    Only ``approved`` user facts are folded into the cross-project persona: a
+    human owns the ``candidate -> approved`` promotion (via the review queue),
+    so an unreviewed candidate can never rewrite the persona on its own. A
+    learning counts as pending when it has been approved but never folded into
+    the prompt (``consolidated_at`` unset) or has been edited since it last was,
+    so a fact that changes after consolidation re-enters the backlog.
     """
     record = _execute_query_single(
         driver,
         database,
         """
-        MATCH (l:Learning {scope: 'user', status: 'candidate'})
+        MATCH (l:Learning {scope: 'user', status: 'approved'})
         WHERE l.consolidated_at IS NULL
            OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
         RETURN count(l) AS pending
@@ -1335,12 +1338,16 @@ def fetch_user_profile_memories_pending(
     database: str,
     limit: int = 40,
 ) -> list[dict[str, Any]]:
-    """Fetch the user-scoped candidate learnings the consolidation should fold in."""
+    """Fetch the human-approved user-scoped learnings the consolidation folds in.
+
+    Approved-only: candidates are excluded so an unreviewed (and possibly
+    poisoned) user fact cannot reach the persona without a human decision.
+    """
     records = _execute_query(
         driver,
         database,
         """
-        MATCH (l:Learning {scope: 'user', status: 'candidate'})
+        MATCH (l:Learning {scope: 'user', status: 'approved'})
         WHERE l.consolidated_at IS NULL
            OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
         RETURN l.id AS id,
@@ -1352,6 +1359,85 @@ def fetch_user_profile_memories_pending(
                  toString(coalesce(l.updated_at, l.created_at)) DESC
         LIMIT $limit
         """,
+        limit=limit,
+    )
+    return [dict(record) for record in records]
+
+
+def count_review_queue(driver, database: str, project_id: str) -> int:
+    """Count learnings awaiting a human decision for this project.
+
+    Two populations need a person, because the automatic consistency gate
+    deliberately cannot resolve them:
+    - user-scoped ``candidate`` learnings (project-independent): never
+      auto-approved because they mutate the cross-project persona, so a human
+      owns their ``candidate -> approved`` promotion; and
+    - project-scoped ``candidate`` learnings the gate left ``ambiguous`` — a
+      genuine contradiction where it could not tell which side is right.
+    """
+    record = _execute_query_single(
+        driver,
+        database,
+        """
+        MATCH (l:Learning {status: 'candidate'})
+        WHERE l.scope = 'user'
+           OR (l.scope = 'project'
+               AND l.project_id = $project_id
+               AND l.consistency_status = 'ambiguous')
+        RETURN count(l) AS pending
+        """,
+        project_id=project_id,
+    )
+    return int(record["pending"]) if record else 0
+
+
+def fetch_review_queue(
+    driver,
+    database: str,
+    project_id: str,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Return the human-review queue, oldest first, with contradiction context.
+
+    Mirrors :func:`count_review_queue`'s two populations and attaches, for each
+    item, the existing learnings it was judged to contradict (``CONTRADICTS``)
+    so a reviewer can choose keep-new / keep-existing / keep-both with both
+    sides in view. Oldest-first drains the backlog without starvation.
+    """
+    records = _execute_query(
+        driver,
+        database,
+        """
+        CALL () {
+            MATCH (l:Learning {scope: 'user', status: 'candidate'})
+            RETURN l
+          UNION
+            MATCH (l:Learning {scope: 'project', status: 'candidate'})
+            WHERE l.project_id = $project_id
+              AND l.consistency_status = 'ambiguous'
+            RETURN l
+        }
+        OPTIONAL MATCH (l)-[:CONTRADICTS]->(other:Learning)
+        WITH l, collect(
+            CASE WHEN other IS NULL THEN null
+            ELSE {id: other.id, text: other.text, status: other.status,
+                  confidence: other.confidence} END
+        ) AS raw
+        RETURN l.id AS id,
+               l.scope AS scope,
+               l.text AS text,
+               l.confidence AS confidence,
+               CASE
+                   WHEN l.scope = 'user' THEN 'user_scoped_candidate'
+                   ELSE 'ambiguous_contradiction'
+               END AS reason,
+               coalesce(l.consistency_status, 'unreviewed') AS consistency_status,
+               toString(coalesce(l.updated_at, l.created_at)) AS updated_at,
+               [c IN raw WHERE c IS NOT NULL] AS conflicts
+        ORDER BY updated_at ASC
+        LIMIT $limit
+        """,
+        project_id=project_id,
         limit=limit,
     )
     return [dict(record) for record in records]
@@ -2033,6 +2119,7 @@ def format_learning_context(
     learnings: list[dict[str, Any]],
     user_learnings: list[dict[str, Any]] | None = None,
     observations: list[dict[str, Any]] | None = None,
+    review_pending: int = 0,
 ) -> str:
     user_learnings = user_learnings or []
     observations = observations or []
@@ -2040,6 +2127,7 @@ def format_learning_context(
         not learnings
         and not user_learnings
         and not observations
+        and not review_pending
     ):
         return ""
 
@@ -2081,6 +2169,16 @@ def format_learning_context(
                 f"- [{status}{confidence_text}] "
                 f"{truncate(str(learning.get('text') or ''), 240)}"
             )
+    if review_pending:
+        plural = "item" if review_pending == 1 else "items"
+        lines.extend(
+            [
+                "",
+                f"{review_pending} learning {plural} awaiting your review — "
+                "ambiguous contradictions and user-scoped facts the automatic "
+                "gate left for a human. Run /mkg-review to resolve them.",
+            ]
+        )
     lines.extend(
         [
             "",
