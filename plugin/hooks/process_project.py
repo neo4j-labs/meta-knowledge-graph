@@ -737,6 +737,19 @@ def _write_processing(
             MATCH (pp:ProjectProcessing {id: $processing_id})
             UNWIND $learnings AS row
             MATCH (l:Learning {id: row.id})
+            // Ownership guard: automation may only update memory this project
+            // owns, or project-independent user-scoped facts. Blocks one
+            // project's session silently rewriting another project's memory
+            // through an LLM-supplied id.
+            WHERE l.scope = 'user' OR (p)-[:HAS_LEARNING]->(l)
+            WITH p, s, pp, l, row,
+                 // A content change to an approved note is a NEW, unreviewed
+                 // claim. Demote it back to candidate so it re-enters the gate
+                 // (and, if ambiguous, the human queue) instead of inheriting
+                 // the approved badge and human provenance.
+                 (l.status = 'approved'
+                  AND row.text IS NOT NULL
+                  AND row.text <> l.text) AS demoted
             SET l.text = coalesce(row.text, l.text),
                 l.task_pattern = coalesce(row.task_pattern, l.task_pattern),
                 l.summary = coalesce(row.summary, l.summary),
@@ -744,9 +757,17 @@ def _write_processing(
                 l.last_source_session_id = $session_id,
                 l.last_reason = row.reason,
                 l.last_llm_model = coalesce(row.llm_model, l.last_llm_model),
-                l.project_id = $project_id,
+                l.project_id = coalesce(l.project_id, $project_id),
                 l.updated_at = datetime($timestamp),
                 l.support_count = coalesce(l.support_count, 0) + 1,
+                l.status = CASE WHEN demoted THEN 'candidate' ELSE l.status END,
+                l.reviewed_by = CASE WHEN demoted THEN null ELSE l.reviewed_by END,
+                l.reviewed_at = CASE WHEN demoted THEN null ELSE l.reviewed_at END,
+                // Re-open the demoted item for the gate/sweep (which key on a
+                // null consistency_checked_at); the embedding is kept so it
+                // stays searchable and can be re-judged.
+                l.consistency_status = CASE WHEN demoted THEN null ELSE l.consistency_status END,
+                l.consistency_checked_at = CASE WHEN demoted THEN null ELSE l.consistency_checked_at END,
                 l.confidence = CASE
                     WHEN coalesce(l.confidence, 0.0) < row.confidence THEN row.confidence
                     ELSE l.confidence
@@ -755,7 +776,8 @@ def _write_processing(
             MERGE (l)-[:FROM_SESSION]->(s)
             MERGE (pp)-[updated:UPDATED_LEARNING]->(l)
             SET updated.llm_model = row.llm_model,
-                updated.updated_at = datetime($timestamp)
+                updated.updated_at = datetime($timestamp),
+                updated.demoted_from_approved = demoted
             """,
             project_id=project.id,
             session_id=session_id,

@@ -16,6 +16,7 @@ if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
 from project_common import (  # noqa: E402
+    count_review_queue,
     ensure_project_schema,
     embed_text,
     fetch_project_learnings,
@@ -66,6 +67,7 @@ def main() -> int:
     user_learnings: list[dict] = []
     learnings: list[dict] = []
     observations: list[dict] = []
+    review_pending = 0
 
     try:
         from neo4j import GraphDatabase
@@ -91,6 +93,11 @@ def main() -> int:
                         limit=5,
                         exclude_session_id=exclude_session_id,
                         query_vector=query_vector,
+                    )
+                    # A once-per-session nudge toward /mkg-review when items are
+                    # waiting on a human (ambiguous conflicts, user candidates).
+                    review_pending = count_review_queue(
+                        driver, database, project_id=project.id
                     )
                 else:
                     learnings = fetch_project_learnings(
@@ -127,6 +134,7 @@ def main() -> int:
         learnings,
         user_learnings,
         observations=observations,
+        review_pending=review_pending,
     )
     if not context:
         return 0

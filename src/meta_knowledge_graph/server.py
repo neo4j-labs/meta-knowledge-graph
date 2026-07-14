@@ -1194,6 +1194,217 @@ def create_mcp_server(
 
         return json.dumps(dict(record) if record else {}, default=str)
 
+    @mcp.tool(name="project_review_queue")
+    async def project_review_queue(
+        project_id: Optional[str] = Field(
+            None,
+            description="Project id (slug). Defaults to the MCP server's CWD folder name.",
+        ),
+        limit: int = Field(20, description="Max queued items to return."),
+    ) -> str:
+        """List learnings awaiting a human decision, oldest first.
+
+        Surfaces exactly the two populations the automatic consistency gate
+        cannot resolve on its own: user-scoped ``candidate`` learnings (which
+        mutate the cross-project persona, so a human owns their promotion) and
+        project-scoped ``candidate`` learnings the gate left ``ambiguous`` — a
+        genuine contradiction it could not adjudicate. Each item carries the
+        existing learnings it contradicts so a reviewer can choose keep-new,
+        keep-existing, or keep-both. Resolve items with ``project_resolve_learning``.
+        """
+        resolved_pid = _resolve_project_id(project_id)
+        records = await _execute_query(
+            """
+            CALL () {
+                MATCH (l:Learning {scope: 'user', status: 'candidate'})
+                RETURN l
+              UNION
+                MATCH (l:Learning {scope: 'project', status: 'candidate'})
+                WHERE l.project_id = $project_id
+                  AND l.consistency_status = 'ambiguous'
+                RETURN l
+            }
+            OPTIONAL MATCH (l)-[:CONTRADICTS]->(other:Learning)
+            WITH l, collect(
+                CASE WHEN other IS NULL THEN null
+                ELSE {id: other.id, text: other.text, status: other.status,
+                      confidence: other.confidence} END
+            ) AS raw
+            RETURN l.id AS id,
+                   l.scope AS scope,
+                   l.text AS text,
+                   l.confidence AS confidence,
+                   CASE
+                       WHEN l.scope = 'user' THEN 'user_scoped_candidate'
+                       ELSE 'ambiguous_contradiction'
+                   END AS reason,
+                   coalesce(l.consistency_status, 'unreviewed') AS consistency_status,
+                   toString(coalesce(l.updated_at, l.created_at)) AS updated_at,
+                   [c IN raw WHERE c IS NOT NULL] AS conflicts
+            ORDER BY updated_at ASC
+            LIMIT $limit
+            """,
+            project_id=resolved_pid,
+            limit=limit,
+        )
+        items = [dict(r) for r in records]
+        return json.dumps(
+            {"project_id": resolved_pid, "count": len(items), "queue": items},
+            default=str,
+        )
+
+    @mcp.tool(name="project_resolve_learning")
+    async def project_resolve_learning(
+        learning_id: str = Field(
+            ..., description="Id of the candidate learning to resolve (from project_review_queue)."
+        ),
+        action: str = Field(
+            ...,
+            description=(
+                "approve | reject | edit_approve | keep_new | keep_existing | keep_both. "
+                "keep_* resolve a contradiction: keep_new supersedes the existing item, "
+                "keep_existing rejects this candidate, keep_both approves and clears the conflict."
+            ),
+        ),
+        edited_text: Optional[str] = Field(
+            None, description="Replacement text; required for edit_approve."
+        ),
+        conflict_id: Optional[str] = Field(
+            None,
+            description=(
+                "For keep_new/keep_existing: the specific contradicting learning id to "
+                "resolve against. Defaults to every item this candidate contradicts."
+            ),
+        ),
+    ) -> str:
+        """Apply a human decision to a queued learning candidate.
+
+        Human decisions carry provenance (``reviewed_by='human'``) and reuse the
+        same status transitions and edges as the automatic gate, so recall, the
+        sweep, and consolidation need no special-casing. Approvals clear the
+        item's unresolved ``CONTRADICTS`` edges; ``keep_new`` supersedes the
+        losing item (``SUPERSEDES``, embedding dropped); ``keep_existing``
+        rejects the candidate (``CONTRADICTED_BY``); rejects drop the embedding
+        so the item leaves live retrieval. An approved user-scoped fact becomes
+        eligible for persona consolidation — which folds approved facts only.
+        """
+        action = (action or "").strip().lower()
+        allowed = {"approve", "reject", "edit_approve", "keep_new", "keep_existing", "keep_both"}
+        if action not in allowed:
+            return _json_error(f"unknown action {action!r}", allowed=sorted(allowed))
+        clean_id = (learning_id or "").strip()
+        if not clean_id:
+            return _json_error("learning_id is required")
+        timestamp = _now_iso()
+
+        target = await _execute_query_single(
+            "MATCH (l:Learning {id: $id}) "
+            "RETURN l.id AS id, l.status AS status, l.scope AS scope, l.text AS text",
+            id=clean_id,
+        )
+        if not target:
+            return _json_error("learning not found", learning_id=clean_id)
+
+        if action == "edit_approve":
+            new_text = _truncate((edited_text or "").strip())
+            if not new_text:
+                return _json_error("edited_text is required for edit_approve")
+            embedding = await _embed_learning_text(new_text)
+            await _execute_query(
+                """
+                MATCH (l:Learning {id: $id})
+                SET l.text = $text, l.summary = $text,
+                    l.embedding = coalesce($embedding, l.embedding),
+                    l.status = 'approved',
+                    l.reviewed_by = 'human', l.reviewed_at = datetime($ts),
+                    l.consistency_status = 'human_reviewed',
+                    l.updated_at = datetime($ts)
+                WITH l OPTIONAL MATCH (l)-[r:CONTRADICTS]->() DELETE r
+                """,
+                id=clean_id, text=new_text, embedding=embedding, ts=timestamp,
+            )
+        elif action in {"approve", "keep_both"}:
+            await _execute_query(
+                """
+                MATCH (l:Learning {id: $id})
+                SET l.status = 'approved',
+                    l.reviewed_by = 'human', l.reviewed_at = datetime($ts),
+                    l.consistency_status = 'human_reviewed',
+                    l.updated_at = datetime($ts)
+                WITH l OPTIONAL MATCH (l)-[r:CONTRADICTS]->() DELETE r
+                """,
+                id=clean_id, ts=timestamp,
+            )
+        elif action == "reject":
+            await _execute_query(
+                """
+                MATCH (l:Learning {id: $id})
+                SET l.status = 'rejected',
+                    l.reviewed_by = 'human', l.reviewed_at = datetime($ts),
+                    l.rejected_at = datetime($ts),
+                    l.rejected_reason = 'human_review',
+                    l.embedding = null,
+                    l.updated_at = datetime($ts)
+                WITH l OPTIONAL MATCH (l)-[r:CONTRADICTS]->() DELETE r
+                """,
+                id=clean_id, ts=timestamp,
+            )
+        elif action == "keep_new":
+            await _execute_query(
+                """
+                MATCH (c:Learning {id: $id})
+                SET c.status = 'approved',
+                    c.reviewed_by = 'human', c.reviewed_at = datetime($ts),
+                    c.consistency_status = 'human_reviewed',
+                    c.updated_at = datetime($ts)
+                WITH c
+                OPTIONAL MATCH (c)-[r:CONTRADICTS]->(old:Learning)
+                WHERE $conflict_id IS NULL OR old.id = $conflict_id
+                FOREACH (_ IN CASE WHEN old IS NULL THEN [] ELSE [1] END |
+                    SET old.status = 'rejected',
+                        old.embedding = null,
+                        old.rejected_at = datetime($ts),
+                        old.rejected_reason = 'human_superseded_by:' + c.id
+                    MERGE (c)-[s:SUPERSEDES]->(old)
+                    SET s.created_at = datetime($ts), s.source = 'human_review'
+                )
+                DELETE r
+                """,
+                id=clean_id, conflict_id=conflict_id, ts=timestamp,
+            )
+        elif action == "keep_existing":
+            await _execute_query(
+                """
+                MATCH (c:Learning {id: $id})
+                SET c.status = 'rejected',
+                    c.reviewed_by = 'human', c.reviewed_at = datetime($ts),
+                    c.rejected_at = datetime($ts),
+                    c.rejected_reason = 'human_kept_existing',
+                    c.embedding = null,
+                    c.updated_at = datetime($ts)
+                WITH c
+                OPTIONAL MATCH (c)-[r:CONTRADICTS]->(keep:Learning)
+                WHERE $conflict_id IS NULL OR keep.id = $conflict_id
+                FOREACH (_ IN CASE WHEN keep IS NULL THEN [] ELSE [1] END |
+                    MERGE (c)-[b:CONTRADICTED_BY]->(keep)
+                    SET b.created_at = datetime($ts), b.source = 'human_review'
+                )
+                DELETE r
+                """,
+                id=clean_id, conflict_id=conflict_id, ts=timestamp,
+            )
+
+        result = await _execute_query_single(
+            "MATCH (l:Learning {id: $id}) "
+            "RETURN l.id AS id, l.status AS status, l.scope AS scope, "
+            "l.reviewed_by AS reviewed_by, l.consistency_status AS consistency_status",
+            id=clean_id,
+        )
+        return json.dumps(
+            {"action": action, "learning": dict(result) if result else {}},
+            default=str,
+        )
+
     return mcp
 
 
