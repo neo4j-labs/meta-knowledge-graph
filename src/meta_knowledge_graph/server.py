@@ -563,7 +563,7 @@ def create_mcp_server(
         if exclude_consolidated_user_facts:
             filters.append(
                 "(node.consolidated_at IS NULL "
-                "OR toString(coalesce(node.updated_at, node.created_at)) > node.consolidated_at)"
+                "OR coalesce(node.updated_at, node.created_at) > node.consolidated_at)"
             )
         post_filter = "\n          AND ".join(filters)
         rank_limit = max(1, int(limit))
@@ -1029,7 +1029,7 @@ def create_mcp_server(
                     MATCH (l:Learning {scope: 'user'})
                     WHERE l.status IN $statuses
                       AND (l.consolidated_at IS NULL
-                           OR toString(coalesce(l.updated_at, l.created_at)) > l.consolidated_at)
+                           OR coalesce(l.updated_at, l.created_at) > l.consolidated_at)
                     RETURN l.id AS id, l.text AS text, l.status AS status,
                            l.confidence AS confidence, l.task_pattern AS task_pattern,
                            0.0 AS score

@@ -57,7 +57,7 @@ RETURN
   COUNT {
     MATCH (l:Learning {scope:'user', status:'candidate'})
     WHERE l.consolidated_at IS NULL
-       OR toString(coalesce(l.updated_at, l.created_at)) > l.consolidated_at
+       OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
     RETURN l
   } AS pending_user_memories
 ```

@@ -1706,7 +1706,7 @@ def _fetch_memory_hybrid(
     if exclude_consolidated_user_facts:
         filters.append(
             "(node.consolidated_at IS NULL "
-            "OR toString(coalesce(node.updated_at, node.created_at)) > node.consolidated_at)"
+            "OR coalesce(node.updated_at, node.created_at) > node.consolidated_at)"
         )
     post_filter = "\n          AND ".join(filters)
     rank_limit = max(1, limit)
@@ -1925,7 +1925,7 @@ def fetch_user_learnings(
                 WHERE node.scope = 'user'
                   AND node.status IN $statuses
                   AND (node.consolidated_at IS NULL
-                       OR toString(coalesce(node.updated_at, node.created_at)) > node.consolidated_at)
+                       OR coalesce(node.updated_at, node.created_at) > node.consolidated_at)
                   AND ($session_id IS NULL OR (
                        NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                        AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
