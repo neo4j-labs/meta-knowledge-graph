@@ -250,6 +250,31 @@ class PendingCountQueryTests(unittest.TestCase):
         self.assertNotIn("status: 'candidate'", captured["query"])
 
 
+class MkgStartCommandTests(unittest.TestCase):
+    def test_custom_persona_path_counts_approved_user_memories(self) -> None:
+        for path in (
+            ROOT / "commands" / "mkg-start.md",
+            ROOT / "plugin" / "commands" / "mkg-start.md",
+        ):
+            text = path.read_text()
+            self.assertIn(
+                "MATCH (l:Learning {scope:'user', status:'approved'})",
+                text,
+                str(path),
+            )
+            self.assertIn("human-approved user-scoped memories", text, str(path))
+            self.assertIn(
+                "service counts `scope:'user', status:'approved'` facts",
+                text,
+                str(path),
+            )
+            self.assertNotIn(
+                "consolidation service only counts `scope:'user'` candidates",
+                text,
+                str(path),
+            )
+
+
 class ConsolidationFencingTests(unittest.TestCase):
     def test_user_facts_are_fenced_as_untrusted_data(self) -> None:
         prompt = consolidate.build_consolidation_prompt(

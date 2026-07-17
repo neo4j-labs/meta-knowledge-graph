@@ -1282,10 +1282,8 @@ def upsert_prompt_node(tx, label: str, name: str, content: str, now: str) -> dic
 #
 # A rate-limited service (hooks/consolidate_system_prompt.py) folds durable
 # user-profile facts into the persisted (:SystemPrompt) when enough of them have
-# piled up unreviewed. "In need of review" means a user-scoped :Learning still
-# sitting in the candidate queue that has not yet been folded into the prompt.
-# Default threshold is "more than 5"; the cooldown keeps it from re-firing on
-# every Stop/SessionEnd.
+# been human-approved but not yet folded into the prompt. Default threshold is
+# "more than 5"; the cooldown keeps it from re-firing on every Stop/SessionEnd.
 USER_PROFILE_REVIEW_THRESHOLD = 5
 PROMPT_CONSOLIDATION_INTERVAL_HOURS = 24.0
 

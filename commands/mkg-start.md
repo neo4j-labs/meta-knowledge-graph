@@ -55,7 +55,7 @@ RETURN
   COUNT { MATCH (sp:SystemPrompt {name:'default'}) RETURN sp } AS has_persona,
   COUNT { MATCH (a:Account) RETURN a } AS accounts,
   COUNT {
-    MATCH (l:Learning {scope:'user', status:'candidate'})
+    MATCH (l:Learning {scope:'user', status:'approved'})
     WHERE l.consolidated_at IS NULL
        OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
     RETURN l
@@ -76,9 +76,9 @@ Interpret the state:
 - `has_persona = 0` → no custom persona seeded; SessionStart is falling back to
   the generic MKG bootstrap prompt. A clean slate for **either** path.
 - `accounts > 0` → the RoadFlex sales graph is already seeded.
-- `pending_user_memories` → how many user-scoped memories are queued for the
-  persona consolidation service (it fires once **more than 5** are pending; see
-  Path B).
+- `pending_user_memories` → how many human-approved user-scoped memories are
+  waiting to be folded into the persona (it fires once **more than 5** are
+  pending; see Path B).
 
 ## Step 3 — Offer the two paths
 
@@ -116,9 +116,10 @@ persona was just seeded so SessionStart injects it.
 You will **learn the purpose of the agent** from the user, store it as durable
 **user-scoped** memories, and let MKG's consolidation service fold those into a
 custom system prompt. The mechanism: the Stop / SessionEnd
-`consolidate_system_prompt` service folds pending **user-scoped** candidate
-learnings into `(:SystemPrompt {name:'default'})` once **more than 5** are
-pending — so **6 user memories** is the trigger that regenerates the persona.
+`consolidate_system_prompt` service folds pending **human-approved
+user-scoped** learnings into `(:SystemPrompt {name:'default'})` once **more than
+5** are pending. Raw candidates first go through `/mkg-review`; approving **6
+user memories** is the trigger that regenerates the persona on a clean graph.
 
 ### B1 — Interview for the purpose
 
@@ -135,9 +136,11 @@ Ask concise questions (skip any already known from injected context). Cover:
 
 Write each answer as one concise, reusable fact (≤500 chars, no transcripts) via
 `project_add_learning` with **`scope: "user"`**. User scope
-is required — the consolidation service only counts `scope:'user'` candidates,
-and these facts should follow the user across projects. The tool is idempotent on
-(scope, text), so make the six **distinct**. Template — fill from the interview:
+is required because these facts should follow the user across projects. The tool
+writes candidates; the reviewer must approve them before the consolidation
+service counts `scope:'user', status:'approved'` facts. The tool is idempotent
+on (scope, text), so make the six **distinct**. Template — fill from the
+interview:
 
 1. *Mission:* "<Name> wants an agent that <does X> over <domain Y> to achieve <Z>."
 2. *Role:* "<Name> is a <role> responsible for <responsibilities>."
@@ -146,9 +149,9 @@ and these facts should follow the user across projects. The tool is idempotent o
 5. *Guardrails:* "Always <constraint>; never <anti-pattern>."
 6. *Success:* "Success means <criteria>; standing priorities are <priorities>."
 
-After writing, re-run the `pending_user_memories` count from Step 2 and confirm
-it is **> 5** (account for any already pending — capture enough new, distinct
-facts to clear the threshold; six fresh ones always do on a clean graph).
+After writing, run `/mkg-review` and approve or edit-approve the facts the user
+accepts. Then re-run the `pending_user_memories` count from Step 2 and confirm
+it is **> 5** (account for any already approved-and-unconsolidated facts).
 
 ### B3 — Trigger and verify the persona
 
