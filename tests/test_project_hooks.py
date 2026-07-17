@@ -745,6 +745,30 @@ class ProjectHookTests(unittest.TestCase):
         self.assertNotIn("system_prompt_updates", prompt)
         self.assertNotIn("memory_extraction_prompt_updates", prompt)
 
+    def test_memory_prompt_shows_user_scoped_facts_for_dedup(self) -> None:
+        # The shortlist is what the extractor deduplicates against, so user facts
+        # must be visible and labelled with their scope. A scope the extractor
+        # cannot see is a scope it can only ever "create" into, which is how
+        # restatements of one user fact pile up as separate review-queue items.
+        prompt = process_project.build_memory_extraction_prompt(
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "turn",
+            [{"event_name": "UserPromptSubmit", "prompt": "I want critical review, not feature work."}],
+            [
+                {
+                    "id": "learning:user:existing",
+                    "status": "approved",
+                    "scope": "user",
+                    "task_pattern": None,
+                    "text": "Tomaz wants proactive, critical assessment of the memory architecture.",
+                }
+            ],
+        )
+
+        self.assertIn("learning:user:existing", prompt)
+        self.assertIn("scope=user", prompt)
+        self.assertIn("restatement of a listed user fact is an update to that", prompt)
+
     def test_memory_prompt_renders_the_code_constant(self) -> None:
         # The prompt is a fixed code constant — no Neo4j fetch, no template
         # override — rendered with the project, corpus, and existing memory.
@@ -1605,6 +1629,51 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(len(captured), 2)
         for query, _ in captured:
             self.assertIn("consolidated_at IS NULL", query)
+        # Injection is the default consumer and keeps folded facts hidden.
+        self.assertIs(captured[-1][1]["include_consolidated"], False)
+
+    def test_fetch_user_learnings_can_include_consolidated_for_the_extractor(self) -> None:
+        # The extractor deduplicates against this list, so a fact already folded
+        # into the persona has to stay visible: hidden, it looks brand new and
+        # gets re-created on the next mention.
+        captured: list[tuple[str, dict]] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.fetch_user_learnings(
+            FakeDriver(), "neo4j", query="Tomaz", include_consolidated=True
+        )
+        project_common.fetch_user_learnings(
+            FakeDriver(), "neo4j", query=None, include_consolidated=True
+        )
+
+        self.assertTrue(captured)
+        # Hybrid builds the predicate into the query text; the fallbacks take it
+        # as a parameter. Neither may filter consolidated facts out here.
+        self.assertNotIn("consolidated_at", captured[0][0])
+        for query, params in captured[1:]:
+            self.assertIn("$include_consolidated", query)
+            self.assertIs(params["include_consolidated"], True)
+
+    def test_fetch_user_learnings_fallbacks_return_scope(self) -> None:
+        # _format_existing_memory defaults a missing scope to "project", so a
+        # fallback that drops scope would show the extractor user facts wearing
+        # the wrong label.
+        captured: list[tuple[str, dict]] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query="Tomaz")
+        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query=None)
+
+        for query, _ in captured:
+            self.assertIn("scope AS scope", query)
             self.assertIn("coalesce(", query)
             self.assertIn("> ", query)
             self.assertIn("consolidated_at", query)

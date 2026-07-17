@@ -34,6 +34,7 @@ from project_common import (  # noqa: E402
     embed_texts,
     extraction_model_label,
     fetch_project_learnings,
+    fetch_user_learnings,
     has_project_work_events,
     in_extraction_subprocess,
     learning_id,
@@ -79,9 +80,11 @@ Current completed work:
 [[EXISTING_MEMORY]]
 
 Decide whether this completed work contains durable memory worth storing.
-Prefer updating existing memory when it is materially the same idea. Create a new
-item only for a distinct reusable learning. Return ignore when the work is
-routine, transient, or already covered without needing reinforcement.
+Prefer updating existing memory when it is materially the same idea. The existing
+list spans both scopes; a restatement of a listed user fact is an update to that
+id, not a new item. Create a new item only for a distinct reusable learning.
+Return ignore when the work is routine, transient, or already covered without
+needing reinforcement.
 
 A learning is any durable, reusable fact worth recalling in a future session:
 reusable facts, environment quirks, domain observations, durable user
@@ -986,11 +989,26 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     limit=8,
                     query_vector=query_vector,
                 )
+                # User facts belong in the same shortlist as project ones: this
+                # list is what the extractor deduplicates against, and a scope
+                # it cannot see is a scope it can only ever "create" into. Left
+                # out, every restatement of a durable user fact mints a new node
+                # (the id is a hash of the text, so paraphrases never collide)
+                # and lands in the human review queue as a fresh discovery.
+                similar_user_learnings = fetch_user_learnings(
+                    driver,
+                    database,
+                    query=corpus,
+                    statuses=["approved", "candidate"],
+                    limit=5,
+                    query_vector=query_vector,
+                    include_consolidated=True,
+                )
                 prompt = build_memory_extraction_prompt(
                     project,
                     mode,
                     events,
-                    similar_learnings,
+                    similar_learnings + similar_user_learnings,
                 )
                 model_name = resolve_llm_model(_llm_model_for_processing_events(events))
                 llm_model_used = extraction_model_label(model_name)

@@ -1889,6 +1889,7 @@ def fetch_user_learnings(
     limit: int = 5,
     exclude_session_id: str | None = None,
     query_vector: list[float] | None = None,
+    include_consolidated: bool = False,
 ) -> list[dict[str, Any]]:
     """Fetch durable, cross-project facts about the user (``scope = 'user'``).
 
@@ -1896,6 +1897,13 @@ def fetch_user_learnings(
     user fact applies in every project, so the query spans all of them. Dedup
     still skips anything already injected into or first produced during the
     active session.
+
+    ``include_consolidated`` selects between the two consumers. Context
+    injection leaves it ``False``: a fact already folded into the persona is
+    live in the system prompt, so re-injecting it only burns context. The
+    memory extractor passes ``True``, because its copy of this list is what it
+    deduplicates *against* — hiding a consolidated fact there would make it
+    look brand new and get it re-created on the next mention.
     """
     statuses = statuses or ["approved", "candidate"]
     if query and query.strip():
@@ -1909,7 +1917,7 @@ def fetch_user_learnings(
             statuses=statuses,
             limit=limit,
             exclude_session_id=exclude_session_id,
-            exclude_consolidated_user_facts=True,
+            exclude_consolidated_user_facts=not include_consolidated,
         )
         if rows:
             return rows
@@ -1922,7 +1930,8 @@ def fetch_user_learnings(
                 YIELD node, score
                 WHERE node.scope = 'user'
                   AND node.status IN $statuses
-                  AND (node.consolidated_at IS NULL
+                  AND ($include_consolidated
+                       OR node.consolidated_at IS NULL
                        OR coalesce(node.updated_at, node.created_at) > node.consolidated_at)
                   AND ($session_id IS NULL OR (
                        NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
@@ -1932,6 +1941,7 @@ def fetch_user_learnings(
                        node.status AS status,
                        node.confidence AS confidence,
                        node.task_pattern AS task_pattern,
+                       node.scope AS scope,
                        score
                 ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
                          score DESC,
@@ -1942,6 +1952,7 @@ def fetch_user_learnings(
                 statuses=statuses,
                 limit=limit,
                 session_id=exclude_session_id,
+                include_consolidated=include_consolidated,
             )
             rows = [dict(record) for record in records]
             if rows:
@@ -1955,7 +1966,8 @@ def fetch_user_learnings(
         """
         MATCH (l:Learning {scope: 'user'})
         WHERE l.status IN $statuses
-          AND (l.consolidated_at IS NULL
+          AND ($include_consolidated
+               OR l.consolidated_at IS NULL
                OR coalesce(l.updated_at, l.created_at) > l.consolidated_at)
           AND ($session_id IS NULL OR (
                NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id})
@@ -1965,6 +1977,7 @@ def fetch_user_learnings(
                l.status AS status,
                l.confidence AS confidence,
                l.task_pattern AS task_pattern,
+               l.scope AS scope,
                0.0 AS score
         ORDER BY CASE l.status WHEN 'approved' THEN 0 ELSE 1 END,
                  toString(coalesce(l.last_used_at, l.updated_at, l.created_at)) DESC
@@ -1973,6 +1986,7 @@ def fetch_user_learnings(
         statuses=statuses,
         limit=limit,
         session_id=exclude_session_id,
+        include_consolidated=include_consolidated,
     )
     return [dict(record) for record in records]
 
