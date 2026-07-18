@@ -1399,8 +1399,9 @@ def fetch_review_queue(
 
     Mirrors :func:`count_review_queue`'s two populations and attaches, for each
     item, the existing learnings it was judged to contradict (``CONTRADICTS``)
-    so a reviewer can choose keep-new / keep-existing / keep-both with both
-    sides in view. Oldest-first drains the backlog without starvation.
+    plus the judge's stated reason for punting (``judge_reason``, stamped on
+    the edge by the gate) so a reviewer sees both sides *and* why the machine
+    could not decide. Oldest-first drains the backlog without starvation.
     """
     records = _execute_query(
         driver,
@@ -1415,11 +1416,12 @@ def fetch_review_queue(
               AND l.consistency_status = 'ambiguous'
             RETURN l
         }
-        OPTIONAL MATCH (l)-[:CONTRADICTS]->(other:Learning)
+        OPTIONAL MATCH (l)-[edge:CONTRADICTS]->(other:Learning)
         WITH l, collect(
             CASE WHEN other IS NULL THEN null
             ELSE {id: other.id, text: other.text, status: other.status,
-                  confidence: other.confidence} END
+                  confidence: other.confidence,
+                  judge_reason: coalesce(edge.reason, '')} END
         ) AS raw
         RETURN l.id AS id,
                l.scope AS scope,

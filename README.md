@@ -386,11 +386,13 @@ available and falls back to the fulltext index when it is not. No contradiction,
 or a contradiction the candidate wins, promotes it to `approved` (and rejects the
 item it supersedes); an existing item that the judge finds clearly more reliable
 vetoes the candidate to `rejected`; a genuinely ambiguous conflict leaves it
-`candidate` (with `consistency_status = 'ambiguous'`) for a human. That human gate
+`candidate` (with `consistency_status = 'ambiguous'`) for a human — stamping the
+judge's stated reason for punting on the `CONTRADICTS` edge. That human gate
 is real, not a placeholder: `project_review_queue` surfaces exactly the two
 populations the gate cannot resolve itself — ambiguous project-scoped conflicts
 and user-scoped candidates — oldest first with their contradicting neighbours
-attached, and `project_resolve_learning` applies the decision (`approve`,
+attached (each carrying the judge's rationale as `judge_reason`, so the reviewer
+sees why the machine could not decide), and `project_resolve_learning` applies the decision (`approve`,
 `reject`, `edit_approve`, or the conflict resolutions `keep_new` / `keep_existing`
 / `keep_both`) using the same status transitions and edges as the automatic gate,
 stamping `reviewed_by = 'human'` so a later gate run does not silently overturn

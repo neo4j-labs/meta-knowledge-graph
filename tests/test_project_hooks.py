@@ -1510,6 +1510,8 @@ class ProjectHookTests(unittest.TestCase):
         project_common.fetch_review_queue(FakeDriver(), "neo4j", "mkg", limit=7)
         self.assertIn("CONTRADICTS", captured["query"])
         self.assertIn("ORDER BY updated_at ASC", captured["query"])
+        # Each conflict carries the judge's punt rationale off the edge.
+        self.assertIn("judge_reason: coalesce(edge.reason, '')", captured["query"])
 
     def test_user_scoped_learning_is_namespaced_above_the_project(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")

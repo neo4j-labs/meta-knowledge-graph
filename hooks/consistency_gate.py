@@ -24,7 +24,9 @@ approval gate*. It runs only at Stop, never at SessionEnd:
      the canonical item's ``support_count`` is reinforced (+1) and its confidence raised
    - candidate wins a conflict .. candidate -> ``approved``; loser -> ``rejected`` (``SUPERSEDES``)
    - an existing item vetoes .... candidate -> ``rejected`` (``CONTRADICTED_BY``); existing stays approved
-   - only ambiguous conflicts ... candidate stays ``candidate`` (``CONTRADICTS``) for the human gate
+   - only ambiguous conflicts ... candidate stays ``candidate`` (``CONTRADICTS``) for the human gate;
+     the judge's stated reason for punting is stamped on the edge so the
+     reviewer sees why the pair needs a person
 
 Resolutions are applied per candidate, immediately after judging it, so later
 candidates in the same batch retrieve the updated statuses — two restatements
@@ -538,6 +540,7 @@ def _resolve(
     """
     valid_ids = {item["id"] for item in neighbours}
     superseded, vetoed, unclear = [], [], []
+    unclear_reasons: dict[str, str] = {}
     for conflict in contradictions:
         existing_id = conflict["existing_id"]
         if existing_id not in valid_ids or existing_id == candidate_id:
@@ -548,6 +551,7 @@ def _resolve(
             superseded.append(existing_id)
         else:
             unclear.append(existing_id)
+            unclear_reasons.setdefault(existing_id, str(conflict.get("reason") or ""))
 
     already_id = (
         already_learned_of
@@ -572,7 +576,14 @@ def _resolve(
         "consistency": consistency,
         "superseded_ids": sorted(set(superseded)) if outcome == "approved" else [],
         "contradicted_by_ids": sorted(set(vetoed)) if outcome == "rejected" else [],
-        "unclear_ids": sorted(set(unclear)) if outcome == "candidate" else [],
+        "unclear_conflicts": (
+            [
+                {"id": uid, "reason": unclear_reasons.get(uid, "")}
+                for uid in sorted(set(unclear))
+            ]
+            if outcome == "candidate"
+            else []
+        ),
         "already_learned_ids": [already_id] if outcome == "already_learned" else [],
     }
 
@@ -615,10 +626,13 @@ def _apply_resolutions(tx, *, label: str, rows: list[dict[str, Any]], model: str
             RETURN count(*) AS vetoed
         }}
         CALL (c, row) {{
-            UNWIND row.unclear_ids AS uid
-            MATCH (other:{label} {{id: uid}})
+            UNWIND row.unclear_conflicts AS u
+            MATCH (other:{label} {{id: u.id}})
             MERGE (c)-[r:CONTRADICTS]->(other)
-            SET r.created_at = datetime($timestamp)
+            // The judge's rationale rides on the edge: it is the review
+            // queue's explanation of why this pair needs a human.
+            SET r.created_at = datetime($timestamp),
+                r.reason = u.reason
             RETURN count(*) AS unclear
         }}
         CALL (c, row) {{

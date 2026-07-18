@@ -32,45 +32,64 @@ passing `project_id` only if the user named one in the argument.
   stop — do not hand-edit the graph with raw Cypher to approve memory.
 - If `count` is `0`, report that the queue is empty and stop.
 
-## Step 2 — Walk the items, oldest first
+## Step 2 — Triage: show the whole queue first
 
-The queue is ordered oldest-first. For **each** item, show the user:
+Present every queued item up front as a compact numbered list, oldest first —
+one or two lines per item:
 
-- the learning `text`, its `scope` (`user` or `project`), and `reason`
-  (`user_scoped_candidate` or `ambiguous_contradiction`);
-- for a contradiction, every entry in `conflicts` — the existing learning(s) it
-  clashes with — so both sides are visible before deciding.
+- **Kind, in plain words** — say "a fact about you" for
+  `user_scoped_candidate` and "a conflicting project fact" for
+  `ambiguous_contradiction`. Never show the raw reason codes.
+- **The learning text** (trim to ~120 characters; offer to expand).
+- **Age** — a human age derived from `updated_at` ("2 days ago"), not the raw
+  timestamp.
+- For a conflict, one line per `conflicts` entry — "clashes with: <existing
+  text>" — plus the judge's `judge_reason` when present, so the user sees why
+  the machine could not decide (e.g. *judge: both describe current retrieval;
+  cannot tell which is live*).
 
-Then ask the user how to resolve it. Present only the choices that fit the item:
+Then ask for decisions. Offer the choices in **plain language** and map them to
+wire actions yourself — the snake_case action names are API vocabulary and must
+not appear in the conversation:
 
-| Item kind | Offer |
+| Item kind | Offer (plain label → wire action) |
 |---|---|
-| User-scoped candidate (no conflict) | **approve**, **edit_approve**, **reject** |
-| Ambiguous contradiction | **keep_new**, **keep_existing**, **keep_both**, **reject** |
+| Fact about the user (no conflict) | "keep it" → `approve` · "fix the wording" → `edit_approve` · "discard it" → `reject` |
+| Conflicting project fact | "the new one is right" → `keep_new` · "the existing one is right" → `keep_existing` · "both are true" → `keep_both` · "discard the new one" → `reject` |
 
-What each decision means:
+What each choice does (explain when recommending, or on request):
 
-- **approve** — promote to `approved` (trusted). For a user fact, this makes it
+- **keep it** (`approve`) — promote to trusted memory. A user fact becomes
   eligible for persona consolidation.
-- **edit_approve** — fix the wording first (pass `edited_text`), then approve.
-- **reject** — drop it from live memory.
-- **keep_new** — the new candidate wins; the existing item it contradicts is
-  superseded and rejected.
-- **keep_existing** — the existing item wins; reject this candidate.
-- **keep_both** — the two are actually compatible; approve the candidate and
-  clear the contradiction.
+- **fix the wording** (`edit_approve`) — the user supplies or confirms a
+  rewrite (passed as `edited_text`), then it is promoted.
+- **discard it** (`reject`) — drop it from live memory.
+- **the new one is right** (`keep_new`) — the candidate wins; the existing
+  item it clashes with is superseded and retired.
+- **the existing one is right** (`keep_existing`) — existing memory wins; the
+  candidate is retired.
+- **both are true** (`keep_both`) — the two are compatible; keep the candidate
+  and clear the conflict.
 
-Recommend a default when the right call is obvious (e.g. `keep_new` when the
-candidate is clearly newer and the old item is stale), but let the user decide.
-Do not batch — confirm each item individually. These are durable writes.
+Collecting decisions may be batched; deciding for the user may not. The user
+can answer several items in one message ("keep 1 and 2, discard 3, show me 4 in
+full") — treat that as N explicit decisions. Never resolve an item the user did
+not explicitly decide: anything unaddressed stays queued for next time. With
+three or fewer items, walking them one at a time is fine too. Expand any item
+to full detail (complete text, both sides of a conflict, confidence, judge
+reason) whenever the user asks or seems unsure.
+
+Recommend a default when the right call is obvious (e.g. "the new one is
+right" when the existing item is clearly stale), but let the user decide.
+These are durable writes.
 
 ## Step 3 — Apply each decision
 
-For each item, call `project_resolve_learning` with its `learning_id` and the
-chosen `action`. Pass `edited_text` for `edit_approve`. For `keep_new` /
-`keep_existing` against a specific conflicting item, pass its id as `conflict_id`
-(omit to resolve against all of them). Report the returned status back to the
-user in one line, then move to the next item.
+For each decided item, call `project_resolve_learning` with its `learning_id`
+and the mapped wire `action`. Pass `edited_text` for a rewording. For "the
+new/existing one is right" against one specific conflicting item, pass its id
+as `conflict_id` (omit to resolve against all of them). Report one plain-words
+line per item — e.g. "#2 kept — now trusted memory" — then continue.
 
 ## Step 4 — Close out
 

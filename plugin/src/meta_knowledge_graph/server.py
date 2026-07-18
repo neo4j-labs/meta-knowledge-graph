@@ -1209,7 +1209,8 @@ def create_mcp_server(
         mutate the cross-project persona, so a human owns their promotion) and
         project-scoped ``candidate`` learnings the gate left ``ambiguous`` — a
         genuine contradiction it could not adjudicate. Each item carries the
-        existing learnings it contradicts so a reviewer can choose keep-new,
+        existing learnings it contradicts, each with the judge's stated reason
+        for punting (``judge_reason``), so a reviewer can choose keep-new,
         keep-existing, or keep-both. Resolve items with ``project_resolve_learning``.
         """
         resolved_pid = _resolve_project_id(project_id)
@@ -1224,11 +1225,12 @@ def create_mcp_server(
                   AND l.consistency_status = 'ambiguous'
                 RETURN l
             }
-            OPTIONAL MATCH (l)-[:CONTRADICTS]->(other:Learning)
+            OPTIONAL MATCH (l)-[edge:CONTRADICTS]->(other:Learning)
             WITH l, collect(
                 CASE WHEN other IS NULL THEN null
                 ELSE {id: other.id, text: other.text, status: other.status,
-                      confidence: other.confidence} END
+                      confidence: other.confidence,
+                      judge_reason: coalesce(edge.reason, '')} END
             ) AS raw
             RETURN l.id AS id,
                    l.scope AS scope,

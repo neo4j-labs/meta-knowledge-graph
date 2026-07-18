@@ -79,7 +79,9 @@ class ResolveTests(unittest.TestCase):
             [{"existing_id": "a", "winner": "unclear", "reason": "??"}],
         )
         self.assertEqual(res["outcome"], "candidate")
-        self.assertEqual(res["unclear_ids"], ["a"])
+        # The judge's reason travels with the unclear conflict so the human
+        # review queue can show why the pair was punted.
+        self.assertEqual(res["unclear_conflicts"], [{"id": "a", "reason": "??"}])
 
     def test_conflict_on_unknown_id_is_ignored(self):
         res = consistency_gate._resolve(
@@ -374,7 +376,7 @@ class TombstoneTests(unittest.TestCase):
                     "consistency": "superseded_conflicts",
                     "superseded_ids": ["old"],
                     "contradicted_by_ids": [],
-                    "unclear_ids": [],
+                    "unclear_conflicts": [],
                     "already_learned_ids": [],
                 }
             ],
@@ -388,6 +390,36 @@ class TombstoneTests(unittest.TestCase):
         self.assertIn(
             "WHEN row.outcome IN ['rejected', 'already_learned'] THEN null", query
         )
+
+    def test_apply_resolutions_stamps_judge_reason_on_contradicts(self):
+        captured: list[str] = []
+
+        class _Tx:
+            def run(self, query, **params):
+                captured.append(query)
+
+        consistency_gate._apply_resolutions(
+            _Tx(),
+            label="Learning",
+            rows=[
+                {
+                    "id": "cand",
+                    "outcome": "candidate",
+                    "consistency": "ambiguous",
+                    "superseded_ids": [],
+                    "contradicted_by_ids": [],
+                    "unclear_conflicts": [{"id": "other", "reason": "both current"}],
+                    "already_learned_ids": [],
+                }
+            ],
+            model="m",
+            timestamp="2026-07-01T00:00:00Z",
+        )
+        query = captured[0]
+        # The ambiguous edge carries the judge's rationale for the human
+        # review queue.
+        self.assertIn("UNWIND row.unclear_conflicts AS u", query)
+        self.assertIn("r.reason = u.reason", query)
 
 
 class PerRowApplyTests(unittest.TestCase):
