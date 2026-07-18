@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -31,6 +33,103 @@ process_project = load_hook_module("process_project")
 log_event = load_hook_module("log_event")
 inject_project_context = load_hook_module("inject_project_context")
 enrich_events = load_hook_module("enrich_events")
+
+
+# The repo root is the dev checkout; plugin/ is the payload the marketplace
+# installs (marketplace.json points its source at "./plugin"). Both carry the
+# same hooks and server code as verbatim copies, and only this test keeps them
+# honest: the suite imports the checkout, so drift means the installed plugin
+# runs code no test ever exercised. Run scripts/sync_plugin_payload.py to fix.
+MIRRORED_TREES = ("hooks", "src", "commands", "import")
+
+# Package-only files, exempt from the mirror. The checkout's Codex hooks live at
+# .codex/hooks.json and resolve the repo root via git, so the payload keeps its
+# own variant that resolves CODEX_PLUGIN_ROOT instead.
+PACKAGE_ONLY_FILES = {"hooks": frozenset({"codex-hooks.json"})}
+
+_MIRROR_IGNORED_DIRS = frozenset({"__pycache__", ".venv", ".pytest_cache", ".ruff_cache"})
+
+# Every manifest that restates the plugin version. A release bumps all of them
+# by hand, so they drift one forgotten file at a time — and a payload whose
+# manifest disagrees with the marketplace entry installs as the wrong version.
+VERSIONED_MANIFESTS = (
+    ".claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+    ".codex-plugin/plugin.json",
+    "plugin/.claude-plugin/plugin.json",
+    "plugin/.codex-plugin/plugin.json",
+    "pyproject.toml",
+    "plugin/pyproject.toml",
+)
+
+
+def manifest_version(path: Path) -> str:
+    """Read the declared plugin version out of a manifest of any shape."""
+    text = path.read_text()
+    if path.suffix == ".toml":
+        match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        return match.group(1) if match else ""
+    payload = json.loads(text)
+    if "plugins" in payload:  # marketplace.json nests the version per entry
+        return payload["plugins"][0].get("version", "")
+    return payload.get("version", "")
+
+
+def tree_digests(root: Path) -> dict[str, str]:
+    """Map every build-relevant file under ``root`` to a digest of its bytes."""
+    digests: dict[str, str] = {}
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix == ".pyc":
+            continue
+        relative = path.relative_to(root)
+        if _MIRROR_IGNORED_DIRS.intersection(relative.parts):
+            continue
+        digests[relative.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return digests
+
+
+class PluginPayloadParityTests(unittest.TestCase):
+    def test_plugin_payload_is_byte_identical_to_checkout(self) -> None:
+        for tree in MIRRORED_TREES:
+            with self.subTest(tree=tree):
+                checkout = tree_digests(ROOT / tree)
+                packaged = tree_digests(ROOT / "plugin" / tree)
+                for name in PACKAGE_ONLY_FILES.get(tree, frozenset()):
+                    packaged.pop(name, None)
+
+                # Guard the guard: an empty side means a tree moved and this
+                # test would otherwise pass by comparing nothing to nothing.
+                self.assertTrue(checkout, f"{tree}/ has no files to mirror")
+
+                self.assertEqual(
+                    sorted(checkout),
+                    sorted(packaged),
+                    f"{tree}/ and plugin/{tree}/ no longer hold the same files. "
+                    "Run: uv run scripts/sync_plugin_payload.py",
+                )
+
+                drifted = sorted(
+                    name for name, digest in checkout.items() if packaged.get(name) != digest
+                )
+                self.assertEqual(
+                    drifted,
+                    [],
+                    f"plugin/{tree}/ has drifted from {tree}/. "
+                    "Run: uv run scripts/sync_plugin_payload.py",
+                )
+
+    def test_plugin_version_agrees_across_manifests(self) -> None:
+        versions = {path: manifest_version(ROOT / path) for path in VERSIONED_MANIFESTS}
+
+        for path, version in versions.items():
+            with self.subTest(manifest=path):
+                self.assertTrue(version, f"{path} declares no version")
+
+        self.assertEqual(
+            len(set(versions.values())),
+            1,
+            f"Release manifests disagree on the plugin version: {versions}",
+        )
 
 
 class ProjectHookTests(unittest.TestCase):
