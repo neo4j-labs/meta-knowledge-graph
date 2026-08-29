@@ -12,6 +12,7 @@ from typing import Any, List, Literal, Optional
 import httpx
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
+from fastmcp.server import create_proxy
 from neo4j import AsyncGraphDatabase, AsyncDriver
 from neo4j.exceptions import Neo4jError
 from pydantic import Field
@@ -473,10 +474,15 @@ logger = logging.getLogger(__name__)
 
 
 def _neocarta_transport(env: dict[str, str]) -> StdioTransport:
-    """Run the Neocarta MCP entry point from MKG's own uv-managed environment."""
+    """Run the Neocarta MCP server in its own uv-managed environment.
+
+    Neocarta's MCP extra pins fastmcp<3 while MKG runs fastmcp>=3, so the
+    entry point can no longer share MKG's venv; uvx resolves neocarta's own
+    pins into a cached, isolated environment instead.
+    """
     return StdioTransport(
-        command="neocarta-mcp",
-        args=[],
+        command="uvx",
+        args=["--from", "neocarta[mcp]>=0.8.0", "neocarta-mcp"],
         env=env,
     )
 
@@ -491,7 +497,7 @@ def create_mcp_server(
     mcp = FastMCP("meta-knowledge-graph")
 
     # Mount official Neo4j MCP server (read-only: excludes write-cypher)
-    neo4j_mcp_proxy = FastMCP.as_proxy(
+    neo4j_mcp_proxy = create_proxy(
         StdioTransport(
             command="neo4j-mcp-server",
             args=[],
@@ -506,10 +512,10 @@ def create_mcp_server(
     )
     mcp.mount(
         neo4j_mcp_proxy,
-        prefix="neo4j",
+        namespace="neo4j",
         tool_names={
-            "get-schema": "neo4j_get_schema",
-            "read-cypher": "neo4j_read_cypher",
+            "get-schema": "get_schema",
+            "read-cypher": "read_cypher",
         },
     )
 
@@ -674,7 +680,7 @@ def create_mcp_server(
 
     # Mount Neo4j Agent Memory MCP server (https://github.com/neo4j-labs/agent-memory)
     # if os.environ.get("OPENAI_API_KEY"):
-    #     agent_memory_proxy = FastMCP.as_proxy(
+    #     agent_memory_proxy = create_proxy(
     #         StdioTransport(
     #             command="uvx",
     #             args=["--from", "neo4j-agent-memory[mcp,openai]", "neo4j-agent-memory", "mcp", "serve"],
@@ -747,10 +753,10 @@ def create_mcp_server(
             neocarta_env["GOOGLE_APPLICATION_CREDENTIALS"] = sa_path
             logger.info(f"Wrote GCP_SERVICE_ACCOUNT_JSON to {sa_path}")
 
-        neocarta_proxy = FastMCP.as_proxy(
+        neocarta_proxy = create_proxy(
             _neocarta_transport(neocarta_env)
         )
-        mcp.mount(neocarta_proxy, prefix="neocarta")
+        mcp.mount(neocarta_proxy, namespace="neocarta")
         logger.info("Mounted Neocarta MCP proxy")
     else:
         missing = [v for v in neocarta_required if not os.environ.get(v)]

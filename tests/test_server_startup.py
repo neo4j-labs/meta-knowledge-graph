@@ -25,11 +25,11 @@ def _server_function_def(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     return defs[0]
 
 
-def test_neocarta_transport_uses_project_environment_entrypoint() -> None:
+def test_neocarta_transport_uses_isolated_uvx_environment() -> None:
     transport = server._neocarta_transport({"NEO4J_URI": "bolt://example"})
 
-    assert transport.command == "neocarta-mcp"
-    assert transport.args == []
+    assert transport.command == "uvx"
+    assert transport.args == ["--from", "neocarta[mcp]>=0.8.0", "neocarta-mcp"]
     assert transport.env == {"NEO4J_URI": "bolt://example"}
 
 
