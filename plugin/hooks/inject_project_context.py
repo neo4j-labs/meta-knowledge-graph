@@ -17,6 +17,7 @@ if str(HOOK_DIR) not in sys.path:
 
 from project_common import (  # noqa: E402
     count_pending_skill_proposals,
+    count_project_observations,
     count_review_queue,
     ensure_project_schema,
     embed_text,
@@ -70,6 +71,7 @@ def main() -> int:
     user_learnings: list[dict] = []
     learnings: list[dict] = []
     observations: list[dict] = []
+    observation_total = 0
     review_pending = 0
     skill_slugs: list[str] = []
     skill_proposals_pending = 0
@@ -84,12 +86,17 @@ def main() -> int:
                 if context_scope == "user":
                     # SessionStart also carries the episodic "previously on this
                     # project" block: latest observations by recency, no query.
+                    # Headlines only — bodies stay behind episode_fetch/search.
                     observations = fetch_recent_observations(
                         driver,
                         database,
                         project_id=project.id,
                         limit=3,
                     )
+                    if observations:
+                        observation_total = count_project_observations(
+                            driver, database, project_id=project.id
+                        )
                     user_learnings = fetch_user_learnings(
                         driver,
                         database,
@@ -152,6 +159,7 @@ def main() -> int:
         review_pending=review_pending,
         skill_slugs=skill_slugs,
         skill_proposals_pending=skill_proposals_pending,
+        observation_total=observation_total,
     )
     if not context:
         return 0

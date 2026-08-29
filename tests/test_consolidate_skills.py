@@ -244,6 +244,22 @@ class RankingTests(unittest.TestCase):
         self.assertEqual(len(ranked[1]["members"]), 3)
         self.assertEqual(len(ranked[2]["members"]), 2)
 
+    def test_patch_for_stale_skill_outranks_everything(self) -> None:
+        embeddings = {k: [1.0, 0.0] for k in ("a", "b", "c", "d", "e")}
+        confidence = {k: 0.5 for k in embeddings}
+        groups = [
+            {"kind": "patch", "skill_id": "skill:proj:fresh", "members": ["a", "b"]},
+            {"kind": "patch", "skill_id": "skill:proj:stale", "members": ["c"]},
+            {"kind": "create", "skill_id": None, "members": ["d", "e"]},
+        ]
+        ranked = consolidate_skills.rank_groups(
+            groups, embeddings, confidence, {"skill:proj:stale"}
+        )
+        # The stale skill's patch wins despite being the smaller group.
+        self.assertEqual(ranked[0]["skill_id"], "skill:proj:stale")
+        self.assertEqual(ranked[1]["skill_id"], "skill:proj:fresh")
+        self.assertEqual(ranked[2]["kind"], "create")
+
 
 class FingerprintTests(unittest.TestCase):
     def test_order_invariant_and_membership_sensitive(self) -> None:
@@ -293,13 +309,36 @@ class ValidateProposalTests(unittest.TestCase):
         }
     ]
 
+    FULL_CONTENT = (
+        "## When to use\n...\n## Procedure\n1. ...\n"
+        "## Pitfalls\n- ...\n## Verification\n- ..."
+    )
+    ERROR_CONTEXT = [
+        {
+            "id": "query-error-pattern:proj:neo4j_read_cypher:abc",
+            "kind": "pattern",
+            "tool_key": "neo4j_read_cypher",
+            "title": "Unknown label",
+            "error_signature": "no such label",
+            "resolution": "check the schema first",
+        },
+        {
+            "id": None,
+            "kind": "raw_failure",
+            "tool_key": "mcp__github__create_pr",
+            "title": "failed tool call",
+            "error_signature": "422 validation failed",
+            "resolution": None,
+        },
+    ]
+
     def _create_proposal(self, **overrides):
         proposal = {
             "action": "create",
             "target_skill_slug": None,
             "name": "Cache venv rebuild",
             "description": "Use when the plugin cache venv loses its symlinks.",
-            "content": "## When to use\n...\n## Procedure\n1. ...",
+            "content": self.FULL_CONTENT,
             "derived_from": ["l1", "l2"],
             "rationale": "coherent procedure",
         }
@@ -430,6 +469,60 @@ class ValidateProposalTests(unittest.TestCase):
         self.assertIsNone(normalized)
         self.assertIn("unknown action", error)
 
+    def test_content_missing_required_sections_is_rejected(self) -> None:
+        normalized, error = consolidate_skills.validate_proposal(
+            self._create_proposal(content="## When to use\n...\n## Procedure\n1. ..."),
+            self.CREATE_GROUP,
+            self.INVENTORY,
+        )
+        self.assertIsNone(normalized)
+        self.assertIn("missing required sections", error)
+        self.assertIn("## Pitfalls", error)
+        self.assertIn("## Verification", error)
+
+    def test_informed_by_labels_resolve_to_pattern_ids(self) -> None:
+        normalized, error = consolidate_skills.validate_proposal(
+            self._create_proposal(informed_by=["E1"]),
+            self.CREATE_GROUP,
+            self.INVENTORY,
+            self.ERROR_CONTEXT,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(
+            normalized["informed_by"],
+            ["query-error-pattern:proj:neo4j_read_cypher:abc"],
+        )
+
+    def test_informed_by_raw_digest_label_yields_no_provenance_id(self) -> None:
+        # E2 is a raw failure digest with no graph node behind it: valid to
+        # cite, but nothing to link.
+        normalized, error = consolidate_skills.validate_proposal(
+            self._create_proposal(informed_by=["E2"]),
+            self.CREATE_GROUP,
+            self.INVENTORY,
+            self.ERROR_CONTEXT,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(normalized["informed_by"], [])
+
+    def test_informed_by_unknown_label_is_rejected(self) -> None:
+        normalized, error = consolidate_skills.validate_proposal(
+            self._create_proposal(informed_by=["E9"]),
+            self.CREATE_GROUP,
+            self.INVENTORY,
+            self.ERROR_CONTEXT,
+        )
+        self.assertIsNone(normalized)
+        self.assertIn("informed_by", error)
+        self.assertIn("E9", error)
+
+    def test_informed_by_defaults_to_empty(self) -> None:
+        normalized, error = consolidate_skills.validate_proposal(
+            self._create_proposal(), self.CREATE_GROUP, self.INVENTORY
+        )
+        self.assertIsNone(error)
+        self.assertEqual(normalized["informed_by"], [])
+
 
 class ProposalPromptTests(unittest.TestCase):
     def test_prompt_frames_learnings_as_untrusted_and_lists_inventory(self) -> None:
@@ -456,6 +549,43 @@ class ProposalPromptTests(unittest.TestCase):
         self.assertIn("candidate for a NEW", prompt)
         self.assertIn(str(project_common.MAX_SKILL_CONTENT), prompt)
 
+    def test_prompt_includes_labelled_tool_failures(self) -> None:
+        group = {"kind": "create", "skill_id": None, "members": ["l1"]}
+        learnings = {"l1": {"id": "l1", "text": "t", "task_pattern": "p"}}
+        error_context = [
+            {
+                "id": "query-error-pattern:proj:neo4j_read_cypher:abc",
+                "tool_key": "neo4j_read_cypher",
+                "error_signature": "Unknown label `Persn`",
+                "resolution": "check labels with get-schema first",
+            },
+            {
+                "id": None,
+                "tool_key": "mcp__github__create_pr",
+                "error_signature": "422 validation failed",
+                "resolution": None,
+            },
+        ]
+        prompt = consolidate_skills.build_proposal_prompt(
+            "P", "p", group, learnings, [], None, error_context
+        )
+        self.assertIn("<<<FAILURES", prompt)
+        self.assertIn("FAILURES>>>", prompt)
+        self.assertIn("[E1] tool: neo4j_read_cypher", prompt)
+        self.assertIn("Unknown label `Persn`", prompt)
+        self.assertIn("known fix: check labels with get-schema first", prompt)
+        self.assertIn("[E2] tool: mcp__github__create_pr", prompt)
+        self.assertIn("informed_by", prompt)
+
+    def test_prompt_without_error_context_says_none(self) -> None:
+        group = {"kind": "create", "skill_id": None, "members": ["l1"]}
+        learnings = {"l1": {"id": "l1", "text": "t", "task_pattern": "p"}}
+        prompt = consolidate_skills.build_proposal_prompt(
+            "P", "p", group, learnings, [], None
+        )
+        self.assertIn("<<<FAILURES", prompt)
+        self.assertIn("(none)", prompt)
+
     def test_prompt_includes_target_skill_for_patch_groups(self) -> None:
         group = {"kind": "patch", "skill_id": "s1", "members": ["l1"]}
         learnings = {"l1": {"id": "l1", "text": "t", "task_pattern": "p"}}
@@ -477,11 +607,15 @@ class AskLlmTests(unittest.TestCase):
     GROUP = {"kind": "create", "skill_id": None, "members": ["l1", "l2"]}
 
     def test_retry_feeds_validation_error_back(self) -> None:
+        full_content = (
+            "## When to use\\n## Procedure\\n## Pitfalls\\n## Verification"
+        )
         responses = [
             '{"action": "create", "name": "", "description": "", '
             '"content": "x", "derived_from": ["l1"], "rationale": "r"}',
             '{"action": "create", "name": "Good name", "description": "Use when x.", '
-            '"content": "## When to use", "derived_from": ["l1", "l2"], "rationale": "r"}',
+            f'"content": "{full_content}", '
+            '"derived_from": ["l1", "l2"], "rationale": "r"}',
         ]
         calls: list[list[dict]] = []
 
@@ -509,6 +643,54 @@ class AskLlmTests(unittest.TestCase):
         self.assertIn("JSON", error)
 
 
+class ErrorContextTests(unittest.TestCase):
+    def test_error_labels_are_ordered(self) -> None:
+        rows = [{"id": "a"}, {"id": None}, {"id": "c"}]
+        labels = consolidate_skills.error_labels(rows)
+        self.assertEqual(list(labels), ["E1", "E2", "E3"])
+        self.assertEqual(labels["E1"]["id"], "a")
+        self.assertIsNone(labels["E2"]["id"])
+
+    def test_failure_excerpt_unwraps_mcp_error_shape(self) -> None:
+        response = (
+            '{"content": [{"type": "text", "text": "Neo.ClientError: '
+            'Unknown label"}], "isError": true}'
+        )
+        self.assertEqual(
+            consolidate_skills.failure_excerpt(response),
+            "Neo.ClientError: Unknown label",
+        )
+
+    def test_failure_excerpt_falls_back_to_raw_string(self) -> None:
+        self.assertEqual(
+            consolidate_skills.failure_excerpt("  plain error text  "),
+            "plain error text",
+        )
+        self.assertEqual(consolidate_skills.failure_excerpt(None), "")
+
+    def test_digest_dedupes_and_skips_covered_tools(self) -> None:
+        rows = [
+            {"tool_name": "mcp__x__neo4j_read_cypher", "tool_response": "boom"},
+            {"tool_name": "Bash", "tool_response": "command not found: uvx"},
+            {"tool_name": "Bash", "tool_response": "command not found: uvx"},
+            {"tool_name": "WebFetch", "tool_response": ""},
+            {"tool_name": "Bash", "tool_response": "permission denied"},
+        ]
+        digests = consolidate_skills.digest_raw_failures(rows, {"neo4j_read_cypher"})
+        self.assertEqual(len(digests), 2)
+        self.assertEqual(digests[0]["tool_key"], "Bash")
+        self.assertEqual(digests[0]["error_signature"], "command not found: uvx")
+        self.assertIsNone(digests[0]["id"])
+        self.assertEqual(digests[1]["error_signature"], "permission denied")
+
+    def test_digest_respects_cap(self) -> None:
+        rows = [
+            {"tool_name": "Bash", "tool_response": f"error {i}"} for i in range(10)
+        ]
+        digests = consolidate_skills.digest_raw_failures(rows, set(), cap=3)
+        self.assertEqual(len(digests), 3)
+
+
 class SkillConfigTests(unittest.TestCase):
     def test_defaults(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
@@ -520,6 +702,7 @@ class SkillConfigTests(unittest.TestCase):
                 "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD",
                 "MKG_SKILL_COACTIVATION_THRESHOLD",
                 "MKG_SKILL_CATALOG_INJECT",
+                "MKG_SKILL_MAX_PROPOSALS_PER_RUN",
             ):
                 os.environ.pop(key, None)
             self.assertTrue(project_common.skill_consolidation_enabled())
@@ -529,6 +712,7 @@ class SkillConfigTests(unittest.TestCase):
             self.assertEqual(project_common.skill_min_cluster_size(), 2)
             self.assertEqual(project_common.task_pattern_similarity_threshold(), 0.65)
             self.assertEqual(project_common.skill_coactivation_threshold(), 0.5)
+            self.assertEqual(project_common.skill_max_proposals_per_run(), 2)
 
     def test_env_overrides(self) -> None:
         overrides = {
@@ -537,6 +721,7 @@ class SkillConfigTests(unittest.TestCase):
             "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD": "0.8",
             "MKG_SKILL_COACTIVATION_THRESHOLD": "0.3",
             "MKG_SKILL_CATALOG_INJECT": "off",
+            "MKG_SKILL_MAX_PROPOSALS_PER_RUN": "5",
         }
         with patch.dict(os.environ, overrides, clear=False):
             self.assertFalse(project_common.skill_consolidation_enabled())
@@ -544,6 +729,13 @@ class SkillConfigTests(unittest.TestCase):
             self.assertEqual(project_common.skill_consolidation_threshold(), 7)
             self.assertEqual(project_common.task_pattern_similarity_threshold(), 0.8)
             self.assertEqual(project_common.skill_coactivation_threshold(), 0.3)
+            self.assertEqual(project_common.skill_max_proposals_per_run(), 5)
+
+    def test_max_proposals_floor_is_one(self) -> None:
+        with patch.dict(
+            os.environ, {"MKG_SKILL_MAX_PROPOSALS_PER_RUN": "0"}, clear=False
+        ):
+            self.assertEqual(project_common.skill_max_proposals_per_run(), 1)
 
     def test_skill_node_id(self) -> None:
         self.assertEqual(

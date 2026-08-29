@@ -115,5 +115,36 @@ class InjectSystemPromptTests(unittest.TestCase):
         self.assertFalse(should_inject)
 
 
+class ComposePromptTests(unittest.TestCase):
+    def test_profile_section_is_appended_to_frozen_base(self) -> None:
+        base = "You are the agent.\n"
+        composed = inject_system_prompt.compose_prompt(
+            base, "- Prefers terse answers.\n- Works in Python."
+        )
+
+        # The base persona survives verbatim; the section is appended after it.
+        self.assertTrue(composed.startswith("You are the agent."))
+        self.assertIn(inject_system_prompt.USER_PROFILE_HEADER, composed)
+        self.assertIn("- Prefers terse answers.", composed)
+        self.assertLess(
+            composed.index("You are the agent."),
+            composed.index(inject_system_prompt.USER_PROFILE_HEADER),
+        )
+        self.assertIn("human-approved memory", composed)
+
+    def test_missing_or_empty_profile_returns_base_unchanged(self) -> None:
+        base = "You are the agent."
+        self.assertEqual(inject_system_prompt.compose_prompt(base, None), base)
+        self.assertEqual(inject_system_prompt.compose_prompt(base, "   "), base)
+
+    def test_stale_profile_carries_caution_note(self) -> None:
+        composed = inject_system_prompt.compose_prompt(
+            "Base.", "- A bullet.", needs_revision=True
+        )
+        self.assertIn("retracted after consolidation", composed)
+        fresh = inject_system_prompt.compose_prompt("Base.", "- A bullet.")
+        self.assertNotIn("retracted after consolidation", fresh)
+
+
 if __name__ == "__main__":
     unittest.main()

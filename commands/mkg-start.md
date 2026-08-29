@@ -115,11 +115,12 @@ persona was just seeded so SessionStart injects it.
 
 You will **learn the purpose of the agent** from the user, store it as durable
 **user-scoped** memories, and let MKG's consolidation service fold those into a
-custom system prompt. The mechanism: the Stop / SessionEnd
+custom "user adaptations" section. The mechanism: the Stop / SessionEnd
 `consolidate_system_prompt` service folds pending **human-approved
-user-scoped** learnings into `(:SystemPrompt {name:'default'})` once **more than
+user-scoped** learnings into `(:UserProfile {name:'default'})` — the section
+SessionStart appends to the frozen base prompt — once **more than
 5** are pending. Raw candidates first go through `/mkg-review`; approving **6
-user memories** is the trigger that regenerates the persona on a clean graph.
+user memories** is the trigger that generates the section on a clean graph.
 
 ### B1 — Interview for the purpose
 
@@ -155,19 +156,20 @@ it is **> 5** (account for any already approved-and-unconsolidated facts).
 
 ### B3 — Trigger and verify the persona
 
-The persona is **frozen at runtime** — it is read at SessionStart and rewritten
-only by the seed scripts and the consolidation service. So:
+The base persona is **frozen** — only the seed scripts write
+`(:SystemPrompt {name:'default'})`. What consolidation maintains is the
+separate `(:UserProfile)` section appended to it at SessionStart. So:
 
 1. When this turn ends, the background `consolidate_system_prompt` Stop hook sees
    `> 5` pending user memories (and, on a fresh setup, no prior consolidation, so
-   no cooldown) and folds them into `(:SystemPrompt {name:'default'})`, archiving
-   any previous as a `:SystemPromptVersion`.
+   no cooldown) and folds them into `(:UserProfile {name:'default'})`, archiving
+   any previous section as a `:UserProfileVersion`.
 2. Tell the user to **start a new session** (or `/clear`) so SessionStart injects
-   the freshly consolidated persona. They can re-run `/mkg-start` anytime to add
-   more memories and re-consolidate.
-3. To verify after the next turn, re-read the persona with the `version` /
-   `preview` query from Step 2 — the version should have bumped and the content
-   should reflect their purpose.
+   the base persona composed with the freshly consolidated section. They can
+   re-run `/mkg-start` anytime to add more memories and re-consolidate.
+3. To verify after the next turn, read the section back:
+   `MATCH (up:UserProfile {name:'default'}) RETURN up.version, left(up.content, 300)`
+   — the version should have bumped and the content should reflect their purpose.
 
 Notes:
 

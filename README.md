@@ -21,18 +21,19 @@ It ships as two halves that form a closed capture-and-recall loop:
   that distills durable `:Learning` candidates (scoped `project` or `user`,
   covering durable facts and decisions alike) from what just happened, plus an
   append-only `:Observation` timeline entry per work window (episodic memory:
-  what happened, recalled by recency at session start).
+  what happened — headlines recalled by recency at session start, bodies and
+  older history pulled on demand through `episode_fetch` / `episode_search`).
 
 The hooks write to the same graph the MCP tools read from, so each new session
 starts with the most relevant prior learnings already injected — both
 project-scoped memory and durable facts about the user. The persisted **system
-prompt** is frozen at runtime: it is read on start but never rewrites itself. The
-**memory extraction prompt** is a fixed code constant — there is no
-Neo4j-backed self-improvement loop. The only writers of the system prompt besides
-the seed scripts are the deliberate consolidation services — a rate-limited
-Stop/SessionEnd hook that folds accumulated user-profile memory into the system
-prompt once enough of it has piled up unreviewed, keeping every superseded prompt
-as version history.
+prompt** is frozen: only the seed scripts write it, and it is never rewritten by
+consolidation. What adapts instead is a separate `(:UserProfile)` node — a
+compact "user adaptations" section a rate-limited Stop/SessionEnd hook distills
+from accumulated **human-approved** user-profile memory, which the injection
+hook appends to the frozen base at session start (keeping every superseded
+section as version history). The **memory extraction prompt** is a fixed code
+constant — there is no Neo4j-backed self-improvement loop.
 
 A complete end-to-end demo — a B2B sales / customer-success assistant for an
 enterprise car-rental provider — ships in the repo; see
@@ -282,7 +283,7 @@ Mounted under the `meta-knowledge-graph` prefix, in four groups:
 
 | Group | Tools | Mounted when |
 |---|---|---|
-| Project memory & graph | `project_get_context`, `project_add_learning`, `project_review_queue`, `project_resolve_learning`, `neo4j_get_schema`, `neo4j_read_cypher` | Always. |
+| Project memory & graph | `project_get_context`, `project_add_learning`, `project_review_queue`, `project_resolve_learning`, `episode_fetch`, `episode_search`, `skill_search`, `skill_fetch`, `project_resolve_skill`, `neo4j_get_schema`, `neo4j_read_cypher` | Always. |
 | Diffbot research | `search_news`, `enhance_entity` | `DIFFBOT_TOKEN` is set. |
 | BigQuery warehouse | `bigquery_execute_query` | `BIGQUERY_MCP_URL` is set. |
 | Neocarta data catalog | `neocarta_*` | `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID`, and the `EMBEDDING_MODEL`'s provider key (OpenAI by default) are set. |
@@ -309,11 +310,11 @@ to the plugin directory.
 
 | Hook event | Script | Behavior |
 |---|---|---|
-| `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j and injects it. If the node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and capture user/project facts as scoped learnings. The injection log keeps only a content hash + summary on the `:SystemPromptInjection` node and links it to its source via `[:OF_PROMPT]→(:SystemPrompt)` instead of copying the prompt text. If the same prompt content was already injected into the same session, the hook skips the duplicate (unless the context was wiped by `clear`/`compact`). |
-| `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` against the new prompt and injects the top hits: project-scoped learnings for the current project, plus durable user-scoped learnings that follow the user across every project. Every injected item is linked to the session via `[:INJECTED_IN]`; items already injected earlier in the same session — or first produced during it (`[:FROM_SESSION]`) — are excluded from retrieval, so a conversation never receives the same learning twice, nor has its own freshly-extracted memory echoed back. Marks served learnings as used. At `SessionStart` it additionally injects a "Recent project activity" block — the latest `:Observation` timeline entries by recency (never similarity), giving the new session a "previously on this project" recap. |
+| `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j, composes it with the consolidated `(:UserProfile)` "user adaptations" section (appended under a `## User adaptations` header; a profile flagged `needs_revision` carries a caution note until re-consolidated), and injects the result. If the prompt node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and capture user/project facts as scoped learnings. The injection log keeps only a content hash + summary on the `:SystemPromptInjection` node and links it to its source via `[:OF_PROMPT]→(:SystemPrompt)` instead of copying the prompt text. If the same prompt content was already injected into the same session, the hook skips the duplicate (unless the context was wiped by `clear`/`compact`). |
+| `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` against the new prompt and injects the top hits: project-scoped learnings for the current project, plus durable user-scoped learnings that follow the user across every project. Every injected item is linked to the session via `[:INJECTED_IN]`; items already injected earlier in the same session — or first produced during it (`[:FROM_SESSION]`) — are excluded from retrieval, so a conversation never receives the same learning twice, nor has its own freshly-extracted memory echoed back. Marks served learnings as used. At `SessionStart` it additionally injects a "Recent project activity" block — the latest `:Observation` timeline entries by recency (never similarity) as **one-line headlines only**, plus a count of older episodes and a pointer to `episode_fetch` / `episode_search`, so the "previously on this project" recap stays flat and the bodies stay pull-based. |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | `hooks/log_event.py` | Persists each event as a `:SessionEvent` node threaded by `:NEXT`. Main-agent events land under the parent `:Session`; subagent events land under a separate `:Session` keyed by the subagent id and linked back to the parent session, spawn event, start event, and stop event. This is the corpus the memory extraction processor later reads. |
 | `Stop` (`--mode turn`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, renders a fixed code-constant memory-extraction prompt, builds a tail-preserving corpus, fetches the closest existing learnings, and asks an LLM to return create/update/ignore actions for `:Learning` nodes (durable facts and decisions alike — a decision's rationale is folded into the learning text). Each learning is classified `project` (a fact about the project/environment) or `user` (a durable fact about the person that holds across projects); user-scoped learnings are keyed on a project-independent namespace so the same fact dedupes everywhere. Writes new nodes with status `candidate` (embedding each so it is searchable), and stores the model used plus `llm_status` (`called`, `skipped`, or `error`) and skip/error reason on `:ProjectProcessing`. `update` actions are ownership-scoped — automation may only rewrite memory this project owns (or a project-independent user fact), never another project's — and a content change to an already-`approved` note demotes it back to `candidate` (clearing its human provenance and re-opening it for the gate), so automation can never silently overwrite the trusted tier. Alongside the selective memory pass, a second, non-evolvable prompt writes the **episodic timeline**: 1–3 `:Observation` records per work window (`type` ∈ change/bugfix/feature/refactor/discovery/decision/problem, `title`, `facts`, `narrative`), append-only, chained per project via `[:NEXT]` + `[:LATEST_OBSERVATION]`, embedded for search, and written in the same transaction as `PROCESSED_EVENT` marking so a processed window can never lose its timeline entry. Observations are never deduplicated, gated, or approved — they record *what happened*, not *what is true*; when the LLM is unavailable the window simply gets no observation. Then runs the **consistency gate** (`hooks/consistency_gate.py`): each new project-scoped candidate is searched against the top-15 `approved` **and fellow `candidate`** learnings in the same project/scope (excluding itself) — semantically via the vector index when `EMBEDDING_MODEL` is set, else via the fulltext index — and an LLM judge decides genuine contradictions, promoting consistent candidates to `approved`, rejecting the items they supersede (`[:SUPERSEDES]`), or vetoing the candidate to `rejected` (`[:CONTRADICTED_BY]`) when an existing item is clearly more reliable. Resolutions apply per candidate, so restatements extracted in one batch collapse onto one canonical item. Finally a bounded **sweep** pushes ungated candidates — `project_add_learning` MCP writes and rows an earlier judge failure skipped — through the same gate, backfilling their embeddings first. |
-| `Stop`, `SessionEnd` | `hooks/consolidate_system_prompt.py` | Runs in the background, rate-limited. The system-prompt consolidation service only does work when **more than 5** user-profile memories are pending consolidation — human-approved user-scoped learnings not yet folded into the prompt (`MKG_PROMPT_CONSOLIDATION_THRESHOLD`) — and not more than once per cooldown window (`MKG_PROMPT_CONSOLIDATION_INTERVAL_HOURS`, default 24h, tracked via `last_consolidated_at` on the node). When both gates pass, it sends the current `(:SystemPrompt {name: 'default'})` plus the pending user facts — fenced as untrusted data — to the LLM, which folds those facts into the persona, then archives the outgoing prompt as a `(:SystemPromptVersion)` history node before overwriting the active one and bumping its version. Folding is **approved-only**: it counts and folds user-scoped learnings with `status = 'approved'`, never raw candidates, so an unreviewed (or poisoned) user fact cannot rewrite the cross-project persona on its own — a human promotes `candidate → approved` through the review queue (`project_review_queue` / `project_resolve_learning`, surfaced by `/mkg-review`). The folded learnings are stamped `consolidated_at` so they drop out of the backlog. |
+| `Stop`, `SessionEnd` | `hooks/consolidate_system_prompt.py` | Runs in the background, rate-limited. The user-profile consolidation service never touches the base `(:SystemPrompt)` — it maintains the separate `(:UserProfile)` "user adaptations" section the injection hook appends at session start. It only does work when **more than 5** user-profile memories are pending consolidation — human-approved user-scoped learnings not yet folded into the section (`MKG_PROMPT_CONSOLIDATION_THRESHOLD`) — and not more than once per cooldown window (`MKG_PROMPT_CONSOLIDATION_INTERVAL_HOURS`, default 24h, tracked via `last_consolidated_at` on the node). When the gates pass, it sends the current section, the pending user facts, and any retracted facts — fenced as untrusted data — to the LLM, which returns a revised compact section (≤ 12 bullets / ~1500 chars; a runaway reply is discarded), then archives the outgoing section as a `(:UserProfileVersion)` history node before overwriting the active one and bumping its version. Folding is **approved-only**: it counts and folds user-scoped learnings with `status = 'approved'`, never raw candidates, so an unreviewed (or poisoned) user fact cannot reach the cross-project prompt on its own — a human promotes `candidate → approved` through the review queue (`project_review_queue` / `project_resolve_learning`, surfaced by `/mkg-review`). Folded learnings are stamped `consolidated_at` so they drop out of the backlog and out of per-session injection. **Staleness repair**: when a human later rejects or supersedes a fact that was already folded in, the resolver flags the profile `needs_revision`; the next run bypasses threshold *and* cooldown, removes the retracted content, stamps the fact `unfolded_at`, and clears the flag. |
 | `PostToolUse` (matcher on the Diffbot tools `enhance_entity` / `search_news`) | `hooks/ingest_diffbot.py` | Builds Diffbot tool results back into the graph instead of letting them evaporate with the conversation. `enhance_entity` firmographics become `(:Account)-[:HAS_ENRICHMENT]→(:DiffbotOrganization)` or `(:DiffbotPerson)` (matched on domain, name/`allNames`, and employer hints); `search_news` articles become `(:NewsArticle)-[:MENTIONS]→(:Account)` plus `[:MENTIONS]→(:DiffbotOrganization)` when organization tags or account matches identify companies, and `[:TAGGED]→(:NewsTag)`. Only entities carrying a real Diffbot id are stored — references without one are dropped instead of being keyed on synthetic hashes. Diffbot entities and articles link `[:CAPTURED_IN]→(:Session)` for provenance. Handles the harness's response wrappers, including oversized results that arrive as a saved-to-file notice. |
 | `PostToolUse` (matcher on the query tools `bigquery_execute_query` / `neo4j_read_cypher`) | `hooks/capture_query_failures.py` | Captures failed or suspicious query outputs as structured `(:QueryExecution)-[:HAS_ISSUE]→(:QueryIssue)` artifacts. The first pass records issues visible in PostToolUse payloads: empty result sets, parser/schema/permission/resource/capability errors, malformed outputs, and Neo4j serialization cases such as temporal values returned as `{}`. Clean successful query results are ignored. |
 | `Stop`, `SessionEnd` | `hooks/consolidate_query_errors.py` | Runs in the background, rate-limited **per tool**. The query-error consolidation service: it folds unconsolidated *invalid-query* failures — the consolidatable issue classes (`syntax_error`, `schema_mismatch`, `capability_unavailable`, `serialization_issue`, plus the generic error bucket) — into durable `(:QueryErrorPattern)` nodes carrying the error signature, root cause, and actionable fix. Transient/environmental classes (`timeout`, `resource_limit`, `result_size_limit`, `permission_error`) never consolidate, and the LLM is additionally instructed to discard transient one-offs hiding in the generic bucket. Failures are grouped by the client-independent `tool_key`; a tool consolidates only when **more than** `MKG_QUERY_ERROR_CONSOLIDATION_THRESHOLD` (default 1) of its failures are pending and not more than once per `MKG_QUERY_ERROR_CONSOLIDATION_INTERVAL_HOURS` (default 6h, tracked on the per-tool `(:ToolErrorProfile)`). The LLM merges same-root-cause failures into one pattern and updates existing patterns instead of duplicating them; patterns are embedded for semantic recall, keep `[:DERIVED_FROM]` provenance, and consumed executions are stamped `error_consolidated_at` so they leave the queue. |
@@ -341,9 +342,15 @@ to the plugin directory.
                                             ─[:UPDATED_LEARNING]→ (:Learning)
                                             ─[:PRODUCED_OBSERVATION]→ (:Observation)
 
-# Frozen at runtime (read on start; written only by seed scripts / consolidation):
-(:SystemPrompt {name, version, content, last_consolidated_at})
+# Frozen (read on start; written only by seed scripts):
+(:SystemPrompt {name, version, content})
    ─[:HAS_VERSION]→ (:SystemPromptVersion {name, version, content, is_current})  # prompt history
+
+# Consolidated user-adaptations section, appended to the base prompt at injection:
+(:UserProfile {name, version, content, last_consolidated_at, needs_revision})
+   ─[:HAS_VERSION]→ (:UserProfileVersion {name, version, content, is_current})  # section history
+   │                 ─[:FOLDED_LEARNING]→ (:Learning {scope: 'user'})           # facts folded in
+   │                 ─[:UNFOLDED_LEARNING]→ (:Learning {scope: 'user'})         # retracted facts removed
    ─[:CONSOLIDATED]→ (:Learning {scope: 'user'})                                # folded-in user facts
 
 # Produced by hooks/enrich_events.py (on demand):
@@ -432,14 +439,14 @@ title/signature/root-cause/resolution/example query, and the cosine vector index
 recall never crosses tools. Its tunables are
 `MKG_QUERY_ERROR_CONSOLIDATION_THRESHOLD` (default 1) and
 `MKG_QUERY_ERROR_CONSOLIDATION_INTERVAL_HOURS` (default 6).
-The persisted system prompt is frozen at runtime — read on session start but
-never self-modified mid-session; the memory-extraction prompt is a fixed code
-constant with no self-improvement loop. Improving the system
-prompt from the accumulated learning corpus is the job of the rate-limited
-`consolidate_system_prompt.py` service (see the hooks table), which folds pending
-user-profile memory into the persona and keeps every superseded prompt as a
-`:SystemPromptVersion`. It and the seed scripts are the only writers of those
-nodes.
+The persisted system prompt is frozen — read on session start, written only by
+the seed scripts, never self-modified; the memory-extraction prompt is a fixed
+code constant with no self-improvement loop. Adapting the injected prompt to the
+user is the job of the rate-limited `consolidate_system_prompt.py` service (see
+the hooks table), which folds pending user-profile memory into the separate
+`(:UserProfile)` "user adaptations" section — appended to the frozen base at
+injection time — and keeps every superseded section as a `:UserProfileVersion`.
+It is the only writer of those nodes.
 
 ## Sales agent use case
 

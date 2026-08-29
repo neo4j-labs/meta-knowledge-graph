@@ -35,9 +35,12 @@ passing `project_id` only if the user named one in the argument.
 - If the tool is not mounted, the MCP server is not running the current build.
   Tell the user to restart/reinstall the plugin so the review tools appear, and
   stop — do not hand-edit the graph with raw Cypher to approve memory.
-- If `count` is `0`, report that the queue is empty and stop.
-- The result carries two lists: `queue` (learnings) and `skill_proposals`
-  (distilled skills). Triage learnings first, then skill proposals.
+- If `count` is `0` and `stale_skills` is empty, report that the queue is
+  empty and stop.
+- The result carries three lists: `queue` (learnings), `skill_proposals`
+  (distilled skills), and `stale_skills` (live skills whose source memory was
+  later rejected or superseded). Triage learnings first, then skill
+  proposals, then mention stale skills.
 
 ## Step 2 — Triage: show the whole queue first
 
@@ -67,7 +70,8 @@ not appear in the conversation:
 What each choice does (explain when recommending, or on request):
 
 - **keep it** (`approve`) — promote to trusted memory. A user fact becomes
-  eligible for persona consolidation.
+  eligible for user-profile consolidation (the "user adaptations" section
+  appended to the system prompt).
 - **fix the wording** (`edit_approve`) — the user supplies or confirms a
   rewrite (passed as `edited_text`), then it is promoted.
 - **discard it** (`reject`) — drop it from live memory.
@@ -136,6 +140,18 @@ may decide several at once, but never resolve one they did not decide.
 
 If the user asks to remove a live skill that is misfiring, that is
 `project_resolve_skill` with action `retire` — mention it only when relevant.
+
+## Step 3c — Stale skills (informational)
+
+Entries in `stale_skills` are live skills flagged because a learning they were
+distilled from was later rejected or superseded, and no patch proposal has
+arrived yet. There is usually nothing to decide: the background distiller
+will propose a revision on its next cycle, and until then `skill_fetch`
+already warns the agent the procedure may be partly outdated. Present them as
+one line each — "skill <name> has stale sources; a revision will follow" —
+and offer exactly one action: **"take it offline now"** → `project_resolve_skill`
+with action `retire`, for a skill the user considers actively misleading.
+Otherwise leave them alone.
 
 ## Step 4 — Close out
 

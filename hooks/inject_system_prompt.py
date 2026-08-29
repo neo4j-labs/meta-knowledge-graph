@@ -9,6 +9,12 @@ Injects a system prompt fetched from a Neo4j ``(:SystemPrompt {name})`` node int
 the agent session as additional context. Falls back to a bootstrap prompt
 if Neo4j is unreachable or the requested prompt does not exist.
 
+The base prompt is composed at injection time with the consolidated
+``(:UserProfile)`` section — the compact "user adaptations" block the
+consolidation service maintains from human-approved user facts. The base
+persona itself is never rewritten by consolidation; only this appended
+section evolves.
+
 Customize the active prompt by editing the node in Neo4j
 (``MATCH (p:SystemPrompt {name: 'default'}) SET p.content = ...``).
 """
@@ -104,22 +110,36 @@ in project context):
 """
 
 
+USER_PROFILE_NAME = "default"
+USER_PROFILE_HEADER = "## User adaptations"
+
+
 def _first_record(result):
     records = getattr(result, "records", result) or []
     return records[0] if records else None
 
 
-def fetch_prompt_from_neo4j(name: str) -> str | None:
+def fetch_prompt_bundle_from_neo4j(
+    name: str,
+    profile_name: str = USER_PROFILE_NAME,
+) -> tuple[str | None, str | None, bool]:
+    """Fetch the base prompt and the consolidated user-profile section in one
+    connection.
+
+    Returns ``(base, profile, profile_needs_revision)``; each part is ``None``
+    when its node is missing or empty, and the whole bundle degrades to
+    ``(None, None, False)`` when Neo4j is unreachable.
+    """
     try:
         from neo4j import GraphDatabase
     except ImportError:
-        return None
+        return None, None, False
 
     uri, user, password, database = neo4j_config()
 
     try:
         with GraphDatabase.driver(uri, auth=(user, password)) as driver:
-            record = _first_record(
+            prompt_record = _first_record(
                 driver.execute_query(
                     "MATCH (p:SystemPrompt {name: $name}) "
                     "RETURN p.content AS content LIMIT 1",
@@ -127,13 +147,68 @@ def fetch_prompt_from_neo4j(name: str) -> str | None:
                     database_=database,
                 )
             )
-        if record and record.get("content"):
-            content = str(record["content"])
+            profile_record = _first_record(
+                driver.execute_query(
+                    "MATCH (up:UserProfile {name: $name}) "
+                    "RETURN up.content AS content, "
+                    "coalesce(up.needs_revision, false) AS needs_revision LIMIT 1",
+                    name=profile_name,
+                    database_=database,
+                )
+            )
+        base = None
+        if prompt_record and prompt_record.get("content"):
+            content = str(prompt_record["content"])
             if content.strip():
-                return content
+                base = content
+        profile = None
+        needs_revision = False
+        if profile_record and profile_record.get("content"):
+            content = str(profile_record["content"])
+            if content.strip():
+                profile = content
+                needs_revision = bool(profile_record.get("needs_revision"))
+        return base, profile, needs_revision
     except Exception as exc:  # pragma: no cover - hook must never crash the session
         print(f"[inject_system_prompt] Neo4j lookup failed: {exc}", file=sys.stderr)
-    return None
+    return None, None, False
+
+
+def compose_prompt(base: str, profile: str | None, needs_revision: bool = False) -> str:
+    """Append the consolidated user-adaptations section to the frozen base.
+
+    The base persona is never edited by consolidation; everything durable the
+    graph has learned about the user arrives through this appended section, so
+    the seeded prompt stays as-is while behaviour still adapts to the person.
+    """
+    section = (profile or "").strip()
+    if not section:
+        return base
+    parts = [
+        base.rstrip(),
+        "",
+        USER_PROFILE_HEADER,
+        "",
+        (
+            "Consolidated from human-approved memory about this user. Apply "
+            "these adaptations on top of the persona above; the user can "
+            "revise them through the learning review queue."
+        ),
+        "",
+        section,
+    ]
+    if needs_revision:
+        parts.extend(
+            [
+                "",
+                (
+                    "(Note: part of this section traces to memory that was "
+                    "retracted after consolidation; weigh it carefully until "
+                    "the section is re-consolidated.)"
+                ),
+            ]
+        )
+    return "\n".join(parts)
 
 
 def summarize_injection_content(prompt_name: str, content: str, source: str) -> str:
@@ -245,8 +320,9 @@ def main() -> int:
     context_wiped = payload.get("source") in {"clear", "compact"}
 
     prompt_name = "default"
-    fetched = fetch_prompt_from_neo4j(prompt_name)
-    prompt = fetched or FALLBACK_BOOTSTRAP_PROMPT
+    fetched, profile, profile_needs_revision = fetch_prompt_bundle_from_neo4j(prompt_name)
+    base = fetched or FALLBACK_BOOTSTRAP_PROMPT
+    prompt = compose_prompt(base, profile, profile_needs_revision)
     source = "neo4j" if fetched else "default"
 
     is_new_injection = record_injection(

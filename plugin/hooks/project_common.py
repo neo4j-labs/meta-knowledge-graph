@@ -1134,6 +1134,13 @@ def ensure_project_schema(tx) -> None:
     tx.run(
         "CREATE CONSTRAINT IF NOT EXISTS FOR (o:Observation) REQUIRE o.id IS UNIQUE"
     )
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (up:UserProfile) REQUIRE up.name IS UNIQUE"
+    )
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (uv:UserProfileVersion) "
+        "REQUIRE uv.id IS UNIQUE"
+    )
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (sk:Skill) REQUIRE sk.id IS UNIQUE")
     tx.run(
         "CREATE CONSTRAINT IF NOT EXISTS FOR (sv:SkillVersion) REQUIRE sv.id IS UNIQUE"
@@ -1340,6 +1347,11 @@ def consolidation_interval_hours() -> float:
 SKILL_CONSOLIDATION_THRESHOLD = 4
 SKILL_CONSOLIDATION_INTERVAL_HOURS = 24.0
 SKILL_MIN_CLUSTER_SIZE = 2
+# How many atomic proposals (create / update / ignore decisions, each one LLM
+# call over one group) a single consolidation cycle may emit. Failed validation
+# attempts count toward the budget so a bad model day cannot burn unbounded
+# calls.
+SKILL_MAX_PROPOSALS_PER_RUN = 2
 # Calibrated for text-embedding-3-small on short task-pattern strings:
 # paraphrases of the same procedure measure ~0.6-0.7, related-but-distinct
 # procedures ~0.45-0.6, unrelated <0.35. Recalibrate when changing
@@ -1376,6 +1388,12 @@ def skill_consolidation_interval_hours() -> float:
 
 def skill_min_cluster_size() -> int:
     return max(2, int(_env_float("MKG_SKILL_MIN_CLUSTER_SIZE", SKILL_MIN_CLUSTER_SIZE)))
+
+
+def skill_max_proposals_per_run() -> int:
+    return max(
+        1, int(_env_float("MKG_SKILL_MAX_PROPOSALS_PER_RUN", SKILL_MAX_PROPOSALS_PER_RUN))
+    )
 
 
 def task_pattern_similarity_threshold() -> float:
@@ -1693,6 +1711,180 @@ def snapshot_and_update_system_prompt(
             new_version=new_version,
             folded_ids=folded_learning_ids,
             model=model,
+            now=now,
+        )
+
+    return {"old_version": old_version, "new_version": new_version}
+
+
+def read_user_profile_state(driver, database: str, name: str) -> dict[str, Any]:
+    """Read the consolidated user-adaptations section kept beside the frozen
+    base prompt.
+
+    The ``:UserProfile`` node is the only consolidation target: the base
+    ``:SystemPrompt`` stays as seeded, and injection composes the two at
+    session start. ``needs_revision`` is set by the learning resolver when a
+    fact folded into this section is later rejected or superseded."""
+    record = _execute_query_single(
+        driver,
+        database,
+        """
+        MATCH (up:UserProfile {name: $name})
+        RETURN up.content AS content,
+               coalesce(up.version, 1) AS version,
+               up.last_consolidated_at AS last_consolidated_at,
+               coalesce(up.needs_revision, false) AS needs_revision,
+               up.revision_reason AS revision_reason
+        """,
+        name=name,
+    )
+    if not record:
+        return {
+            "content": None,
+            "version": 0,
+            "last_consolidated_at": None,
+            "needs_revision": False,
+            "revision_reason": None,
+        }
+    return {
+        "content": record["content"],
+        "version": int(record["version"]),
+        "last_consolidated_at": record["last_consolidated_at"],
+        "needs_revision": bool(record["needs_revision"]),
+        "revision_reason": record["revision_reason"],
+    }
+
+
+def fetch_user_profile_stale_facts(
+    driver,
+    database: str,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """User facts folded into the profile that a human later rejected or
+    superseded.
+
+    These must be *removed* from the section on the next consolidation run;
+    ``unfolded_at`` is stamped once that happens so a retracted fact is only
+    repaired against once."""
+    records = _execute_query(
+        driver,
+        database,
+        """
+        MATCH (l:Learning {scope: 'user'})
+        WHERE l.status IN ['rejected', 'superseded']
+          AND l.consolidated_at IS NOT NULL
+          AND l.unfolded_at IS NULL
+        RETURN l.id AS id,
+               l.text AS text,
+               l.rejected_reason AS rejected_reason
+        ORDER BY toString(coalesce(l.updated_at, l.created_at)) DESC
+        LIMIT $limit
+        """,
+        limit=limit,
+    )
+    return [dict(record) for record in records]
+
+
+def snapshot_and_update_user_profile(
+    tx,
+    name: str,
+    new_content: str,
+    folded_learning_ids: list[str],
+    unfolded_learning_ids: list[str],
+    model: str,
+    session_id: str | None,
+    now: str,
+) -> dict[str, Any]:
+    """Archive the outgoing profile section as a ``:UserProfileVersion`` and
+    write the new one.
+
+    Mirrors :func:`snapshot_and_update_system_prompt` for the user-adaptations
+    section. Folded learnings are stamped ``consolidated_at`` (the same
+    property the injection paths already exclude on, so a folded fact drops
+    out of per-session user-learning lists); retracted learnings the revision
+    removed are stamped ``unfolded_at`` so they leave the stale backlog. Any
+    ``needs_revision`` flag is cleared: the new version *is* the repair."""
+    record = tx.run(
+        """
+        MERGE (up:UserProfile {name: $name})
+        ON CREATE SET up.created_at = datetime($now), up.version = 0
+        WITH up, up.content AS old_content, coalesce(up.version, 0) AS old_version
+        FOREACH (_ IN CASE WHEN old_content IS NULL THEN [] ELSE [1] END |
+            MERGE (ov:UserProfileVersion {id: $name + ':v' + toString(old_version)})
+            ON CREATE SET ov.name = $name,
+                          ov.version = old_version,
+                          ov.content = old_content,
+                          ov.created_at = coalesce(up.updated_at, up.created_at, datetime($now))
+            SET ov.is_current = false,
+                ov.archived_at = datetime($now)
+            MERGE (up)-[:HAS_VERSION]->(ov)
+        )
+        WITH up, old_version
+        SET up.content = $new_content,
+            up.version = old_version + 1,
+            up.updated_at = datetime($now),
+            up.last_consolidated_at = datetime($now),
+            up.last_consolidation_model = $model,
+            up.needs_revision = false,
+            up.revision_reason = null
+        MERGE (nv:UserProfileVersion {id: $name + ':v' + toString(old_version + 1)})
+        ON CREATE SET nv.created_at = datetime($now)
+        SET nv.name = $name,
+            nv.version = old_version + 1,
+            nv.content = $new_content,
+            nv.model = $model,
+            nv.session_id = $session_id,
+            nv.folded_learning_count = size($folded_ids),
+            nv.unfolded_learning_count = size($unfolded_ids),
+            nv.supersedes_version = old_version,
+            nv.is_current = true
+        MERGE (up)-[:HAS_VERSION]->(nv)
+        RETURN old_version AS old_version, old_version + 1 AS new_version
+        """,
+        name=name,
+        new_content=new_content,
+        model=model,
+        session_id=session_id,
+        folded_ids=folded_learning_ids,
+        unfolded_ids=unfolded_learning_ids,
+        now=now,
+    ).single()
+
+    old_version = int(record["old_version"]) if record else 0
+    new_version = int(record["new_version"]) if record else 1
+
+    if folded_learning_ids:
+        tx.run(
+            """
+            MATCH (up:UserProfile {name: $name})
+            MATCH (nv:UserProfileVersion {id: $name + ':v' + toString($new_version)})
+            UNWIND $folded_ids AS lid
+            MATCH (l:Learning {id: lid})
+            SET l.consolidated_at = datetime($now),
+                l.consolidated_profile_version = $new_version,
+                l.last_consolidated_model = $model
+            MERGE (nv)-[:FOLDED_LEARNING]->(l)
+            MERGE (up)-[:CONSOLIDATED]->(l)
+            """,
+            name=name,
+            new_version=new_version,
+            folded_ids=folded_learning_ids,
+            model=model,
+            now=now,
+        )
+    if unfolded_learning_ids:
+        tx.run(
+            """
+            MATCH (nv:UserProfileVersion {id: $name + ':v' + toString($new_version)})
+            UNWIND $unfolded_ids AS lid
+            MATCH (l:Learning {id: lid})
+            SET l.unfolded_at = datetime($now),
+                l.unfolded_profile_version = $new_version
+            MERGE (nv)-[:UNFOLDED_LEARNING]->(l)
+            """,
+            name=name,
+            new_version=new_version,
+            unfolded_ids=unfolded_learning_ids,
             now=now,
         )
 
@@ -2163,6 +2355,21 @@ def fetch_recent_observations(
     return [dict(record) for record in records]
 
 
+def count_project_observations(driver, database: str, project_id: str) -> int:
+    """Total episodes on the project timeline, for the 'N earlier episodes'
+    pointer under the injected headlines."""
+    record = _execute_query_single(
+        driver,
+        database,
+        """
+        MATCH (:Project {id: $project_id})-[:HAS_OBSERVATION]->(o:Observation)
+        RETURN count(o) AS total
+        """,
+        project_id=project_id,
+    )
+    return int(record["total"]) if record else 0
+
+
 def observation_age_label(ended_epoch: object, now_epoch: float | None = None) -> str:
     """Compact relative age ('5m ago', '3h ago', '2d ago') for context lines."""
     try:
@@ -2275,6 +2482,7 @@ def format_learning_context(
     review_pending: int = 0,
     skill_slugs: list[str] | None = None,
     skill_proposals_pending: int = 0,
+    observation_total: int = 0,
 ) -> str:
     user_learnings = user_learnings or []
     observations = observations or []
@@ -2305,16 +2513,25 @@ def format_learning_context(
                 f"{truncate(str(learning.get('text') or ''), 240)}"
             )
     if observations:
-        lines.extend(["", "Recent project activity (most recent first):"])
+        # Episodic memory is served like the skill catalog: headlines here,
+        # bodies behind a tool. One line per episode keeps the injection flat
+        # no matter how verbose the underlying narratives are.
+        lines.extend(["", "Recent project activity (most recent first, headlines only):"])
         for observation in observations:
             age = observation_age_label(observation.get("ended_epoch"))
             age_text = f", {age}" if age else ""
             title = truncate(str(observation.get("title") or ""), 160)
-            narrative = truncate(str(observation.get("narrative") or ""), 200)
-            entry = f"- [{observation.get('type') or 'change'}{age_text}] {title}"
-            if narrative:
-                entry = f"{entry} — {narrative}"
-            lines.append(entry)
+            lines.append(f"- [{observation.get('type') or 'change'}{age_text}] {title}")
+        older = max(0, observation_total - len(observations))
+        pointer = (
+            "Load any episode in full (facts + narrative + what it produced) "
+            "with episode_fetch(episode_id), page further back with "
+            "episode_fetch(before=<id>), or find older episodes by topic with "
+            "episode_search."
+        )
+        if older:
+            pointer = f"{older} earlier episodes are on record. {pointer}"
+        lines.append(pointer)
     if learnings:
         lines.extend(["", "Relevant project learnings:"])
         for learning in learnings:

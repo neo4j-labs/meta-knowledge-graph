@@ -2412,10 +2412,38 @@ class ObservationTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("Recent project activity (most recent first):", context)
-        self.assertIn("- [bugfix, 2h ago] Fixed the Stop hook — Traced and fixed", context)
+        self.assertIn(
+            "Recent project activity (most recent first, headlines only):", context
+        )
+        self.assertIn("- [bugfix, 2h ago] Fixed the Stop hook", context)
         self.assertIn("- [decision] Chose recency injection", context)
+        # Headlines only: the narrative body stays behind episode_fetch.
+        self.assertNotIn("Traced and fixed the failure.", context)
+        self.assertIn("episode_fetch", context)
+        self.assertIn("episode_search", context)
         self.assertIn("historical record of past work", context)
+
+    def test_learning_context_counts_older_episodes(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        context = project_common.format_learning_context(
+            project,
+            [],
+            observations=[
+                {"type": "change", "title": "Latest thing", "ended_epoch": None},
+            ],
+            observation_total=8,
+        )
+        self.assertIn("7 earlier episodes are on record.", context)
+        # A total no larger than what is shown must not advertise more history.
+        flat = project_common.format_learning_context(
+            project,
+            [],
+            observations=[
+                {"type": "change", "title": "Latest thing", "ended_epoch": None},
+            ],
+            observation_total=1,
+        )
+        self.assertNotIn("earlier episodes are on record", flat)
 
     def test_observation_age_label(self) -> None:
         now = 1_000_000_000.0
