@@ -1,5 +1,5 @@
 ---
-description: Review the MKG learning queue. Surface learnings awaiting a human decision — ambiguous contradictions and user-scoped candidate facts the automatic gate cannot resolve — walk them one at a time, and apply each decision through the resolver tool.
+description: Review the MKG learning queue. Surface learnings and skill proposals awaiting a human decision — ambiguous contradictions, user-scoped candidate facts, and distilled skills the automatic machinery cannot activate on its own — walk them one at a time, and apply each decision through the resolver tools.
 argument-hint: [optional project id; defaults to the current project]
 ---
 
@@ -15,8 +15,13 @@ deliberately leaves two kinds of item for a person:
 - **User-scoped candidate facts** — durable facts about the person that would be
   folded into the cross-project persona. These are never auto-approved, because
   an unreviewed fact must not be able to rewrite the agent's identity on its own.
+- **Skill proposals** — reusable procedures the background skill-distillation
+  service compiled from clusters of approved learnings. A skill changes how the
+  agent works, so — exactly like a user fact — it is never activated without a
+  human decision. They arrive in the `skill_proposals` list of the same queue.
 
-Nothing reaches the trusted tier (or the persona) until you approve it here.
+Nothing reaches the trusted tier (the persona, or live skills) until you
+approve it here.
 
 Optional argument — a project id to review instead of the current one:
 **$ARGUMENTS**
@@ -31,6 +36,8 @@ passing `project_id` only if the user named one in the argument.
   Tell the user to restart/reinstall the plugin so the review tools appear, and
   stop — do not hand-edit the graph with raw Cypher to approve memory.
 - If `count` is `0`, report that the queue is empty and stop.
+- The result carries two lists: `queue` (learnings) and `skill_proposals`
+  (distilled skills). Triage learnings first, then skill proposals.
 
 ## Step 2 — Triage: show the whole queue first
 
@@ -91,14 +98,55 @@ new/existing one is right" against one specific conflicting item, pass its id
 as `conflict_id` (omit to resolve against all of them). Report one plain-words
 line per item — e.g. "#2 kept — now trusted memory" — then continue.
 
+## Step 3b — Skill proposals
+
+For each entry in `skill_proposals`, present:
+
+- **What it is, in plain words** — "a new skill: <name>" for a `create`
+  proposal, or "an update to the skill <slug>" for an `update` proposal.
+- **The description** (this is what retrieval matches on) and the **proposed
+  content** — show the content in full; it is the procedure the agent will
+  follow. For an update, summarise what changed against `current_content`
+  rather than dumping both.
+- **Why the proposer thinks it's worth it** — the `rationale`, plus the
+  motivating learnings from `derived_from` (one line each), so the user can
+  see every step traces back to approved memory.
+
+Offer the choices in plain language and map them to wire actions yourself:
+
+| Offer (plain label → wire action) |
+|---|
+| "activate it" → `approve` · "fix it first" → `edit_approve` · "discard it" → `reject` |
+
+What each choice does (explain when recommending, or on request):
+
+- **activate it** (`approve`) — the skill goes live: it becomes findable via
+  `skill_search`, loadable via `skill_fetch`, and listed in the injected
+  catalog line.
+- **fix it first** (`edit_approve`) — the user supplies corrections; pass them
+  as `edited_content` and/or `edited_description`, then it goes live.
+- **discard it** (`reject`) — the proposal is dropped. Rejecting a *new* skill
+  frees its learnings for future clustering; rejecting an *update* leaves the
+  live skill exactly as it was. Either way no learning is ever touched.
+
+Apply each decision with `project_resolve_skill`, passing the item's
+`skill_id` and the mapped `action` (plus `edited_content` /
+`edited_description` for a fix-up). The same batching rule applies: the user
+may decide several at once, but never resolve one they did not decide.
+
+If the user asks to remove a live skill that is misfiring, that is
+`project_resolve_skill` with action `retire` — mention it only when relevant.
+
 ## Step 4 — Close out
 
 When the queue is drained (or the user stops), give a short summary: how many
-items were approved, rejected, edited, or merged, and how many remain. If any
-user-scoped facts were approved, mention that they will be folded into the
-persona on a later background consolidation once enough have accumulated — no
-action needed now.
+items were approved, rejected, edited, or merged, how many skills were
+activated or discarded, and how many remain. If any user-scoped facts were
+approved, mention that they will be folded into the persona on a later
+background consolidation once enough have accumulated — no action needed now.
+If any skills were activated, mention they are now live in `skill_search`.
 
 Never approve, reject, or edit memory the user did not decide on, and never use
-raw `write-cypher` to change learning status — always go through
-`project_resolve_learning` so provenance and the contradiction edges stay correct.
+raw `write-cypher` to change learning or skill status — always go through
+`project_resolve_learning` / `project_resolve_skill` so provenance, version
+history, and the contradiction edges stay correct.

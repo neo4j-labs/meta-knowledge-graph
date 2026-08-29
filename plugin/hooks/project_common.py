@@ -1134,6 +1134,17 @@ def ensure_project_schema(tx) -> None:
     tx.run(
         "CREATE CONSTRAINT IF NOT EXISTS FOR (o:Observation) REQUIRE o.id IS UNIQUE"
     )
+    tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (sk:Skill) REQUIRE sk.id IS UNIQUE")
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (sv:SkillVersion) REQUIRE sv.id IS UNIQUE"
+    )
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (tp:TaskPattern) REQUIRE tp.id IS UNIQUE"
+    )
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (a:SkillProposalAudit) "
+        "REQUIRE a.id IS UNIQUE"
+    )
     tx.run(
         "CREATE FULLTEXT INDEX project_learning_fulltext IF NOT EXISTS "
         "FOR (l:Learning) ON EACH [l.text, l.task_pattern, l.summary]"
@@ -1141,6 +1152,10 @@ def ensure_project_schema(tx) -> None:
     tx.run(
         "CREATE FULLTEXT INDEX project_observation_fulltext IF NOT EXISTS "
         "FOR (o:Observation) ON EACH [o.title, o.narrative]"
+    )
+    tx.run(
+        "CREATE FULLTEXT INDEX project_skill_fulltext IF NOT EXISTS "
+        "FOR (sk:Skill) ON EACH [sk.name, sk.description, sk.content]"
     )
 
 
@@ -1306,6 +1321,130 @@ def consolidation_interval_hours() -> float:
     return _env_float(
         "MKG_PROMPT_CONSOLIDATION_INTERVAL_HOURS", PROMPT_CONSOLIDATION_INTERVAL_HOURS
     )
+
+
+# --- Skill distillation ------------------------------------------------------
+#
+# A rate-limited service (hooks/consolidate_skills.py) compiles groups of
+# human-approved, procedural learnings (``task_pattern`` set) into executable
+# skills served straight from the graph (``skill_search`` / ``skill_fetch`` MCP
+# tools). Skills never touch disk. Like the system prompt, nothing becomes a
+# live skill without a human decision through the review queue.
+#
+# Grouping is procedural, not thematic: every learning's ``task_pattern``
+# resolves to a first-class ``(:TaskPattern)`` node (exact normalized match,
+# then pattern-embedding similarity), and a skill group is simply the learnings
+# tagged with one pattern — no cosine floor over learning text at all. Groups
+# whose learnings are recalled together (``INJECTED_IN`` session overlap) merge
+# on top of that.
+SKILL_CONSOLIDATION_THRESHOLD = 4
+SKILL_CONSOLIDATION_INTERVAL_HOURS = 24.0
+SKILL_MIN_CLUSTER_SIZE = 2
+# Calibrated for text-embedding-3-small on short task-pattern strings:
+# paraphrases of the same procedure measure ~0.6-0.7, related-but-distinct
+# procedures ~0.45-0.6, unrelated <0.35. Recalibrate when changing
+# EMBEDDING_MODEL. Merging related-but-distinct procedures is co-activation's
+# job, not this floor's.
+TASK_PATTERN_SIMILARITY_THRESHOLD = 0.65
+# Jaccard overlap of the session sets two groups' learnings were injected into
+# before the groups are considered one procedure in practice.
+SKILL_COACTIVATION_THRESHOLD = 0.5
+MAX_SKILL_CONTENT = 4000
+MAX_SKILL_DESCRIPTION = 300
+_FALSEY_ENV = {"0", "false", "off", "no"}
+
+
+def skill_consolidation_enabled() -> bool:
+    """The skill proposer is on by default; ``MKG_SKILL_CONSOLIDATION=0`` disables."""
+    return os.environ.get("MKG_SKILL_CONSOLIDATION", "1").strip().lower() not in _FALSEY_ENV
+
+
+def skill_catalog_inject_enabled() -> bool:
+    """Whether context injection lists the approved-skill slug catalog."""
+    return os.environ.get("MKG_SKILL_CATALOG_INJECT", "1").strip().lower() not in _FALSEY_ENV
+
+
+def skill_consolidation_threshold() -> int:
+    return int(_env_float("MKG_SKILL_CONSOLIDATION_THRESHOLD", SKILL_CONSOLIDATION_THRESHOLD))
+
+
+def skill_consolidation_interval_hours() -> float:
+    return _env_float(
+        "MKG_SKILL_CONSOLIDATION_INTERVAL_HOURS", SKILL_CONSOLIDATION_INTERVAL_HOURS
+    )
+
+
+def skill_min_cluster_size() -> int:
+    return max(2, int(_env_float("MKG_SKILL_MIN_CLUSTER_SIZE", SKILL_MIN_CLUSTER_SIZE)))
+
+
+def task_pattern_similarity_threshold() -> float:
+    return _env_float(
+        "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD", TASK_PATTERN_SIMILARITY_THRESHOLD
+    )
+
+
+def skill_coactivation_threshold() -> float:
+    return _env_float("MKG_SKILL_COACTIVATION_THRESHOLD", SKILL_COACTIVATION_THRESHOLD)
+
+
+def skill_node_id(project_id: str, slug: str) -> str:
+    return f"skill:{project_id}:{slug}"
+
+
+def normalize_task_pattern(value: object) -> str:
+    """Canonical form of a task-pattern string for exact-match resolution:
+    lowercased, with every non-alphanumeric run collapsed to one space."""
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def task_pattern_node_id(project_id: str, normalized: str) -> str:
+    digest = sha1(f"{project_id}\n{normalized}".encode("utf-8")).hexdigest()[:16]
+    return f"taskpattern:{project_id}:{digest}"
+
+
+def count_pending_skill_proposals(driver, database: str, project_id: str) -> int:
+    """Count skill proposals awaiting a human decision for this project.
+
+    A proposal is a ``:SkillVersion`` with ``outcome = 'pending'`` — either a
+    brand-new candidate skill or a proposed patch to a live one. Skills are
+    never auto-approved: like user-scoped facts, they mutate runtime behaviour,
+    so a human owns their promotion.
+    """
+    record = _execute_query_single(
+        driver,
+        database,
+        """
+        MATCH (sk:Skill {project_id: $project_id})-[:HAS_VERSION]->
+              (v:SkillVersion {outcome: 'pending'})
+        WHERE sk.status IN ['candidate', 'approved']
+        RETURN count(v) AS pending
+        """,
+        project_id=project_id,
+    )
+    return int(record["pending"]) if record else 0
+
+
+def fetch_approved_skill_slugs(
+    driver,
+    database: str,
+    project_id: str,
+    limit: int = 20,
+) -> list[str]:
+    """Slugs of live skills, for the one-line catalog in injected context."""
+    records = _execute_query(
+        driver,
+        database,
+        """
+        MATCH (:Project {id: $project_id})-[:HAS_SKILL]->(sk:Skill {status: 'approved'})
+        RETURN sk.slug AS slug
+        ORDER BY coalesce(sk.last_used_at, sk.updated_at, sk.created_at) DESC
+        LIMIT $limit
+        """,
+        project_id=project_id,
+        limit=limit,
+    )
+    return [str(record["slug"]) for record in records if record["slug"]]
 
 
 def count_user_profile_memories_pending(driver, database: str) -> int:
@@ -2134,14 +2273,19 @@ def format_learning_context(
     user_learnings: list[dict[str, Any]] | None = None,
     observations: list[dict[str, Any]] | None = None,
     review_pending: int = 0,
+    skill_slugs: list[str] | None = None,
+    skill_proposals_pending: int = 0,
 ) -> str:
     user_learnings = user_learnings or []
     observations = observations or []
+    skill_slugs = skill_slugs or []
     if (
         not learnings
         and not user_learnings
         and not observations
         and not review_pending
+        and not skill_slugs
+        and not skill_proposals_pending
     ):
         return ""
 
@@ -2183,6 +2327,15 @@ def format_learning_context(
                 f"- [{status}{confidence_text}] "
                 f"{truncate(str(learning.get('text') or ''), 240)}"
             )
+    if skill_slugs:
+        lines.extend(
+            [
+                "",
+                "Learned skills for this project (find one with skill_search, "
+                "load its full procedure with skill_fetch): "
+                + ", ".join(skill_slugs),
+            ]
+        )
     if review_pending:
         plural = "item" if review_pending == 1 else "items"
         lines.extend(
@@ -2191,6 +2344,15 @@ def format_learning_context(
                 f"{review_pending} learning {plural} awaiting your review — "
                 "ambiguous contradictions and user-scoped facts the automatic "
                 "gate left for a human. Run /mkg-review to resolve them.",
+            ]
+        )
+    if skill_proposals_pending:
+        plural = "proposal" if skill_proposals_pending == 1 else "proposals"
+        lines.extend(
+            [
+                "",
+                f"{skill_proposals_pending} learned-skill {plural} awaiting your "
+                "review. Run /mkg-review to approve or reject them.",
             ]
         )
     lines.extend(

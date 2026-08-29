@@ -1210,14 +1210,18 @@ def create_mcp_server(
     ) -> str:
         """List learnings awaiting a human decision, oldest first.
 
-        Surfaces exactly the two populations the automatic consistency gate
-        cannot resolve on its own: user-scoped ``candidate`` learnings (which
-        mutate the cross-project persona, so a human owns their promotion) and
-        project-scoped ``candidate`` learnings the gate left ``ambiguous`` — a
-        genuine contradiction it could not adjudicate. Each item carries the
-        existing learnings it contradicts, each with the judge's stated reason
-        for punting (``judge_reason``), so a reviewer can choose keep-new,
-        keep-existing, or keep-both. Resolve items with ``project_resolve_learning``.
+        Surfaces exactly the populations the automatic machinery cannot resolve
+        on its own: user-scoped ``candidate`` learnings (which mutate the
+        cross-project persona, so a human owns their promotion), project-scoped
+        ``candidate`` learnings the gate left ``ambiguous`` — a genuine
+        contradiction it could not adjudicate — and pending *skill proposals*
+        distilled from approved learnings (which mutate runtime behaviour, so
+        they are never auto-activated). Each learning item carries the existing
+        learnings it contradicts, with the judge's stated reason for punting
+        (``judge_reason``); each skill proposal carries the proposed content,
+        the current content when patching, the proposer's rationale, and the
+        motivating learnings. Resolve learnings with ``project_resolve_learning``
+        and skill proposals with ``project_resolve_skill``.
         """
         resolved_pid = _resolve_project_id(project_id)
         records = await _execute_query(
@@ -1255,9 +1259,64 @@ def create_mcp_server(
             project_id=resolved_pid,
             limit=limit,
         )
-        items = [dict(r) for r in records]
+        items = [{**dict(r), "kind": "learning"} for r in records]
+
+        proposal_records = await _execute_query(
+            """
+            MATCH (sk:Skill {project_id: $project_id})-[:HAS_VERSION]->
+                  (v:SkillVersion {outcome: 'pending'})
+            WHERE sk.status IN ['candidate', 'approved']
+            RETURN sk.id AS skill_id,
+                   sk.slug AS slug,
+                   sk.status AS skill_status,
+                   sk.content AS current_content,
+                   v.id AS version_id,
+                   v.proposal_action AS action,
+                   v.name AS name,
+                   v.description AS description,
+                   v.content AS proposed_content,
+                   v.rationale AS rationale,
+                   coalesce(v.derived_from, []) AS derived_from_ids,
+                   toString(v.created_at) AS created_at
+            ORDER BY created_at ASC
+            LIMIT $limit
+            """,
+            project_id=resolved_pid,
+            limit=limit,
+        )
+        skill_proposals = [dict(r) for r in proposal_records]
+        derived_ids = sorted(
+            {
+                str(lid)
+                for proposal in skill_proposals
+                for lid in proposal.get("derived_from_ids") or []
+            }
+        )
+        derived_texts: dict[str, str] = {}
+        if derived_ids:
+            learning_records = await _execute_query(
+                "UNWIND $ids AS lid MATCH (l:Learning {id: lid}) "
+                "RETURN l.id AS id, l.text AS text",
+                ids=derived_ids,
+            )
+            derived_texts = {str(r["id"]): str(r["text"] or "") for r in learning_records}
+        for proposal in skill_proposals:
+            proposal["kind"] = "skill_proposal"
+            proposal["derived_from"] = [
+                {"id": lid, "text": derived_texts.get(str(lid), "")}
+                for lid in proposal.pop("derived_from_ids") or []
+            ]
+            # The current content only matters when reviewing a patch.
+            if proposal.get("action") != "update":
+                proposal["current_content"] = None
+
         return json.dumps(
-            {"project_id": resolved_pid, "count": len(items), "queue": items},
+            {
+                "project_id": resolved_pid,
+                "count": len(items) + len(skill_proposals),
+                "queue": items,
+                "skill_proposals": skill_proposals,
+            },
             default=str,
         )
 
@@ -1410,6 +1469,385 @@ def create_mcp_server(
         )
         return json.dumps(
             {"action": action, "learning": dict(result) if result else {}},
+            default=str,
+        )
+
+    def _skill_embedding_input(name: str, description: str, content: str) -> str:
+        return "\n".join(part for part in (name, description, content) if part)
+
+    @mcp.tool(name="skill_search")
+    async def skill_search(
+        query: Optional[str] = Field(
+            None,
+            description=(
+                "What you are trying to do, in plain words. Hybrid "
+                "vector + keyword search over the project's approved skills. "
+                "Omit to list them all by recency."
+            ),
+        ),
+        project_id: Optional[str] = Field(
+            None,
+            description="Project id (slug). Defaults to the MCP server's CWD folder name.",
+        ),
+        limit: int = Field(5, description="Max skills to return."),
+    ) -> str:
+        """Find learned skills for the current task — slugs and one-line
+        descriptions only, never bodies.
+
+        Skills are reusable procedures distilled from this project's approved
+        memory and served straight from the graph. Call this before starting a
+        task that smells routine (releases, migrations, recurring fixes); when
+        a hit looks relevant, load its full procedure with ``skill_fetch``.
+        """
+        resolved_pid = _resolve_project_id(project_id)
+        normalized_query = (query or "").strip()
+        results: list[dict] = []
+
+        if normalized_query:
+            query_vector = await _embed_learning_text(normalized_query)
+            keyword_query = _hybrid_keyword_query(normalized_query)
+            params = {
+                "project_id": resolved_pid,
+                "search_query": keyword_query,
+                "query_vector": query_vector,
+                "rank_limit": max(1, int(limit)),
+                "limit": limit,
+                "rrf_k": HYBRID_RRF_K,
+            }
+            projection = (
+                "node.slug AS slug, node.description AS description, score, sources"
+            )
+            if query_vector:
+                branches = [
+                    """
+                    MATCH (node:Skill)
+                    SEARCH node IN (
+                        VECTOR INDEX project_skill_vector
+                        FOR $query_vector
+                        WHERE node.project_id = $project_id
+                        LIMIT $rank_limit
+                    ) SCORE AS raw_score
+                    WHERE node.status = 'approved'
+                    WITH node, raw_score
+                    ORDER BY raw_score DESC
+                    WITH collect({node: node, raw_score: raw_score}) AS rows
+                    UNWIND range(0, size(rows) - 1) AS idx
+                    WITH rows[idx] AS row, idx + 1 AS rank
+                    RETURN row.node AS node, rank, 'vector' AS source
+                    """
+                ]
+                if keyword_query:
+                    branches.append(
+                        """
+                        CALL db.index.fulltext.queryNodes('project_skill_fulltext', $search_query)
+                        YIELD node, score AS raw_score
+                        WHERE node:Skill
+                          AND node.project_id = $project_id
+                          AND node.status = 'approved'
+                        WITH node, raw_score
+                        ORDER BY raw_score DESC
+                        LIMIT $rank_limit
+                        WITH collect({node: node, raw_score: raw_score}) AS rows
+                        UNWIND range(0, size(rows) - 1) AS idx
+                        WITH rows[idx] AS row, idx + 1 AS rank
+                        RETURN row.node AS node, rank, 'keyword' AS source
+                        """
+                    )
+                hybrid_query = f"""
+                    CALL () {{
+                        {'UNION ALL'.join(branches)}
+                    }}
+                    WITH node,
+                         sum(1.0 / ($rrf_k + rank)) AS score,
+                         collect(source) AS sources
+                    RETURN {projection}
+                    ORDER BY score DESC
+                    LIMIT $limit
+                """
+                try:
+                    results = [
+                        dict(r) for r in await _execute_query(hybrid_query, **params)
+                    ]
+                except Neo4jError:
+                    results = []
+            if not results and keyword_query:
+                keyword_only = f"""
+                    CALL db.index.fulltext.queryNodes('project_skill_fulltext', $search_query)
+                    YIELD node, score AS raw_score
+                    WHERE node:Skill
+                      AND node.project_id = $project_id
+                      AND node.status = 'approved'
+                    WITH node, raw_score
+                    ORDER BY raw_score DESC
+                    LIMIT $rank_limit
+                    WITH collect({{node: node, raw_score: raw_score}}) AS rows
+                    UNWIND range(0, size(rows) - 1) AS idx
+                    WITH rows[idx] AS row, idx + 1 AS rank
+                    WITH row.node AS node,
+                         1.0 / ($rrf_k + rank) AS score,
+                         ['keyword'] AS sources
+                    RETURN {projection}
+                    ORDER BY score DESC
+                    LIMIT $limit
+                """
+                try:
+                    results = [
+                        dict(r) for r in await _execute_query(keyword_only, **params)
+                    ]
+                except Neo4jError:
+                    results = []
+
+        if not results:
+            records = await _execute_query(
+                """
+                MATCH (sk:Skill {project_id: $project_id, status: 'approved'})
+                RETURN sk.slug AS slug, sk.description AS description,
+                       0.0 AS score, [] AS sources
+                ORDER BY coalesce(sk.last_used_at, sk.updated_at, sk.created_at) DESC
+                LIMIT $limit
+                """,
+                project_id=resolved_pid,
+                limit=limit,
+            )
+            results = [dict(r) for r in records]
+
+        return json.dumps(
+            {
+                "project_id": resolved_pid,
+                "query": normalized_query or None,
+                "count": len(results),
+                "skills": results,
+                "next": "Load a relevant skill's full procedure with skill_fetch(slug).",
+            },
+            default=str,
+        )
+
+    @mcp.tool(name="skill_fetch")
+    async def skill_fetch(
+        slug: str = Field(
+            ..., description="Skill slug from skill_search or the injected catalog."
+        ),
+        project_id: Optional[str] = Field(
+            None,
+            description="Project id (slug). Defaults to the MCP server's CWD folder name.",
+        ),
+    ) -> str:
+        """Load one approved skill's full procedure, with its provenance (the
+        learning ids it was distilled from). Fetch only skills whose search
+        hit actually matches the task at hand."""
+        resolved_pid = _resolve_project_id(project_id)
+        clean_slug = (slug or "").strip()
+        if not clean_slug:
+            return _json_error("slug is required")
+
+        record = await _execute_query_single(
+            """
+            MATCH (sk:Skill {project_id: $project_id, slug: $slug, status: 'approved'})
+            OPTIONAL MATCH (sk)-[:DERIVED_FROM]->(l:Learning)
+            RETURN sk.id AS id, sk.slug AS slug, sk.name AS name,
+                   sk.description AS description, sk.content AS content,
+                   coalesce(sk.version, 1) AS version,
+                   toString(sk.updated_at) AS updated_at,
+                   [x IN collect(l.id) WHERE x IS NOT NULL] AS derived_from
+            """,
+            project_id=resolved_pid,
+            slug=clean_slug,
+        )
+        if not record:
+            available = await _execute_query(
+                "MATCH (sk:Skill {project_id: $project_id, status: 'approved'}) "
+                "RETURN sk.slug AS slug ORDER BY sk.slug",
+                project_id=resolved_pid,
+            )
+            return _json_error(
+                f"no approved skill with slug {clean_slug!r}",
+                available=[str(r["slug"]) for r in available],
+            )
+
+        await _execute_query(
+            """
+            MATCH (sk:Skill {id: $id})
+            SET sk.last_used_at = datetime($timestamp),
+                sk.use_count = coalesce(sk.use_count, 0) + 1
+            """,
+            id=record["id"],
+            timestamp=_now_iso(),
+        )
+        return json.dumps(dict(record), default=str)
+
+    @mcp.tool(name="project_resolve_skill")
+    async def project_resolve_skill(
+        skill_id: str = Field(
+            ...,
+            description="Skill id (from project_review_queue's skill_proposals).",
+        ),
+        action: str = Field(
+            ...,
+            description=(
+                "approve | reject | edit_approve | retire. approve activates the "
+                "pending proposal; edit_approve activates it with edited content "
+                "and/or description; reject discards the proposal (a rejected "
+                "create frees its learnings for future clustering; a rejected "
+                "patch leaves the live skill untouched); retire takes a live "
+                "skill out of search."
+            ),
+        ),
+        edited_content: Optional[str] = Field(
+            None, description="Replacement skill content for edit_approve."
+        ),
+        edited_description: Optional[str] = Field(
+            None, description="Replacement description for edit_approve."
+        ),
+    ) -> str:
+        """Apply a human decision to a skill proposal (or retire a live skill).
+
+        Skills mutate runtime behaviour, so — like user-scoped facts — they are
+        never auto-activated: a human owns ``candidate -> approved``. Approval
+        applies the pending ``:SkillVersion``'s content to the skill, stamps the
+        version ``accepted``, creates the ``DERIVED_FROM`` provenance edges, and
+        embeds the skill so it enters ``skill_search``. Rejection stamps the
+        version ``rejected`` and never touches a learning — the knowledge layer
+        only ever grows.
+        """
+        action = (action or "").strip().lower()
+        allowed = {"approve", "reject", "edit_approve", "retire"}
+        if action not in allowed:
+            return _json_error(f"unknown action {action!r}", allowed=sorted(allowed))
+        clean_id = (skill_id or "").strip()
+        if not clean_id:
+            return _json_error("skill_id is required")
+        timestamp = _now_iso()
+
+        skill = await _execute_query_single(
+            "MATCH (sk:Skill {id: $id}) "
+            "RETURN sk.id AS id, sk.slug AS slug, sk.name AS name, "
+            "sk.description AS description, sk.status AS status",
+            id=clean_id,
+        )
+        if not skill:
+            return _json_error("skill not found", skill_id=clean_id)
+
+        if action == "retire":
+            if skill["status"] != "approved":
+                return _json_error(
+                    "only an approved skill can be retired", status=skill["status"]
+                )
+            await _execute_query(
+                """
+                MATCH (sk:Skill {id: $id})
+                SET sk.status = 'retired',
+                    sk.embedding = null,
+                    sk.retired_at = datetime($ts),
+                    sk.reviewed_by = 'human',
+                    sk.updated_at = datetime($ts)
+                """,
+                id=clean_id,
+                ts=timestamp,
+            )
+        else:
+            pending = await _execute_query_single(
+                """
+                MATCH (sk:Skill {id: $id})-[:HAS_VERSION]->
+                      (v:SkillVersion {outcome: 'pending'})
+                RETURN v.id AS id, v.version AS version, v.name AS name,
+                       v.description AS description, v.content AS content
+                ORDER BY v.version DESC
+                LIMIT 1
+                """,
+                id=clean_id,
+            )
+            if not pending:
+                return _json_error(
+                    "skill has no pending proposal to resolve", skill_id=clean_id
+                )
+
+            if action == "reject":
+                await _execute_query(
+                    """
+                    MATCH (sk:Skill {id: $id})-[:HAS_VERSION]->
+                          (v:SkillVersion {id: $vid})
+                    SET v.outcome = 'rejected',
+                        v.decided_by = 'human',
+                        v.decided_at = datetime($ts)
+                    WITH sk
+                    // A rejected create proposal retires the candidate node and
+                    // frees its learnings for future clustering; the membership
+                    // fingerprint on the version stops the identical group from
+                    // re-proposing. A rejected patch leaves the live skill as-is.
+                    WHERE sk.status = 'candidate'
+                    SET sk.status = 'rejected',
+                        sk.embedding = null,
+                        sk.rejected_at = datetime($ts),
+                        sk.rejected_reason = 'human_review',
+                        sk.updated_at = datetime($ts)
+                    WITH sk
+                    OPTIONAL MATCH (sk)-[d:DERIVED_FROM]->(:Learning)
+                    DELETE d
+                    """,
+                    id=clean_id,
+                    vid=pending["id"],
+                    ts=timestamp,
+                )
+            else:  # approve / edit_approve
+                if action == "edit_approve" and not (
+                    (edited_content or "").strip() or (edited_description or "").strip()
+                ):
+                    return _json_error(
+                        "edit_approve requires edited_content and/or edited_description"
+                    )
+                content = (edited_content or "").strip() or str(
+                    pending["content"] or ""
+                )
+                description = (edited_description or "").strip() or str(
+                    pending["description"] or ""
+                )
+                name = str(pending["name"] or skill["name"] or skill["slug"])
+                if not content:
+                    return _json_error("pending proposal has no content to apply")
+                embedding = await _embed_learning_text(
+                    _skill_embedding_input(name, description, content)
+                )
+                await _execute_query(
+                    """
+                    MATCH (sk:Skill {id: $id})-[:HAS_VERSION]->
+                          (v:SkillVersion {id: $vid})
+                    SET v.outcome = 'accepted',
+                        v.decided_by = 'human',
+                        v.decided_at = datetime($ts),
+                        v.content = $content,
+                        v.description = $description,
+                        sk.name = $name,
+                        sk.description = $description,
+                        sk.content = $content,
+                        sk.status = 'approved',
+                        sk.version = v.version,
+                        sk.embedding = coalesce($embedding, sk.embedding),
+                        sk.reviewed_by = 'human',
+                        sk.reviewed_at = datetime($ts),
+                        sk.updated_at = datetime($ts)
+                    WITH sk, v
+                    UNWIND coalesce(v.derived_from, []) AS lid
+                    MATCH (l:Learning {id: lid})
+                    MERGE (sk)-[d:DERIVED_FROM]->(l)
+                    ON CREATE SET d.created_at = datetime($ts)
+                    """,
+                    id=clean_id,
+                    vid=pending["id"],
+                    content=content,
+                    description=description,
+                    name=name,
+                    embedding=embedding,
+                    ts=timestamp,
+                )
+
+        result = await _execute_query_single(
+            "MATCH (sk:Skill {id: $id}) "
+            "RETURN sk.id AS id, sk.slug AS slug, sk.status AS status, "
+            "coalesce(sk.version, 0) AS version, sk.reviewed_by AS reviewed_by",
+            id=clean_id,
+        )
+        return json.dumps(
+            {"action": action, "skill": dict(result) if result else {}},
             default=str,
         )
 

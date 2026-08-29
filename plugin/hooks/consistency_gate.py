@@ -74,6 +74,10 @@ _VECTOR_INDEXES: list[tuple[str, str]] = [
     # Episodic observations are indexed for search but never gated: the gate
     # queries :Learning explicitly and ignores this label.
     ("Observation", "project_observation_vector"),
+    # Distilled skills are indexed for skill_search but never gated either:
+    # only approved skills carry an embedding (set at approval, dropped on
+    # reject/retire), so the index holds live skills only.
+    ("Skill", "project_skill_vector"),
 ]
 
 _HYBRID_RRF_K = 60.0

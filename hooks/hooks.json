@@ -130,6 +130,10 @@
           },
           {
             "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/consolidate_skills.py\" --background"
+          },
+          {
+            "type": "command",
             "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/consolidate_query_errors.py\" --background"
           }
         ]
@@ -175,6 +179,10 @@
           {
             "type": "command",
             "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/consolidate_system_prompt.py\" --background"
+          },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/consolidate_skills.py\" --background"
           },
           {
             "type": "command",

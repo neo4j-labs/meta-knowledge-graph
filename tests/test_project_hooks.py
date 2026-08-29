@@ -1982,17 +1982,19 @@ class ProjectHookTests(unittest.TestCase):
         stop_hooks = config["hooks"]["Stop"][0]["hooks"]
 
         # The self-rewriting prompt-rebuild Stop hooks are gone; logging, memory
-        # extraction, and the rate-limited prompt- and query-error-consolidation
-        # services remain.
-        self.assertEqual(len(stop_hooks), 4)
+        # extraction, and the rate-limited prompt-, skill-, and
+        # query-error-consolidation services remain.
+        self.assertEqual(len(stop_hooks), 5)
         self.assertIn("hooks/log_event.py", stop_hooks[0]["command"])
         self.assertIn("--client codex", stop_hooks[0]["command"])
         self.assertIn("hooks/process_project.py", stop_hooks[1]["command"])
         self.assertIn("--mode turn --background", stop_hooks[1]["command"])
         self.assertIn("hooks/consolidate_system_prompt.py", stop_hooks[2]["command"])
         self.assertIn("--background", stop_hooks[2]["command"])
-        self.assertIn("hooks/consolidate_query_errors.py", stop_hooks[3]["command"])
+        self.assertIn("hooks/consolidate_skills.py", stop_hooks[3]["command"])
         self.assertIn("--background", stop_hooks[3]["command"])
+        self.assertIn("hooks/consolidate_query_errors.py", stop_hooks[4]["command"])
+        self.assertIn("--background", stop_hooks[4]["command"])
         joined = "\n".join(hook["command"] for hook in stop_hooks)
         self.assertNotIn("apply_system_prompt.py", joined)
         self.assertNotIn("apply_memory_extraction_prompt.py", joined)
@@ -2184,6 +2186,9 @@ class ProjectHookTests(unittest.TestCase):
                 self.assertTrue(any("hooks/log_event.py" in command for command in commands))
                 self.assertTrue(
                     any("hooks/consolidate_system_prompt.py" in command for command in commands)
+                )
+                self.assertTrue(
+                    any("hooks/consolidate_skills.py" in command for command in commands)
                 )
                 self.assertFalse(
                     any("hooks/process_project.py" in command for command in commands)

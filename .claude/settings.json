@@ -129,6 +129,10 @@
           },
           {
             "type": "command",
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/consolidate_skills.py --background"
+          },
+          {
+            "type": "command",
             "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/consolidate_query_errors.py --background"
           }
         ]
@@ -174,6 +178,10 @@
           {
             "type": "command",
             "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/consolidate_system_prompt.py --background"
+          },
+          {
+            "type": "command",
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/consolidate_skills.py --background"
           },
           {
             "type": "command",

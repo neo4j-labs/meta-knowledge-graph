@@ -16,9 +16,11 @@ if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
 from project_common import (  # noqa: E402
+    count_pending_skill_proposals,
     count_review_queue,
     ensure_project_schema,
     embed_text,
+    fetch_approved_skill_slugs,
     fetch_project_learnings,
     fetch_recent_observations,
     fetch_user_learnings,
@@ -28,6 +30,7 @@ from project_common import (  # noqa: E402
     mark_learnings_used,
     neo4j_config,
     resolve_project,
+    skill_catalog_inject_enabled,
 )
 
 
@@ -68,6 +71,8 @@ def main() -> int:
     learnings: list[dict] = []
     observations: list[dict] = []
     review_pending = 0
+    skill_slugs: list[str] = []
+    skill_proposals_pending = 0
 
     try:
         from neo4j import GraphDatabase
@@ -99,6 +104,16 @@ def main() -> int:
                     review_pending = count_review_queue(
                         driver, database, project_id=project.id
                     )
+                    skill_proposals_pending = count_pending_skill_proposals(
+                        driver, database, project_id=project.id
+                    )
+                    # One line of approved-skill slugs so every session knows
+                    # the skill_search / skill_fetch surface exists; anything
+                    # deeper is pull-based through those tools.
+                    if skill_catalog_inject_enabled():
+                        skill_slugs = fetch_approved_skill_slugs(
+                            driver, database, project_id=project.id
+                        )
                 else:
                     learnings = fetch_project_learnings(
                         driver,
@@ -135,6 +150,8 @@ def main() -> int:
         user_learnings,
         observations=observations,
         review_pending=review_pending,
+        skill_slugs=skill_slugs,
+        skill_proposals_pending=skill_proposals_pending,
     )
     if not context:
         return 0

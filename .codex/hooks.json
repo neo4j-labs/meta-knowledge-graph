@@ -146,6 +146,10 @@
           },
           {
             "type": "command",
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/consolidate_skills.py\" --background"
+          },
+          {
+            "type": "command",
             "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/consolidate_query_errors.py\" --background"
           }
         ]
