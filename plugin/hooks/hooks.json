@@ -58,15 +58,6 @@
         ]
       },
       {
-        "matcher": "mcp__.*__(enhance_entity|search_news)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/ingest_diffbot.py\""
-          }
-        ]
-      },
-      {
         "matcher": "mcp__.*__(bigquery_execute_query|neo4j_read_cypher)",
         "hooks": [
           {
