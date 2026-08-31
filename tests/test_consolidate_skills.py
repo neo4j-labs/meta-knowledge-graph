@@ -141,36 +141,6 @@ class GroupingTests(unittest.TestCase):
         self.assertIn(frozenset({"l1", "l2"}), as_sets)
         self.assertIn(frozenset({"l3"}), as_sets)
 
-    def test_coactivation_merges_groups_recalled_together(self) -> None:
-        groups = [["l1", "l2"], ["l3"], ["l4"]]
-        sessions = {
-            "l1": {"s1", "s2"},
-            "l2": {"s2", "s3"},
-            "l3": {"s1", "s2", "s3"},  # jaccard with group 0 = 1.0
-            "l4": {"s9"},
-        }
-        merged = consolidate_skills.merge_groups_by_coactivation(
-            groups, sessions, threshold=0.5
-        )
-        as_sets = [frozenset(g) for g in merged]
-        self.assertIn(frozenset({"l1", "l2", "l3"}), as_sets)
-        self.assertIn(frozenset({"l4"}), as_sets)
-
-    def test_coactivation_ignores_groups_without_recall_history(self) -> None:
-        groups = [["l1"], ["l2"]]
-        merged = consolidate_skills.merge_groups_by_coactivation(
-            groups, {"l1": {"s1"}}, threshold=0.1
-        )
-        self.assertEqual(sorted(len(g) for g in merged), [1, 1])
-
-    def test_coactivation_below_threshold_keeps_groups_apart(self) -> None:
-        groups = [["l1"], ["l2"]]
-        sessions = {"l1": {"s1", "s2", "s3"}, "l2": {"s3", "s4", "s5"}}
-        merged = consolidate_skills.merge_groups_by_coactivation(
-            groups, sessions, threshold=0.5
-        )
-        self.assertEqual(sorted(len(g) for g in merged), [1, 1])
-
     def test_mean_pairwise_similarity(self) -> None:
         embeddings = {
             "a": [1.0, 0.0],
@@ -700,7 +670,6 @@ class SkillConfigTests(unittest.TestCase):
                 "MKG_SKILL_CONSOLIDATION_INTERVAL_HOURS",
                 "MKG_SKILL_MIN_CLUSTER_SIZE",
                 "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD",
-                "MKG_SKILL_COACTIVATION_THRESHOLD",
                 "MKG_SKILL_CATALOG_INJECT",
                 "MKG_SKILL_MAX_PROPOSALS_PER_RUN",
             ):
@@ -711,7 +680,6 @@ class SkillConfigTests(unittest.TestCase):
             self.assertEqual(project_common.skill_consolidation_interval_hours(), 24.0)
             self.assertEqual(project_common.skill_min_cluster_size(), 2)
             self.assertEqual(project_common.task_pattern_similarity_threshold(), 0.65)
-            self.assertEqual(project_common.skill_coactivation_threshold(), 0.5)
             self.assertEqual(project_common.skill_max_proposals_per_run(), 2)
 
     def test_env_overrides(self) -> None:
@@ -719,7 +687,6 @@ class SkillConfigTests(unittest.TestCase):
             "MKG_SKILL_CONSOLIDATION": "0",
             "MKG_SKILL_CONSOLIDATION_THRESHOLD": "7",
             "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD": "0.8",
-            "MKG_SKILL_COACTIVATION_THRESHOLD": "0.3",
             "MKG_SKILL_CATALOG_INJECT": "off",
             "MKG_SKILL_MAX_PROPOSALS_PER_RUN": "5",
         }
@@ -728,7 +695,6 @@ class SkillConfigTests(unittest.TestCase):
             self.assertFalse(project_common.skill_catalog_inject_enabled())
             self.assertEqual(project_common.skill_consolidation_threshold(), 7)
             self.assertEqual(project_common.task_pattern_similarity_threshold(), 0.8)
-            self.assertEqual(project_common.skill_coactivation_threshold(), 0.3)
             self.assertEqual(project_common.skill_max_proposals_per_run(), 5)
 
     def test_max_proposals_floor_is_one(self) -> None:

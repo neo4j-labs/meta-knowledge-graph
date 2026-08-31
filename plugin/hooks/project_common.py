@@ -1341,9 +1341,7 @@ def consolidation_interval_hours() -> float:
 # Grouping is procedural, not thematic: every learning's ``task_pattern``
 # resolves to a first-class ``(:TaskPattern)`` node (exact normalized match,
 # then pattern-embedding similarity), and a skill group is simply the learnings
-# tagged with one pattern — no cosine floor over learning text at all. Groups
-# whose learnings are recalled together (``INJECTED_IN`` session overlap) merge
-# on top of that.
+# tagged with one pattern — no cosine floor over learning text at all.
 SKILL_CONSOLIDATION_THRESHOLD = 4
 SKILL_CONSOLIDATION_INTERVAL_HOURS = 24.0
 SKILL_MIN_CLUSTER_SIZE = 2
@@ -1355,12 +1353,8 @@ SKILL_MAX_PROPOSALS_PER_RUN = 2
 # Calibrated for text-embedding-3-small on short task-pattern strings:
 # paraphrases of the same procedure measure ~0.6-0.7, related-but-distinct
 # procedures ~0.45-0.6, unrelated <0.35. Recalibrate when changing
-# EMBEDDING_MODEL. Merging related-but-distinct procedures is co-activation's
-# job, not this floor's.
+# EMBEDDING_MODEL.
 TASK_PATTERN_SIMILARITY_THRESHOLD = 0.65
-# Jaccard overlap of the session sets two groups' learnings were injected into
-# before the groups are considered one procedure in practice.
-SKILL_COACTIVATION_THRESHOLD = 0.5
 MAX_SKILL_CONTENT = 4000
 MAX_SKILL_DESCRIPTION = 300
 _FALSEY_ENV = {"0", "false", "off", "no"}
@@ -1400,10 +1394,6 @@ def task_pattern_similarity_threshold() -> float:
     return _env_float(
         "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD", TASK_PATTERN_SIMILARITY_THRESHOLD
     )
-
-
-def skill_coactivation_threshold() -> float:
-    return _env_float("MKG_SKILL_COACTIVATION_THRESHOLD", SKILL_COACTIVATION_THRESHOLD)
 
 
 def skill_node_id(project_id: str, slug: str) -> str:

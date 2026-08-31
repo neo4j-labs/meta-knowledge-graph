@@ -26,10 +26,7 @@ rarely:
    (``MKG_TASK_PATTERN_SIMILARITY_THRESHOLD``) — and a group is simply the
    learnings ``TAGGED_WITH`` one pattern. There is no cosine floor over
    learning *text* at all: full-text similarity measures "same neighborhood",
-   not "same procedure". Groups whose learnings are recalled together —
-   Jaccard overlap of the sessions they were injected into
-   (``MKG_SKILL_COACTIVATION_THRESHOLD``) — merge on top, so procedures that
-   fire together become one skill. Eligible learnings and the *anchors*
+   not "same procedure". Eligible learnings and the *anchors*
    (learnings already derived into live skills) are grouped together: a group
    containing an anchor is a *patch group* for that anchor's skill (size 1
    allowed); an anchor-free group of ``MKG_SKILL_MIN_CLUSTER_SIZE`` or more is
@@ -117,7 +114,6 @@ from project_common import (  # noqa: E402
     normalize_task_pattern,
     project_env,
     resolve_project,
-    skill_coactivation_threshold,
     skill_consolidation_enabled,
     skill_consolidation_interval_hours,
     skill_consolidation_threshold,
@@ -338,7 +334,7 @@ def _parse_iso(value: Any) -> datetime | None:
 
 
 # --------------------------------------------------------------------------- #
-# Grouping — task-pattern resolution + recall co-activation
+# Grouping — task-pattern resolution
 # --------------------------------------------------------------------------- #
 def cosine_similarity(left: list[float], right: list[float]) -> float:
     if not left or not right or len(left) != len(right):
@@ -393,47 +389,6 @@ def group_by_pattern(pattern_by_learning: dict[str, str]) -> list[list[str]]:
     return list(groups.values())
 
 
-def merge_groups_by_coactivation(
-    groups: list[list[str]],
-    sessions_by_learning: dict[str, set[str]],
-    threshold: float,
-) -> list[list[str]]:
-    """Merge pattern groups whose learnings are recalled together.
-
-    Two distinct procedures that keep getting injected into the same sessions
-    are, in practice, one skill ("fire together, wire together"). A group's
-    session set is the union over its members; groups merge when the Jaccard
-    overlap clears ``threshold``. Groups with no recall history never merge.
-    """
-    session_sets = [
-        set().union(*(sessions_by_learning.get(m, set()) for m in members))
-        if members
-        else set()
-        for members in groups
-    ]
-    parent = list(range(len(groups)))
-
-    def find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    for i in range(len(groups)):
-        for j in range(i + 1, len(groups)):
-            left, right = session_sets[i], session_sets[j]
-            if not left or not right:
-                continue
-            union_size = len(left | right)
-            if union_size and len(left & right) / union_size >= threshold:
-                parent[find(j)] = find(i)
-
-    merged: dict[int, list[str]] = {}
-    for index, members in enumerate(groups):
-        merged.setdefault(find(index), []).extend(members)
-    return list(merged.values())
-
-
 def mean_pairwise_similarity(
     member_ids: list[str],
     embedding_by_id: dict[str, list[float] | None],
@@ -458,7 +413,7 @@ def partition_components(
     anchor_skills_by_learning: dict[str, list[str]],
     min_cluster_size: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split the merged pattern groups into patch groups and create clusters.
+    """Split the pattern groups into patch groups and create clusters.
 
     A group containing an anchor (a learning already derived into a live
     skill) is a patch group for that skill — its skill is located through its
@@ -1186,26 +1141,6 @@ def resolve_task_patterns(
     return tagged
 
 
-def fetch_injection_sessions(
-    driver, database: str, learning_ids: list[str]
-) -> dict[str, set[str]]:
-    """Which sessions each learning has been injected into — the recall
-    co-activation signal."""
-    if not learning_ids:
-        return {}
-    records = _execute_query(
-        driver,
-        database,
-        """
-        MATCH (l:Learning)-[:INJECTED_IN]->(s:Session)
-        WHERE l.id IN $ids
-        RETURN l.id AS id, collect(DISTINCT s.session_id) AS sessions
-        """,
-        ids=learning_ids,
-    )
-    return {str(r["id"]): {str(s) for s in r["sessions"]} for r in records}
-
-
 def fetch_skill_inventory(driver, database: str, project_id: str) -> list[dict[str, Any]]:
     records = _execute_query(
         driver,
@@ -1724,21 +1659,13 @@ def consolidate(payload: dict[str, Any]) -> None:
             now=timestamp,
         )
         groups = group_by_pattern(pattern_by_learning)
-        # Behavioural axis: procedures recalled together become one skill.
-        sessions_by_learning = fetch_injection_sessions(
-            driver, database, list(pattern_by_learning)
-        )
-        components = merge_groups_by_coactivation(
-            groups, sessions_by_learning, skill_coactivation_threshold()
-        )
         print(
             f"[consolidate_skills] {len(pattern_by_learning)} learnings across "
-            f"{len(groups)} task patterns -> {len(components)} groups after "
-            "co-activation merge"
+            f"{len(groups)} task patterns"
         )
 
         patch_groups, create_clusters, skipped_multi = partition_components(
-            components, anchor_skills_by_learning, min_size
+            groups, anchor_skills_by_learning, min_size
         )
         for skipped in skipped_multi:
             print(
