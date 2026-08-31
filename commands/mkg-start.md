@@ -76,7 +76,7 @@ Interpret the state:
 - `has_persona = 0` → no custom persona seeded; SessionStart is falling back to
   the generic MKG bootstrap prompt. A clean slate for **either** path.
 - `accounts > 0` → the RoadFlex sales graph is already seeded.
-- `pending_user_memories` → how many human-approved user-scoped memories are
+- `pending_user_memories` → how many gate-approved user-scoped memories are
   waiting to be folded into the persona (it fires once **more than 5** are
   pending; see Path B).
 
@@ -116,11 +116,12 @@ persona was just seeded so SessionStart injects it.
 You will **learn the purpose of the agent** from the user, store it as durable
 **user-scoped** memories, and let MKG's consolidation service fold those into a
 custom "user adaptations" section. The mechanism: the Stop / SessionEnd
-`consolidate_system_prompt` service folds pending **human-approved
-user-scoped** learnings into `(:UserProfile {name:'default'})` — the section
-SessionStart appends to the frozen base prompt — once **more than
-5** are pending. Raw candidates first go through `/mkg-review`; approving **6
-user memories** is the trigger that generates the section on a clean graph.
+`consolidate_system_prompt` service folds pending **approved user-scoped**
+learnings into `(:UserProfile {name:'default'})` — the section SessionStart
+appends to the frozen base prompt — once **more than 5** are pending. Raw
+candidates are approved automatically by the consistency + safety gate that
+runs at the end of each turn; **6 approved user memories** is the trigger that
+generates the section on a clean graph.
 
 ### B1 — Interview for the purpose
 
@@ -138,8 +139,9 @@ Ask concise questions (skip any already known from injected context). Cover:
 Write each answer as one concise, reusable fact (≤500 chars, no transcripts) via
 `project_add_learning` with **`scope: "user"`**. User scope
 is required because these facts should follow the user across projects. The tool
-writes candidates; the reviewer must approve them before the consolidation
-service counts `scope:'user', status:'approved'` facts. The tool is idempotent
+writes candidates; the automatic gate at the end of the turn safety-screens and
+approves them, and only then does the consolidation service count
+`scope:'user', status:'approved'` facts. The tool is idempotent
 on (scope, text), so make the six **distinct**. Template — fill from the
 interview:
 
@@ -150,9 +152,11 @@ interview:
 5. *Guardrails:* "Always <constraint>; never <anti-pattern>."
 6. *Success:* "Success means <criteria>; standing priorities are <priorities>."
 
-After writing, run `/mkg-review` and approve or edit-approve the facts the user
-accepts. Then re-run the `pending_user_memories` count from Step 2 and confirm
-it is **> 5** (account for any already approved-and-unconsolidated facts).
+After writing, the gate approves the facts automatically when the turn ends —
+no review step. On the next turn, re-run the `pending_user_memories` count from
+Step 2 and confirm it is **> 5** (account for any already
+approved-and-unconsolidated facts). If a fact came out wrong, retract it with
+`project_resolve_learning` (action `reject`) and re-add the corrected wording.
 
 ### B3 — Trigger and verify the persona
 

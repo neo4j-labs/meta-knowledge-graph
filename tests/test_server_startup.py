@@ -132,3 +132,24 @@ def test_project_get_context_has_no_decision_surface() -> None:
     assert "Decision" not in source
     assert "project_add_decision" not in source
     assert '"user_learnings": user_learnings' in source
+
+
+def test_gate_audit_replaces_the_review_queue() -> None:
+    # The gate is autonomous: no tool lists items "awaiting a decision".
+    # project_gate_audit is the accountability record — blocked learnings and
+    # skill proposals with reasons, kept-both conflicts, stale skills — and the
+    # resolver tools remain as the human override surface.
+    source = Path(server.__file__).read_text()
+    assert 'name="project_gate_audit"' in source
+    assert "project_review_queue" not in source
+    assert "blocked_learnings" in source
+    assert "kept_conflicts" in source
+    assert "ambiguous_kept_both" in source
+
+
+def test_resolve_learning_restores_embedding_on_reinstate() -> None:
+    # Reinstating a blocked/rejected tombstone must re-embed it, or it stays
+    # invisible to vector retrieval forever.
+    source = Path(server.__file__).read_text()
+    assert "l.embedding = coalesce(l.embedding, $embedding)" in source
+    assert "c.embedding = coalesce(c.embedding, $embedding)" in source

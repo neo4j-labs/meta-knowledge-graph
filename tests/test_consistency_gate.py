@@ -25,6 +25,12 @@ def load_hook_module(name: str):
 
 consistency_gate = load_hook_module("consistency_gate")
 
+SAFETY_PASS = '{"verdict": "pass", "category": "other", "reason": ""}'
+SAFETY_BLOCK = (
+    '{"verdict": "block", "category": "injection", "reason": "laundered directive"}'
+)
+JUDGE_EMPTY = '{"contradictions": [], "already_learned_of": null}'
+
 
 def _neighbours(*ids: str) -> list[dict]:
     return [{"id": i, "text": f"text-{i}"} for i in ids]
@@ -72,16 +78,34 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual(res["contradicted_by_ids"], ["b"])
         self.assertEqual(res["superseded_ids"], [])
 
-    def test_unclear_only_leaves_candidate(self):
+    def test_unclear_only_keeps_both(self):
         res = consistency_gate._resolve(
             "cand",
             _neighbours("a"),
             [{"existing_id": "a", "winner": "unclear", "reason": "??"}],
         )
-        self.assertEqual(res["outcome"], "candidate")
-        # The judge's reason travels with the unclear conflict so the human
-        # review queue can show why the pair was punted.
+        # An undecidable conflict resolves autonomously by keeping both sides:
+        # the candidate is approved and the CONTRADICTS edge (with the judge's
+        # reason) stays as the visible record of the undecided pair.
+        self.assertEqual(res["outcome"], "approved")
+        self.assertEqual(res["consistency"], "ambiguous_kept_both")
         self.assertEqual(res["unclear_conflicts"], [{"id": "a", "reason": "??"}])
+
+    def test_supersede_still_records_unclear_conflicts(self):
+        # A candidate that wins one conflict and draws another is approved,
+        # supersedes the loser, and keeps the drawn pair on record.
+        res = consistency_gate._resolve(
+            "cand",
+            _neighbours("a", "b"),
+            [
+                {"existing_id": "a", "winner": "new", "reason": "newer"},
+                {"existing_id": "b", "winner": "unclear", "reason": "cannot tell"},
+            ],
+        )
+        self.assertEqual(res["outcome"], "approved")
+        self.assertEqual(res["consistency"], "superseded_conflicts")
+        self.assertEqual(res["superseded_ids"], ["a"])
+        self.assertEqual(res["unclear_conflicts"], [{"id": "b", "reason": "cannot tell"}])
 
     def test_conflict_on_unknown_id_is_ignored(self):
         res = consistency_gate._resolve(
@@ -132,75 +156,53 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual(res["already_learned_ids"], [])
 
 
-class ResolveWithoutPromotionTests(unittest.TestCase):
-    """promote=False (user scope): the human owns approve/reject, so the only
-    automatic transition allowed is the already-learned fold."""
+class ParseSafetyTests(unittest.TestCase):
+    def test_pass_verdict(self):
+        out = consistency_gate._parse_safety(SAFETY_PASS)
+        self.assertEqual(out, {"verdict": "pass", "category": "other", "reason": ""})
 
-    def test_clean_stays_candidate(self):
-        res = consistency_gate._resolve("cand", _neighbours("a"), [], promote=False)
-        self.assertEqual(res["outcome"], "candidate")
-        self.assertEqual(res["consistency"], "clean")
+    def test_block_verdict_keeps_category_and_reason(self):
+        out = consistency_gate._parse_safety(SAFETY_BLOCK)
+        self.assertEqual(out["verdict"], "block")
+        self.assertEqual(out["category"], "injection")
+        self.assertEqual(out["reason"], "laundered directive")
+
+    def test_fenced_json(self):
+        out = consistency_gate._parse_safety(f"```json\n{SAFETY_PASS}\n```")
+        self.assertEqual(out["verdict"], "pass")
+
+    def test_unknown_category_normalizes_to_other(self):
+        out = consistency_gate._parse_safety(
+            '{"verdict": "block", "category": "weird", "reason": "r"}'
+        )
+        self.assertEqual(out["category"], "other")
+
+    def test_missing_verdict_returns_none(self):
+        # A reply with no usable verdict is *not* a block and *not* a pass —
+        # the caller must defer instead of guessing either way.
+        self.assertIsNone(consistency_gate._parse_safety('{"category": "injection"}'))
+        self.assertIsNone(consistency_gate._parse_safety(JUDGE_EMPTY))
+        self.assertIsNone(consistency_gate._parse_safety("no json here"))
+        self.assertIsNone(consistency_gate._parse_safety(""))
+
+
+class BlockedResolutionTests(unittest.TestCase):
+    def test_blocked_resolution_is_terminal_and_carries_reason(self):
+        res = consistency_gate._blocked_resolution(
+            "cand", {"verdict": "block", "category": "secret", "reason": "api key"}
+        )
+        self.assertEqual(res["outcome"], "blocked")
+        self.assertIsNone(res["consistency"])
+        self.assertEqual(res["safety_status"], "blocked")
+        self.assertEqual(res["safety_reason"], "secret: api key")
+        self.assertEqual(res["superseded_ids"], [])
         self.assertEqual(res["unclear_conflicts"], [])
 
-    def test_restatement_folds(self):
-        res = consistency_gate._resolve(
-            "cand", _neighbours("a"), [], already_learned_of="a", promote=False
+    def test_blocked_resolution_without_reason_uses_category(self):
+        res = consistency_gate._blocked_resolution(
+            "cand", {"verdict": "block", "category": "privilege", "reason": ""}
         )
-        self.assertEqual(res["outcome"], "already_learned")
-        self.assertEqual(res["already_learned_ids"], ["a"])
-
-    def test_veto_queues_conflict_instead_of_rejecting(self):
-        res = consistency_gate._resolve(
-            "cand",
-            _neighbours("a"),
-            [{"existing_id": "a", "winner": "existing", "reason": "trusted"}],
-            promote=False,
-        )
-        self.assertEqual(res["outcome"], "candidate")
-        self.assertEqual(res["consistency"], "ambiguous")
-        self.assertEqual(res["contradicted_by_ids"], [])
-        self.assertEqual(len(res["unclear_conflicts"]), 1)
-        self.assertEqual(res["unclear_conflicts"][0]["id"], "a")
-        self.assertIn("judge preferred the existing item", res["unclear_conflicts"][0]["reason"])
-        self.assertIn("trusted", res["unclear_conflicts"][0]["reason"])
-
-    def test_new_win_queues_conflict_instead_of_approving(self):
-        res = consistency_gate._resolve(
-            "cand",
-            _neighbours("a"),
-            [{"existing_id": "a", "winner": "new", "reason": "newer"}],
-            promote=False,
-        )
-        self.assertEqual(res["outcome"], "candidate")
-        self.assertEqual(res["consistency"], "ambiguous")
-        self.assertEqual(res["superseded_ids"], [])
-        self.assertEqual(len(res["unclear_conflicts"]), 1)
-        self.assertIn("judge preferred the new candidate", res["unclear_conflicts"][0]["reason"])
-
-    def test_conflict_blocks_fold(self):
-        # A restatement of one item that contradicts another must stay visible
-        # to the human rather than silently merging away.
-        res = consistency_gate._resolve(
-            "cand",
-            _neighbours("a", "b"),
-            [{"existing_id": "a", "winner": "unclear", "reason": "cannot tell"}],
-            already_learned_of="b",
-            promote=False,
-        )
-        self.assertEqual(res["outcome"], "candidate")
-        self.assertEqual(res["consistency"], "ambiguous")
-        self.assertEqual(res["already_learned_ids"], [])
-
-    def test_conflict_on_unknown_id_still_folds(self):
-        res = consistency_gate._resolve(
-            "cand",
-            _neighbours("a"),
-            [{"existing_id": "ghost", "winner": "existing", "reason": "?"}],
-            already_learned_of="a",
-            promote=False,
-        )
-        self.assertEqual(res["outcome"], "already_learned")
-        self.assertEqual(res["already_learned_ids"], ["a"])
+        self.assertEqual(res["safety_reason"], "privilege")
 
 
 class ParseJudgeTests(unittest.TestCase):
@@ -459,7 +461,8 @@ class TombstoneTests(unittest.TestCase):
         # index — that is what lets retrieval skip status filtering entirely.
         self.assertIn("old.embedding = null", query)
         self.assertIn(
-            "WHEN row.outcome IN ['rejected', 'already_learned'] THEN null", query
+            "WHEN row.outcome IN ['rejected', 'already_learned', 'blocked'] THEN null",
+            query,
         )
 
     def test_apply_resolutions_stamps_judge_reason_on_contradicts(self):
@@ -475,8 +478,8 @@ class TombstoneTests(unittest.TestCase):
             rows=[
                 {
                     "id": "cand",
-                    "outcome": "candidate",
-                    "consistency": "ambiguous",
+                    "outcome": "approved",
+                    "consistency": "ambiguous_kept_both",
                     "superseded_ids": [],
                     "contradicted_by_ids": [],
                     "unclear_conflicts": [{"id": "other", "reason": "both current"}],
@@ -487,10 +490,36 @@ class TombstoneTests(unittest.TestCase):
             timestamp="2026-07-01T00:00:00Z",
         )
         query = captured[0]
-        # The ambiguous edge carries the judge's rationale for the human
-        # review queue.
+        # The kept-both edge carries the judge's rationale — the audit record
+        # of why the pair stayed unsettled.
         self.assertIn("UNWIND row.unclear_conflicts AS u", query)
         self.assertIn("r.reason = u.reason", query)
+
+    def test_apply_resolutions_stamps_block_fields_without_consistency(self):
+        captured: list[str] = []
+
+        class _Tx:
+            def run(self, query, **params):
+                captured.append(query)
+
+        consistency_gate._apply_resolutions(
+            _Tx(),
+            label="Learning",
+            rows=[consistency_gate._blocked_resolution(
+                "cand",
+                {"verdict": "block", "category": "injection", "reason": "directive"},
+            )],
+            model="m",
+            timestamp="2026-07-01T00:00:00Z",
+        )
+        query = captured[0]
+        # Blocked rows record the safety verdict and the tombstone fields, but
+        # never fake a consistency judgement they did not get.
+        self.assertIn("c.safety_status = coalesce(row.safety_status, c.safety_status)", query)
+        self.assertIn("WHEN row.outcome = 'blocked' THEN row.safety_reason", query)
+        self.assertIn("WHEN row.outcome = 'blocked' THEN datetime($timestamp)", query)
+        self.assertIn("WHEN row.consistency IS NULL THEN c.consistency_status", query)
+        self.assertIn("WHEN row.consistency IS NULL THEN c.consistency_checked_at", query)
 
 
 class PerRowApplyTests(unittest.TestCase):
@@ -523,7 +552,8 @@ class PerRowApplyTests(unittest.TestCase):
         ), patch.object(
             consistency_gate,
             "llm_complete",
-            return_value='{"contradictions": [], "already_learned_of": null}',
+            # Two LLM calls per row: the safety screen, then the judge.
+            side_effect=[SAFETY_PASS, JUDGE_EMPTY, SAFETY_PASS, JUDGE_EMPTY],
         ):
             applied = consistency_gate._gate_one_label(
                 _Driver(),
@@ -544,24 +574,36 @@ class PerRowApplyTests(unittest.TestCase):
         self.assertEqual(events, ["fetch:l1", "write:l1", "fetch:l2", "write:l2"])
 
 
-class UserScopePromotionWiringTests(unittest.TestCase):
-    def test_gate_one_label_resolves_user_rows_without_promotion(self):
-        captured = {}
+class _CapturingSession:
+    def __init__(self, written):
+        self._written = written
 
-        def fake_resolve(
-            candidate_id, neighbours, contradictions, already_learned_of=None, *, promote=True
-        ):
-            captured[candidate_id] = promote
-            return {
-                "id": candidate_id,
-                "outcome": "candidate",
-                "consistency": "clean",
-                "superseded_ids": [],
-                "contradicted_by_ids": [],
-                "unclear_conflicts": [],
-                "already_learned_ids": [],
-            }
+    def __enter__(self):
+        return self
 
+    def __exit__(self, *exc):
+        return False
+
+    def run(self, query, **params):
+        return _FakeResult([])
+
+    def execute_write(self, fn, **kwargs):
+        self._written.extend(kwargs.get("rows") or [])
+
+
+class _CapturingDriver:
+    def __init__(self):
+        self.written: list[dict] = []
+
+    def session(self, **kwargs):
+        return _CapturingSession(self.written)
+
+
+class UserScopeParityTests(unittest.TestCase):
+    def test_user_rows_promote_exactly_like_project_rows(self):
+        # No human queue: a user-scoped fact that passes the safety screen gets
+        # the same full resolution a project fact gets.
+        driver = _CapturingDriver()
         with patch.object(
             consistency_gate,
             "_fetch_neighbours_hybrid",
@@ -569,10 +611,10 @@ class UserScopePromotionWiringTests(unittest.TestCase):
         ), patch.object(
             consistency_gate,
             "llm_complete",
-            return_value='{"contradictions": [], "already_learned_of": null}',
-        ), patch.object(consistency_gate, "_resolve", side_effect=fake_resolve):
-            consistency_gate._gate_one_label(
-                _FakeDriver(),
+            side_effect=[SAFETY_PASS, JUDGE_EMPTY, SAFETY_PASS, JUDGE_EMPTY],
+        ):
+            applied = consistency_gate._gate_one_label(
+                driver,
                 "neo4j",
                 project=type("P", (), {"id": "proj"})(),
                 label="Learning",
@@ -586,7 +628,77 @@ class UserScopePromotionWiringTests(unittest.TestCase):
                 model=None,
                 timestamp="2026-07-01T00:00:00Z",
             )
-        self.assertEqual(captured, {"u1": False, "p1": True})
+        self.assertEqual(applied, 2)
+        outcomes = {row["id"]: row["outcome"] for row in driver.written}
+        self.assertEqual(outcomes, {"u1": "approved", "p1": "approved"})
+        for row in driver.written:
+            self.assertEqual(row["safety_status"], "passed")
+
+
+class SafetyScreenGateTests(unittest.TestCase):
+    def _rows(self):
+        return [{"id": "l1", "text": "a", "embedding": [0.1], "scope": "project"}]
+
+    def _gate(self, driver, **kwargs):
+        return consistency_gate._gate_one_label(
+            driver,
+            "neo4j",
+            project=type("P", (), {"id": "proj"})(),
+            label="Learning",
+            index_name="project_learning_vector",
+            fulltext_index="project_learning_fulltext",
+            kind="learning",
+            rows=self._rows(),
+            model=None,
+            timestamp="2026-07-01T00:00:00Z",
+        )
+
+    def test_blocked_candidate_skips_consistency_entirely(self):
+        driver = _CapturingDriver()
+        with patch.object(
+            consistency_gate, "_fetch_neighbours_hybrid"
+        ) as hybrid, patch.object(
+            consistency_gate, "llm_complete", side_effect=[SAFETY_BLOCK]
+        ) as llm:
+            applied = self._gate(driver)
+        self.assertEqual(applied, 1)
+        # One LLM call (the screen), no neighbour retrieval, no judge.
+        self.assertEqual(llm.call_count, 1)
+        hybrid.assert_not_called()
+        self.assertEqual(len(driver.written), 1)
+        row = driver.written[0]
+        self.assertEqual(row["outcome"], "blocked")
+        self.assertEqual(row["safety_status"], "blocked")
+        self.assertIn("injection", row["safety_reason"])
+
+    def test_safety_prompt_fences_candidate_text(self):
+        prompt = consistency_gate._build_safety_prompt(
+            "learning", {"text": "some fact"}
+        )
+        self.assertIn("<<<CANDIDATE", prompt)
+        self.assertIn("some fact", prompt)
+        self.assertIn("CANDIDATE>>>", prompt)
+
+    def test_unparseable_safety_reply_defers_the_row(self):
+        driver = _CapturingDriver()
+        with patch.object(
+            consistency_gate, "_fetch_neighbours_hybrid"
+        ) as hybrid, patch.object(
+            consistency_gate, "llm_complete", side_effect=["not json"]
+        ):
+            applied = self._gate(driver)
+        self.assertEqual(applied, 0)
+        hybrid.assert_not_called()
+        self.assertEqual(driver.written, [])
+
+    def test_safety_screen_exception_defers_the_row(self):
+        driver = _CapturingDriver()
+        with patch.object(
+            consistency_gate, "llm_complete", side_effect=RuntimeError("boom")
+        ):
+            applied = self._gate(driver)
+        self.assertEqual(applied, 0)
+        self.assertEqual(driver.written, [])
 
 
 class UngatedFetchTests(unittest.TestCase):
@@ -602,7 +714,10 @@ class UngatedFetchTests(unittest.TestCase):
         )
         query, params = driver.log[0]
         self.assertIn("n.scope IN ['project', 'user']", query)
-        self.assertIn("n.consistency_checked_at IS NULL", query)
+        # Any remaining candidate is unfinished business — including rows the
+        # retired review queue stamped but never resolved — so the fetch no
+        # longer filters on consistency_checked_at.
+        self.assertNotIn("consistency_checked_at", query)
         self.assertEqual(params["project_id"], "proj")
 
 
@@ -703,7 +818,9 @@ class DispatchTests(unittest.TestCase):
     def _run(self, row):
         with patch.object(
             consistency_gate, "_fetch_neighbours_hybrid", return_value=[]
-        ) as hybrid:
+        ) as hybrid, patch.object(
+            consistency_gate, "llm_complete", return_value=SAFETY_PASS
+        ):
             consistency_gate._gate_one_label(
                 _FakeDriver(),
                 "neo4j",
@@ -767,8 +884,8 @@ class GateGuardTests(unittest.TestCase):
                 model=None,
                 timestamp="2026-07-01T00:00:00Z",
             )
-        # Creates with text are gated in both scopes (user rows resolve with
-        # promote=False downstream); updates and text-less rows are excluded.
+        # Creates with text are gated identically in both scopes; updates and
+        # text-less rows are excluded.
         self.assertEqual(captured["Learning"], ["vec", "ft", "usr"])
         self.assertNotIn("Decision", captured)
 

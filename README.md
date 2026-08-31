@@ -30,7 +30,7 @@ project-scoped memory and durable facts about the user. The persisted **system
 prompt** is frozen: only the seed scripts write it, and it is never rewritten by
 consolidation. What adapts instead is a separate `(:UserProfile)` node — a
 compact "user adaptations" section a rate-limited Stop/SessionEnd hook distills
-from accumulated **human-approved** user-profile memory, which the injection
+from accumulated **gate-approved** user-profile memory, which the injection
 hook appends to the frozen base at session start (keeping every superseded
 section as version history). The **memory extraction prompt** is a fixed code
 constant — there is no Neo4j-backed self-improvement loop.
@@ -283,7 +283,7 @@ Mounted under the `meta-knowledge-graph` prefix, in four groups:
 
 | Group | Tools | Mounted when |
 |---|---|---|
-| Project memory & graph | `project_get_context`, `project_add_learning`, `project_review_queue`, `project_resolve_learning`, `episode_fetch`, `episode_search`, `skill_search`, `skill_fetch`, `project_resolve_skill`, `neo4j_get_schema`, `neo4j_read_cypher` | Always. |
+| Project memory & graph | `project_get_context`, `project_add_learning`, `project_gate_audit`, `project_resolve_learning`, `episode_fetch`, `episode_search`, `skill_search`, `skill_fetch`, `project_resolve_skill`, `neo4j_get_schema`, `neo4j_read_cypher` | Always. |
 | Diffbot research | `search_news`, `enhance_entity` | `DIFFBOT_TOKEN` is set. |
 | BigQuery warehouse | `bigquery_execute_query` | `BIGQUERY_MCP_URL` is set. |
 | Neocarta data catalog | `neocarta_*` | `GCP_PROJECT_ID`, `BIGQUERY_DATASET_ID`, and the `EMBEDDING_MODEL`'s provider key (OpenAI by default) are set. |
@@ -313,8 +313,8 @@ to the plugin directory.
 | `SessionStart` (`startup\|resume\|clear`) | `hooks/inject_system_prompt.py` | Loads `(:SystemPrompt {name: 'default'})` from Neo4j, composes it with the consolidated `(:UserProfile)` "user adaptations" section (appended under a `## User adaptations` header; a profile flagged `needs_revision` carries a caution note until re-consolidated), and injects the result. If the prompt node is missing, injects a tool-agnostic bootstrap prompt telling the agent to discover its tools, recall project memory, and capture user/project facts as scoped learnings. The injection log keeps only a content hash + summary on the `:SystemPromptInjection` node and links it to its source via `[:OF_PROMPT]→(:SystemPrompt)` instead of copying the prompt text. If the same prompt content was already injected into the same session, the hook skips the duplicate (unless the context was wiped by `clear`/`compact`). |
 | `SessionStart` (`startup\|resume\|clear`), `UserPromptSubmit` | `hooks/inject_project_context.py` | Fulltext-ranks `:Learning` against the new prompt and injects the top hits: project-scoped learnings for the current project, plus durable user-scoped learnings that follow the user across every project. Every injected item is linked to the session via `[:INJECTED_IN]`; items already injected earlier in the same session — or first produced during it (`[:FROM_SESSION]`) — are excluded from retrieval, so a conversation never receives the same learning twice, nor has its own freshly-extracted memory echoed back. Marks served learnings as used. At `SessionStart` it additionally injects a "Recent project activity" block — the latest `:Observation` timeline entries by recency (never similarity) as **one-line headlines only**, plus a count of older episodes and a pointer to `episode_fetch` / `episode_search`, so the "previously on this project" recap stays flat and the bodies stay pull-based. |
 | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | `hooks/log_event.py` | Persists each event as a `:SessionEvent` node threaded by `:NEXT`. Main-agent events land under the parent `:Session`; subagent events land under a separate `:Session` keyed by the subagent id and linked back to the parent session, spawn event, start event, and stop event. This is the corpus the memory extraction processor later reads. |
-| `Stop` (`--mode turn`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, renders a fixed code-constant memory-extraction prompt, builds a tail-preserving corpus, fetches the closest existing learnings, and asks an LLM to return create/update/ignore actions for `:Learning` nodes (durable facts and decisions alike — a decision's rationale is folded into the learning text). Each learning is classified `project` (a fact about the project/environment) or `user` (a durable fact about the person that holds across projects); user-scoped learnings are keyed on a project-independent namespace so the same fact dedupes everywhere. Writes new nodes with status `candidate` (embedding each so it is searchable), and stores the model used plus `llm_status` (`called`, `skipped`, or `error`) and skip/error reason on `:ProjectProcessing`. `update` actions are ownership-scoped — automation may only rewrite memory this project owns (or a project-independent user fact), never another project's — and a content change to an already-`approved` note demotes it back to `candidate` (clearing its human provenance and re-opening it for the gate), so automation can never silently overwrite the trusted tier. Alongside the selective memory pass, a second, non-evolvable prompt writes the **episodic timeline**: 1–3 `:Observation` records per work window (`type` ∈ change/bugfix/feature/refactor/discovery/decision/problem, `title`, `facts`, `narrative`), append-only, chained per project via `[:NEXT]` + `[:LATEST_OBSERVATION]`, embedded for search, and written in the same transaction as `PROCESSED_EVENT` marking so a processed window can never lose its timeline entry. Observations are never deduplicated, gated, or approved — they record *what happened*, not *what is true*; when the LLM is unavailable the window simply gets no observation. Then runs the **consistency gate** (`hooks/consistency_gate.py`): each new project-scoped candidate is searched against the top-15 `approved` **and fellow `candidate`** learnings in the same project/scope (excluding itself) — semantically via the vector index when `EMBEDDING_MODEL` is set, else via the fulltext index — and an LLM judge decides genuine contradictions, promoting consistent candidates to `approved`, rejecting the items they supersede (`[:SUPERSEDES]`), or vetoing the candidate to `rejected` (`[:CONTRADICTED_BY]`) when an existing item is clearly more reliable. Resolutions apply per candidate, so restatements extracted in one batch collapse onto one canonical item. Finally a bounded **sweep** pushes ungated candidates — `project_add_learning` MCP writes and rows an earlier judge failure skipped — through the same gate, backfilling their embeddings first. |
-| `Stop`, `SessionEnd` | `hooks/consolidate_system_prompt.py` | Runs in the background, rate-limited. The user-profile consolidation service never touches the base `(:SystemPrompt)` — it maintains the separate `(:UserProfile)` "user adaptations" section the injection hook appends at session start. It only does work when **more than 5** user-profile memories are pending consolidation — human-approved user-scoped learnings not yet folded into the section (`MKG_PROMPT_CONSOLIDATION_THRESHOLD`) — and not more than once per cooldown window (`MKG_PROMPT_CONSOLIDATION_INTERVAL_HOURS`, default 24h, tracked via `last_consolidated_at` on the node). When the gates pass, it sends the current section, the pending user facts, and any retracted facts — fenced as untrusted data — to the LLM, which returns a revised compact section (≤ 12 bullets / ~1500 chars; a runaway reply is discarded), then archives the outgoing section as a `(:UserProfileVersion)` history node before overwriting the active one and bumping its version. Folding is **approved-only**: it counts and folds user-scoped learnings with `status = 'approved'`, never raw candidates, so an unreviewed (or poisoned) user fact cannot reach the cross-project prompt on its own — a human promotes `candidate → approved` through the review queue (`project_review_queue` / `project_resolve_learning`, surfaced by `/mkg-review`). Folded learnings are stamped `consolidated_at` so they drop out of the backlog and out of per-session injection. **Staleness repair**: when a human later rejects or supersedes a fact that was already folded in, the resolver flags the profile `needs_revision`; the next run bypasses threshold *and* cooldown, removes the retracted content, stamps the fact `unfolded_at`, and clears the flag. |
+| `Stop` (`--mode turn`) | `hooks/process_project.py` | Runs in the background. Pulls the session's unprocessed events, renders a fixed code-constant memory-extraction prompt, builds a tail-preserving corpus, fetches the closest existing learnings, and asks an LLM to return create/update/ignore actions for `:Learning` nodes (durable facts and decisions alike — a decision's rationale is folded into the learning text). Each learning is classified `project` (a fact about the project/environment) or `user` (a durable fact about the person that holds across projects); user-scoped learnings are keyed on a project-independent namespace so the same fact dedupes everywhere. Writes new nodes with status `candidate` (embedding each so it is searchable), and stores the model used plus `llm_status` (`called`, `skipped`, or `error`) and skip/error reason on `:ProjectProcessing`. `update` actions are ownership-scoped — automation may only rewrite memory this project owns (or a project-independent user fact), never another project's — and a content change to an already-`approved` note demotes it back to `candidate` (clearing its human provenance and re-opening it for the gate), so automation can never silently overwrite the trusted tier. Alongside the selective memory pass, a second, non-evolvable prompt writes the **episodic timeline**: 1–3 `:Observation` records per work window (`type` ∈ change/bugfix/feature/refactor/discovery/decision/problem, `title`, `facts`, `narrative`), append-only, chained per project via `[:NEXT]` + `[:LATEST_OBSERVATION]`, embedded for search, and written in the same transaction as `PROCESSED_EVENT` marking so a processed window can never lose its timeline entry. Observations are never deduplicated, gated, or approved — they record *what happened*, not *what is true*; when the LLM is unavailable the window simply gets no observation. Then runs the **autonomous consistency + safety gate** (`hooks/consistency_gate.py`) over every new candidate in **both scopes**. A **safety screen** goes first: an LLM judge decides whether the candidate is actually a fact or instruction-shaped text laundered in through tool output, a file, or a fetched page — suspected prompt injections, privilege grabs, and secrets are moved to `status = 'blocked'` (a recorded tombstone with the judge's reason, surfaced by `project_gate_audit`) and never queued or served. Survivors are searched against the top-15 `approved` **and fellow `candidate`** learnings in the same project/scope (excluding themselves) — semantically via the vector index when `EMBEDDING_MODEL` is set, else via the fulltext index — and an LLM judge decides genuine contradictions, promoting consistent candidates to `approved`, rejecting the items they supersede (`[:SUPERSEDES]`), vetoing the candidate to `rejected` (`[:CONTRADICTED_BY]`) when an existing item is clearly more reliable, or — when it genuinely cannot tell which side is right — **keeping both** (`consistency_status = 'ambiguous_kept_both'`, the pair linked by a `[:CONTRADICTS]` edge carrying the judge's reason as the visible record). Nothing waits for a human. Resolutions apply per candidate, so restatements extracted in one batch collapse onto one canonical item. Finally a bounded **sweep** pushes remaining candidates — `project_add_learning` MCP writes, rows an earlier judge/safety failure skipped, and rows stranded by the retired review queue — through the same gate, backfilling their embeddings first. |
+| `Stop`, `SessionEnd` | `hooks/consolidate_system_prompt.py` | Runs in the background, rate-limited. The user-profile consolidation service never touches the base `(:SystemPrompt)` — it maintains the separate `(:UserProfile)` "user adaptations" section the injection hook appends at session start. It only does work when **more than 5** user-profile memories are pending consolidation — gate-approved user-scoped learnings not yet folded into the section (`MKG_PROMPT_CONSOLIDATION_THRESHOLD`) — and not more than once per cooldown window (`MKG_PROMPT_CONSOLIDATION_INTERVAL_HOURS`, default 24h, tracked via `last_consolidated_at` on the node). When the gates pass, it sends the current section, the pending user facts, and any retracted facts — fenced as untrusted data — to the LLM, which returns a revised compact section (≤ 12 bullets / ~1500 chars; a runaway reply is discarded), then archives the outgoing section as a `(:UserProfileVersion)` history node before overwriting the active one and bumping its version. Folding is **approved-only**: it counts and folds user-scoped learnings with `status = 'approved'`, never raw candidates — and approval is granted by the autonomous consistency + safety gate, whose safety screen blocks laundered instructions, privilege grabs, and secrets before they can be approved. That screen, not a human queue, is what keeps a poisoned fact out of the cross-project prompt; a human can still retract an approved fact afterwards via `project_resolve_learning` ("forget that"). Folded learnings are stamped `consolidated_at` so they drop out of the backlog and out of per-session injection. **Staleness repair**: when a fact that was already folded in is later rejected or superseded (by the gate or a human override), the profile goes stale; the next run bypasses threshold *and* cooldown, removes the retracted content, stamps the fact `unfolded_at`, and clears the flag. |
 | `PostToolUse` (matcher on the query tools `bigquery_execute_query` / `neo4j_read_cypher`) | `hooks/capture_query_failures.py` | Captures failed or suspicious query outputs as structured `(:QueryExecution)-[:HAS_ISSUE]→(:QueryIssue)` artifacts. The first pass records issues visible in PostToolUse payloads: empty result sets, parser/schema/permission/resource/capability errors, malformed outputs, and Neo4j serialization cases such as temporal values returned as `{}`. Clean successful query results are ignored. |
 | `Stop`, `SessionEnd` | `hooks/consolidate_query_errors.py` | Runs in the background, rate-limited **per tool**. The query-error consolidation service: it folds unconsolidated *invalid-query* failures — the consolidatable issue classes (`syntax_error`, `schema_mismatch`, `capability_unavailable`, `serialization_issue`, plus the generic error bucket) — into durable `(:QueryErrorPattern)` nodes carrying the error signature, root cause, and actionable fix. Transient/environmental classes (`timeout`, `resource_limit`, `result_size_limit`, `permission_error`) never consolidate, and the LLM is additionally instructed to discard transient one-offs hiding in the generic bucket. Failures are grouped by the client-independent `tool_key`; a tool consolidates only when **more than** `MKG_QUERY_ERROR_CONSOLIDATION_THRESHOLD` (default 1) of its failures are pending and not more than once per `MKG_QUERY_ERROR_CONSOLIDATION_INTERVAL_HOURS` (default 6h, tracked on the per-tool `(:ToolErrorProfile)`). The LLM merges same-root-cause failures into one pattern and updates existing patterns instead of duplicating them; patterns are embedded for semantic recall, keep `[:DERIVED_FROM]` provenance, and consumed executions are stamped `error_consolidated_at` so they leave the queue. |
 | `PostToolUse`, `PostToolUseFailure` (matcher on the query tools `bigquery_execute_query` / `neo4j_read_cypher`) | `hooks/inject_query_error_context.py` | Recall counterpart of the consolidation service. When a query tool fails with a consolidatable invalid-query error (never on successes, timeouts, or other transient failures), it hybrid-searches (vector + fulltext, RRF) the failing query text *and* the error message against the `(:QueryErrorPattern)` library **of that same tool only**, and feeds the top matching fixes back to the model — so guidance is recalled both when the error looks similar and when the query looks similar, and one tool's guidance never leaks into another's failures. Delivery adapts to the event: `PostToolUse` gets `hookSpecificOutput.additionalContext`; `PostToolUseFailure` (no `additionalContext` support) gets `decision: "block"` + `reason`, which simply shows the guidance to the model since the call already failed. Served patterns track `use_count` / `last_used_at` and link `[:INJECTED_IN]` to the session, without per-session dedup — a recurring error should resurface its fix every time. |
@@ -370,41 +370,53 @@ to the plugin directory.
 (:QueryErrorPattern)─[:INJECTED_IN]→ (:Session)           # recall observability
 ```
 
-Candidate learnings flow through retrieval but are review-gated. Project-scoped
-candidates are promoted automatically by the **consistency gate** (see the `Stop`
-hook), which retrieves the closest `approved` and fellow `candidate`
-learnings in the same project/scope (the item itself excluded) and asks
-an LLM judge whether the candidate genuinely contradicts or merely restates any
-of them — including candidates in retrieval is what lets restatements collapse
-(`[:ALREADY_LEARNED_FROM]`) instead of piling up side by side in the review
-queue. Retrieval is semantic (a vector index) when the `EMBEDDING_MODEL` is
-available and falls back to the fulltext index when it is not. No contradiction,
-or a contradiction the candidate wins, promotes it to `approved` (and rejects the
-item it supersedes); an existing item that the judge finds clearly more reliable
-vetoes the candidate to `rejected`; a genuinely ambiguous conflict leaves it
-`candidate` (with `consistency_status = 'ambiguous'`) for a human — stamping the
-judge's stated reason for punting on the `CONTRADICTS` edge. That human gate
-is real, not a placeholder: `project_review_queue` surfaces exactly the two
-populations the gate cannot resolve itself — ambiguous project-scoped conflicts
-and user-scoped candidates — oldest first with their contradicting neighbours
-attached (each carrying the judge's rationale as `judge_reason`, so the reviewer
-sees why the machine could not decide), and `project_resolve_learning` applies the decision (`approve`,
-`reject`, `edit_approve`, or the conflict resolutions `keep_new` / `keep_existing`
-/ `keep_both`) using the same status transitions and edges as the automatic gate,
-stamping `reviewed_by = 'human'` so a later gate run does not silently overturn
-it. The `/mkg-review` command drives this conversationally, and a SessionStart
-nudge reports the pending count. Candidates that enter the graph outside the extractor —
-the `project_add_learning` MCP tool writes them directly
-(embedding at write time when the provider is available), and a judge outage can
-leave extracted rows unresolved — are picked up by a bounded per-turn **sweep**
-(`MKG_CONSISTENCY_SWEEP_LIMIT`, default 8 per label, 0 disables) that backfills
-missing embeddings and runs the exact same gate, so MCP-written memory reaches
-`approved` instead of staying a second-class hint forever. Recall everywhere
-requires `status IN ['approved', 'candidate']` — there is no tolerance for
-status- or scope-less legacy nodes. The gate is additive —
-only the LLM judge is required; with the judge unavailable (or
-`MKG_CONSISTENCY_GATE=0`) candidates stay `candidate` as before, and user-scoped
-candidates stay in the human review queue until approved, edited, or rejected.
+Candidate learnings flow through retrieval but are gate-controlled. The
+**autonomous consistency + safety gate** (see the `Stop` hook) resolves every
+candidate itself, in the same run that created it — both scopes, no human
+dependency. The safety screen runs first: an LLM judge decides whether the
+candidate is a *fact* or instruction-shaped text laundered in through tool
+output, a file, or a fetched page. Facts pass; suspected injections, privilege
+grabs, and secrets become `status = 'blocked'` — recorded tombstones carrying
+the judge's category and reason (`blocked_reason` / `blocked_at`), stripped of
+their embedding, never served, never queued. Survivors go through the
+consistency judgement: the gate retrieves the closest `approved` and fellow
+`candidate` learnings in the same project/scope (the item itself excluded) and
+asks an LLM judge whether the candidate genuinely contradicts or merely
+restates any of them — including candidates in retrieval is what lets
+restatements collapse (`[:ALREADY_LEARNED_FROM]`) instead of piling up side by
+side. Retrieval is semantic (a vector index) when the `EMBEDDING_MODEL` is
+available and falls back to the fulltext index when it is not. No
+contradiction, or a contradiction the candidate wins, promotes it to
+`approved` (and rejects the item it supersedes); an existing item that the
+judge finds clearly more reliable vetoes the candidate to `rejected`; a
+genuinely ambiguous conflict **keeps both sides** — the candidate is approved
+with `consistency_status = 'ambiguous_kept_both'` and the pair stays linked by
+a `CONTRADICTS` edge carrying the judge's stated reason, so nothing is lost
+and the undecided conflict remains inspectable.
+
+Autonomous is not unaccountable: `project_gate_audit` is the standing record —
+blocked learnings and skill proposals with the judge's reasons, kept-both
+conflicts with both sides attached, and stale skills awaiting a patch — and a
+SessionStart line reports what the gate blocked recently. The human is an
+override, never a dependency: `project_resolve_learning` retracts a learning
+("forget that" → `reject`), reinstates a wrongly blocked one (`approve`,
+restoring its embedding), fixes wording (`edit_approve`), or settles a
+kept-both conflict (`keep_new` / `keep_existing` / `keep_both`), using the
+same status transitions and edges as the automatic gate and stamping
+`reviewed_by = 'human'` so a later gate run does not silently overturn it;
+`project_resolve_skill` retires a live skill. Candidates that enter the graph
+outside the extractor — the `project_add_learning` MCP tool writes them
+directly (embedding at write time when the provider is available), and a
+judge or safety-screen outage can leave extracted rows unresolved — are picked
+up by a bounded per-turn **sweep** (`MKG_CONSISTENCY_SWEEP_LIMIT`, default 8
+per label, 0 disables) that backfills missing embeddings and runs the exact
+same gate, so MCP-written memory reaches `approved` instead of staying a
+second-class hint forever. Recall everywhere requires
+`status IN ['approved', 'candidate']` — blocked and rejected tombstones are
+never served, and there is no tolerance for status- or scope-less legacy
+nodes. The gate is additive — only the LLM judge is required; with the judge
+unavailable (or `MKG_CONSISTENCY_GATE=0`) candidates stay `candidate` as
+before, and the sweep resolves them once the judge returns.
 
 Fulltext indexes
 `project_learning_fulltext` backs the retrieval

@@ -1426,10 +1426,9 @@ def create_mcp_server(
         if not clean_text:
             return json.dumps({"status": "error", "error": "text is required"})
         normalized_scope = _normalize_scope(scope)
-        # The tool always writes candidates. Project-scoped ones are promoted
-        # (or folded/rejected) by the consistency-gate sweep at the next Stop;
-        # user-scoped facts stay candidates so they keep flowing through the
-        # queue the prompt-consolidation service reads.
+        # The tool always writes candidates. The consistency-gate sweep at the
+        # next Stop safety-screens each one and then promotes, folds, rejects,
+        # or blocks it — both scopes, no human queue.
         normalized_status = "candidate"
         clamped_confidence = max(0.0, min(1.0, float(confidence)))
         resolved_pid = _resolve_project_id(project_id)
@@ -1502,121 +1501,106 @@ def create_mcp_server(
 
         return json.dumps(dict(record) if record else {}, default=str)
 
-    @mcp.tool(name="project_review_queue")
-    async def project_review_queue(
+    @mcp.tool(name="project_gate_audit")
+    async def project_gate_audit(
         project_id: Optional[str] = Field(
             None,
             description="Project id (slug). Defaults to the MCP server's CWD folder name.",
         ),
-        limit: int = Field(20, description="Max queued items to return."),
+        limit: int = Field(20, description="Max items to return per section."),
     ) -> str:
-        """List learnings awaiting a human decision, oldest first.
+        """The visible record of the autonomous memory gate — what it blocked
+        and what it could not fully settle. Nothing here awaits a decision; the
+        gate resolves everything itself, and this tool exists so that autonomy
+        never becomes unaccountability.
 
-        Surfaces exactly the populations the automatic machinery cannot resolve
-        on its own: user-scoped ``candidate`` learnings (which mutate the
-        cross-project persona, so a human owns their promotion), project-scoped
-        ``candidate`` learnings the gate left ``ambiguous`` — a genuine
-        contradiction it could not adjudicate — and pending *skill proposals*
-        distilled from approved learnings (which mutate runtime behaviour, so
-        they are never auto-activated). Each learning item carries the existing
-        learnings it contradicts, with the judge's stated reason for punting
-        (``judge_reason``); each skill proposal carries the proposed content,
-        the current content when patching, the proposer's rationale, and the
-        motivating learnings. Resolve learnings with ``project_resolve_learning``
-        and skill proposals with ``project_resolve_skill``.
-
-        Also lists ``stale_skills``: live skills flagged ``needs_revision``
-        because a source learning was later rejected or superseded, with no
-        patch proposal pending yet. They are informational — the background
-        distiller will propose a patch; a reviewer may also retire one via
-        ``project_resolve_skill`` when it is actively misleading.
+        Sections, newest first:
+        - ``blocked_learnings`` — candidates the safety screen refused
+          (suspected prompt injections laundered through tool output, files, or
+          fetched pages; privilege grabs; secrets). Each keeps its text and the
+          judge's ``blocked_reason`` as a tombstone; none is ever served as
+          memory. A wrong block is reinstated with
+          ``project_resolve_learning(action='approve')``.
+        - ``blocked_skills`` — distilled skill proposals the safety screen
+          refused before activation, with the judge's reason.
+        - ``kept_conflicts`` — approved learnings whose contradiction with
+          existing memory the judge could not adjudicate: both sides were kept,
+          linked by a ``CONTRADICTS`` edge carrying the judge's reason. A human
+          can settle one with ``project_resolve_learning`` (``keep_new`` /
+          ``keep_existing``).
+        - ``stale_skills`` — live skills flagged ``needs_revision`` because a
+          source learning was later rejected or superseded, with no patch
+          pending yet; the background distiller patches them on its next cycle,
+          or ``project_resolve_skill(action='retire')`` takes one offline now.
         """
         resolved_pid = _resolve_project_id(project_id)
-        records = await _execute_query(
+        blocked_records = await _execute_query(
             """
-            CALL () {
-                MATCH (l:Learning {scope: 'user', status: 'candidate'})
-                RETURN l
-              UNION
-                MATCH (l:Learning {scope: 'project', status: 'candidate'})
-                WHERE l.project_id = $project_id
-                  AND l.consistency_status = 'ambiguous'
-                RETURN l
-            }
+            MATCH (l:Learning {status: 'blocked'})
+            WHERE l.scope = 'user'
+               OR (l.scope = 'project' AND l.project_id = $project_id)
+            RETURN l.id AS id,
+                   l.scope AS scope,
+                   l.text AS text,
+                   l.blocked_reason AS blocked_reason,
+                   toString(l.blocked_at) AS blocked_at
+            ORDER BY blocked_at DESC
+            LIMIT $limit
+            """,
+            project_id=resolved_pid,
+            limit=limit,
+        )
+        blocked_learnings = [
+            {**dict(r), "kind": "blocked_learning"} for r in blocked_records
+        ]
+
+        blocked_skill_records = await _execute_query(
+            """
+            MATCH (sk:Skill {project_id: $project_id})-[:HAS_VERSION]->
+                  (v:SkillVersion {outcome: 'blocked'})
+            RETURN sk.id AS skill_id,
+                   sk.slug AS slug,
+                   v.name AS name,
+                   v.proposal_action AS action,
+                   v.safety_reason AS blocked_reason,
+                   toString(v.decided_at) AS blocked_at
+            ORDER BY blocked_at DESC
+            LIMIT $limit
+            """,
+            project_id=resolved_pid,
+            limit=limit,
+        )
+        blocked_skills = [
+            {**dict(r), "kind": "blocked_skill"} for r in blocked_skill_records
+        ]
+
+        conflict_records = await _execute_query(
+            """
+            MATCH (l:Learning {status: 'approved',
+                               consistency_status: 'ambiguous_kept_both'})
+            WHERE l.scope = 'user'
+               OR (l.scope = 'project' AND l.project_id = $project_id)
             OPTIONAL MATCH (l)-[edge:CONTRADICTS]->(other:Learning)
             WITH l, collect(
                 CASE WHEN other IS NULL THEN null
                 ELSE {id: other.id, text: other.text, status: other.status,
-                      confidence: other.confidence,
                       judge_reason: coalesce(edge.reason, '')} END
             ) AS raw
             RETURN l.id AS id,
                    l.scope AS scope,
                    l.text AS text,
-                   l.confidence AS confidence,
-                   CASE
-                       WHEN l.scope = 'user' THEN 'user_scoped_candidate'
-                       ELSE 'ambiguous_contradiction'
-                   END AS reason,
-                   coalesce(l.consistency_status, 'unreviewed') AS consistency_status,
-                   toString(coalesce(l.updated_at, l.created_at)) AS updated_at,
+                   toString(coalesce(l.consistency_checked_at, l.updated_at))
+                       AS decided_at,
                    [c IN raw WHERE c IS NOT NULL] AS conflicts
-            ORDER BY updated_at ASC
+            ORDER BY decided_at DESC
             LIMIT $limit
             """,
             project_id=resolved_pid,
             limit=limit,
         )
-        items = [{**dict(r), "kind": "learning"} for r in records]
-
-        proposal_records = await _execute_query(
-            """
-            MATCH (sk:Skill {project_id: $project_id})-[:HAS_VERSION]->
-                  (v:SkillVersion {outcome: 'pending'})
-            WHERE sk.status IN ['candidate', 'approved']
-            RETURN sk.id AS skill_id,
-                   sk.slug AS slug,
-                   sk.status AS skill_status,
-                   sk.content AS current_content,
-                   v.id AS version_id,
-                   v.proposal_action AS action,
-                   v.name AS name,
-                   v.description AS description,
-                   v.content AS proposed_content,
-                   v.rationale AS rationale,
-                   coalesce(v.derived_from, []) AS derived_from_ids,
-                   toString(v.created_at) AS created_at
-            ORDER BY created_at ASC
-            LIMIT $limit
-            """,
-            project_id=resolved_pid,
-            limit=limit,
-        )
-        skill_proposals = [dict(r) for r in proposal_records]
-        derived_ids = sorted(
-            {
-                str(lid)
-                for proposal in skill_proposals
-                for lid in proposal.get("derived_from_ids") or []
-            }
-        )
-        derived_texts: dict[str, str] = {}
-        if derived_ids:
-            learning_records = await _execute_query(
-                "UNWIND $ids AS lid MATCH (l:Learning {id: lid}) "
-                "RETURN l.id AS id, l.text AS text",
-                ids=derived_ids,
-            )
-            derived_texts = {str(r["id"]): str(r["text"] or "") for r in learning_records}
-        for proposal in skill_proposals:
-            proposal["kind"] = "skill_proposal"
-            proposal["derived_from"] = [
-                {"id": lid, "text": derived_texts.get(str(lid), "")}
-                for lid in proposal.pop("derived_from_ids") or []
-            ]
-            # The current content only matters when reviewing a patch.
-            if proposal.get("action") != "update":
-                proposal["current_content"] = None
+        kept_conflicts = [
+            {**dict(r), "kind": "kept_conflict"} for r in conflict_records
+        ]
 
         stale_records = await _execute_query(
             """
@@ -1643,9 +1627,10 @@ def create_mcp_server(
         return json.dumps(
             {
                 "project_id": resolved_pid,
-                "count": len(items) + len(skill_proposals),
-                "queue": items,
-                "skill_proposals": skill_proposals,
+                "blocked_count": len(blocked_learnings) + len(blocked_skills),
+                "blocked_learnings": blocked_learnings,
+                "blocked_skills": blocked_skills,
+                "kept_conflicts": kept_conflicts,
                 "stale_skills": stale_skills,
             },
             default=str,
@@ -1654,14 +1639,20 @@ def create_mcp_server(
     @mcp.tool(name="project_resolve_learning")
     async def project_resolve_learning(
         learning_id: str = Field(
-            ..., description="Id of the candidate learning to resolve (from project_review_queue)."
+            ...,
+            description=(
+                "Id of the learning to override (from project_gate_audit, "
+                "injected context, or a graph query)."
+            ),
         ),
         action: str = Field(
             ...,
             description=(
                 "approve | reject | edit_approve | keep_new | keep_existing | keep_both. "
-                "keep_* resolve a contradiction: keep_new supersedes the existing item, "
-                "keep_existing rejects this candidate, keep_both approves and clears the conflict."
+                "reject retracts a learning ('forget that'); approve reinstates one "
+                "the gate blocked or rejected. keep_* settle a recorded contradiction: "
+                "keep_new supersedes the existing item, keep_existing rejects this one, "
+                "keep_both approves and clears the conflict edge."
             ),
         ),
         edited_text: Optional[str] = Field(
@@ -1671,20 +1662,28 @@ def create_mcp_server(
             None,
             description=(
                 "For keep_new/keep_existing: the specific contradicting learning id to "
-                "resolve against. Defaults to every item this candidate contradicts."
+                "resolve against. Defaults to every item this learning contradicts."
             ),
         ),
     ) -> str:
-        """Apply a human decision to a queued learning candidate.
+        """Apply a human override to a learning. The autonomous gate resolves
+        every candidate on its own; this tool is how a person overrides it
+        after the fact — "forget that" (``reject``), reinstate a wrongly
+        blocked or rejected item (``approve``), fix wording (``edit_approve``),
+        or settle a conflict the gate kept both sides of (``keep_new`` /
+        ``keep_existing`` / ``keep_both``). It is an override surface, never a
+        dependency: nothing waits for it.
 
         Human decisions carry provenance (``reviewed_by='human'``) and reuse the
         same status transitions and edges as the automatic gate, so recall, the
         sweep, and consolidation need no special-casing. Approvals clear the
-        item's unresolved ``CONTRADICTS`` edges; ``keep_new`` supersedes the
-        losing item (``SUPERSEDES``, embedding dropped); ``keep_existing``
-        rejects the candidate (``CONTRADICTED_BY``); rejects drop the embedding
-        so the item leaves live retrieval. An approved user-scoped fact becomes
-        eligible for persona consolidation — which folds approved facts only.
+        item's unresolved ``CONTRADICTS`` edges and restore a missing embedding
+        so a reinstated tombstone re-enters live retrieval; ``keep_new``
+        supersedes the losing item (``SUPERSEDES``, embedding dropped);
+        ``keep_existing`` rejects the candidate (``CONTRADICTED_BY``); rejects
+        drop the embedding so the item leaves live retrieval. An approved
+        user-scoped fact becomes eligible for persona consolidation — which
+        folds approved facts only.
 
         Skills feel this too: when a rejection or supersession touches a
         learning some skill was ``DERIVED_FROM``, that skill is flagged
@@ -1727,16 +1726,21 @@ def create_mcp_server(
                 id=clean_id, text=new_text, embedding=embedding, ts=timestamp,
             )
         elif action in {"approve", "keep_both"}:
+            # A blocked or rejected item lost its embedding when it died;
+            # reinstating it must restore one or it stays invisible to vector
+            # retrieval.
+            embedding = await _embed_learning_text(str(target["text"] or ""))
             await _execute_query(
                 """
                 MATCH (l:Learning {id: $id})
                 SET l.status = 'approved',
+                    l.embedding = coalesce(l.embedding, $embedding),
                     l.reviewed_by = 'human', l.reviewed_at = datetime($ts),
                     l.consistency_status = 'human_reviewed',
                     l.updated_at = datetime($ts)
                 WITH l OPTIONAL MATCH (l)-[r:CONTRADICTS]->() DELETE r
                 """,
-                id=clean_id, ts=timestamp,
+                id=clean_id, embedding=embedding, ts=timestamp,
             )
         elif action == "reject":
             await _execute_query(
@@ -1753,10 +1757,12 @@ def create_mcp_server(
                 id=clean_id, ts=timestamp,
             )
         elif action == "keep_new":
+            embedding = await _embed_learning_text(str(target["text"] or ""))
             await _execute_query(
                 """
                 MATCH (c:Learning {id: $id})
                 SET c.status = 'approved',
+                    c.embedding = coalesce(c.embedding, $embedding),
                     c.reviewed_by = 'human', c.reviewed_at = datetime($ts),
                     c.consistency_status = 'human_reviewed',
                     c.updated_at = datetime($ts)
@@ -1773,7 +1779,7 @@ def create_mcp_server(
                 )
                 DELETE r
                 """,
-                id=clean_id, conflict_id=conflict_id, ts=timestamp,
+                id=clean_id, conflict_id=conflict_id, embedding=embedding, ts=timestamp,
             )
         elif action == "keep_existing":
             await _execute_query(
@@ -1799,8 +1805,8 @@ def create_mcp_server(
 
         if action in {"reject", "keep_new", "keep_existing"}:
             # A learning that lost trust poisons the skills distilled from it.
-            # Flag them for revision: recall (skill_fetch) warns, the review
-            # queue lists them, and the background distiller patches them first.
+            # Flag them for revision: recall (skill_fetch) warns, the gate
+            # audit lists them, and the background distiller patches them first.
             await _execute_query(
                 """
                 MATCH (l:Learning {status: 'rejected'})
@@ -2071,7 +2077,8 @@ def create_mcp_server(
             payload["warning"] = (
                 "One or more source learnings were rejected or superseded after "
                 "this skill was distilled; verify each step against current "
-                "project state. A revision proposal is on its way through review."
+                "project state. The background distiller will patch and "
+                "re-activate it on its next cycle."
             )
         return json.dumps(payload, default=str)
 
@@ -2079,17 +2086,21 @@ def create_mcp_server(
     async def project_resolve_skill(
         skill_id: str = Field(
             ...,
-            description="Skill id (from project_review_queue's skill_proposals).",
+            description=(
+                "Skill id (from project_gate_audit, skill_fetch, or a graph "
+                "query)."
+            ),
         ),
         action: str = Field(
             ...,
             description=(
-                "approve | reject | edit_approve | retire. approve activates the "
-                "pending proposal; edit_approve activates it with edited content "
-                "and/or description; reject discards the proposal (a rejected "
-                "create frees its learnings for future clustering; a rejected "
-                "patch leaves the live skill untouched); retire takes a live "
-                "skill out of search."
+                "approve | reject | edit_approve | retire. retire takes a live "
+                "skill out of search ('retire this skill'). approve activates a "
+                "pending proposal the automatic screen has not settled yet; "
+                "edit_approve does so with edited content and/or description; "
+                "reject discards a pending proposal (a rejected create frees "
+                "its learnings for future clustering; a rejected patch leaves "
+                "the live skill untouched)."
             ),
         ),
         edited_content: Optional[str] = Field(
@@ -2099,14 +2110,18 @@ def create_mcp_server(
             None, description="Replacement description for edit_approve."
         ),
     ) -> str:
-        """Apply a human decision to a skill proposal (or retire a live skill).
+        """Apply a human override to a skill. Skills are distilled, safety-
+        screened, and activated autonomously; this tool is how a person
+        overrides the machinery — most commonly ``retire`` for a live skill
+        that is misfiring or unwanted. The approve/reject actions remain for
+        the rare proposal still pending (the safety screen defers when its
+        judge is unavailable) so a human can settle it without waiting for the
+        next background cycle.
 
-        Skills mutate runtime behaviour, so — like user-scoped facts — they are
-        never auto-activated: a human owns ``candidate -> approved``. Approval
-        applies the pending ``:SkillVersion``'s content to the skill, stamps the
-        version ``accepted``, creates the ``DERIVED_FROM`` (learnings) and
-        ``INFORMED_BY`` (tool-error patterns) provenance edges, clears any
-        ``needs_revision`` flag, and embeds the skill so it enters
+        Approval applies the pending ``:SkillVersion``'s content to the skill,
+        stamps the version ``accepted``, creates the ``DERIVED_FROM``
+        (learnings) and ``INFORMED_BY`` (tool-error patterns) provenance edges,
+        clears any ``needs_revision`` flag, and embeds the skill so it enters
         ``skill_search``. Rejection stamps the version ``rejected`` and never
         touches a learning — the knowledge layer only ever grows.
         """

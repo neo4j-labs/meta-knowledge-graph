@@ -38,8 +38,8 @@ re-derive context the graph already holds or repeat a past mistake.
 2. **Triage what you got, by status:**
    - `approved` `:Learning` → **policy.** Treat as hard constraints and as the
      source of anti-patterns to grep for later.
-   - `candidate` `:Learning` → **hints.** Useful, but review-gated — don't treat
-     as binding law.
+   - `candidate` `:Learning` → **hints.** Useful, but not yet gate-approved —
+     don't treat as binding law.
    - A learning that records a past **decision** → **context**, not policy: a
      prior choice and its rationale, folded into the learning text.
    - Respect scope: `project` learnings are about this repo/environment; `user`
@@ -128,9 +128,9 @@ into the learning text):
   preference, recurring constraint) that should follow them across projects.
 - Set a `task_pattern` when the learning or decision is tied to a reusable kind
   of task.
-- The tool is idempotent on (scope, text); new items land as `candidate` and stay
-  review-gated until a human promotes them to `approved`. **You** capture; let
-  the human own the `candidate → approved` gate.
+- The tool is idempotent on (scope, text); new items land as `candidate` and are
+  safety-screened and resolved by the automatic gate at the end of the turn.
+  **You** capture; let the gate own the `candidate → approved` transition.
 
 **You — the orchestrator — own all writes.** Keep subagents read-only against the
 graph (the `mkg-recall` pattern): a single writer avoids duplicate and

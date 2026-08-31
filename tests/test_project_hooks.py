@@ -1483,35 +1483,28 @@ class ProjectHookTests(unittest.TestCase):
         # Demotion re-opens the item for the gate/sweep.
         self.assertIn("l.consistency_checked_at = CASE WHEN demoted THEN null", update_query)
 
-    def test_review_queue_count_targets_unresolved_populations(self) -> None:
+    def test_gate_blocked_count_spans_learnings_and_skills(self) -> None:
         captured: dict = {}
 
         class FakeDriver:
             def execute_query(self, query, **kwargs):
                 captured["query"] = query
                 captured["params"] = kwargs
-                return [{"pending": 3}]
+                return [{"blocked": 3}]
 
-        count = project_common.count_review_queue(FakeDriver(), "neo4j", "mkg")
+        count = project_common.count_gate_blocked(FakeDriver(), "neo4j", "mkg")
         self.assertEqual(count, 3)
-        # User candidates (any project) plus this project's ambiguous conflicts.
+        # Blocked user learnings (any project), this project's blocked project
+        # learnings, and this project's blocked skill proposals — windowed so
+        # the session-start line reports recent activity, not all history.
         self.assertIn("l.scope = 'user'", captured["query"])
-        self.assertIn("l.consistency_status = 'ambiguous'", captured["query"])
+        self.assertIn("Learning {status: 'blocked'}", captured["query"])
+        self.assertIn("SkillVersion {outcome: 'blocked'}", captured["query"])
+        self.assertIn("duration({days: $days})", captured["query"])
         self.assertEqual(captured["params"]["project_id"], "mkg")
-
-    def test_review_queue_fetch_orders_oldest_first_with_conflicts(self) -> None:
-        captured: dict = {}
-
-        class FakeDriver:
-            def execute_query(self, query, **kwargs):
-                captured["query"] = query
-                return []
-
-        project_common.fetch_review_queue(FakeDriver(), "neo4j", "mkg", limit=7)
-        self.assertIn("CONTRADICTS", captured["query"])
-        self.assertIn("ORDER BY updated_at ASC", captured["query"])
-        # Each conflict carries the judge's punt rationale off the edge.
-        self.assertIn("judge_reason: coalesce(edge.reason, '')", captured["query"])
+        self.assertEqual(
+            captured["params"]["days"], project_common.GATE_BLOCKED_WINDOW_DAYS
+        )
 
     def test_user_scoped_learning_is_namespaced_above_the_project(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
@@ -1601,27 +1594,30 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("Prefers terse", context)
         self.assertIn("Treat user facts as durable context", context)
 
-    def test_learning_context_nudges_when_review_pending(self) -> None:
+    def test_learning_context_reports_recent_gate_blocks(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
         context = project_common.format_learning_context(
-            project, [], [], review_pending=3
+            project, [], [], gate_blocked=3
         )
-        self.assertIn("3 learning items awaiting your review", context)
-        self.assertIn("/mkg-review", context)
+        # The accountability line: what the autonomous gate refused, where the
+        # record lives, and how a human overrides a wrong block.
+        self.assertIn("blocked 3 unsafe items", context)
+        self.assertIn("project_gate_audit", context)
+        self.assertIn("project_resolve_learning", context)
 
-    def test_learning_context_no_nudge_when_queue_empty(self) -> None:
+    def test_learning_context_silent_when_nothing_blocked(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
         context = project_common.format_learning_context(
             project,
             [{"text": "A fact.", "status": "approved", "confidence": 0.9}],
-            review_pending=0,
+            gate_blocked=0,
         )
-        self.assertNotIn("awaiting your review", context)
-        # An otherwise-empty context still surfaces solely to carry the nudge.
-        only_nudge = project_common.format_learning_context(
-            project, [], [], review_pending=1
+        self.assertNotIn("blocked", context)
+        # An otherwise-empty context still surfaces solely to carry the record.
+        only_record = project_common.format_learning_context(
+            project, [], [], gate_blocked=1
         )
-        self.assertIn("1 learning item awaiting your review", only_nudge)
+        self.assertIn("blocked 1 unsafe item", only_record)
 
     def test_fetch_learnings_excludes_injected_and_in_session_memory(self) -> None:
         captured: list[tuple[str, dict]] = []

@@ -764,19 +764,107 @@ class SkillContextFormattingTests(unittest.TestCase):
         self.assertIn("skill_search", context)
         self.assertIn("skill_fetch", context)
 
-    def test_skill_proposal_nudge(self) -> None:
-        context = project_common.format_learning_context(
-            self.PROJECT, [], [], skill_proposals_pending=2
-        )
-        self.assertIn("2 learned-skill proposals awaiting your review", context)
-        single = project_common.format_learning_context(
-            self.PROJECT, [], [], skill_proposals_pending=1
-        )
-        self.assertIn("1 learned-skill proposal awaiting", single)
-
     def test_no_skill_data_adds_nothing(self) -> None:
         context = project_common.format_learning_context(self.PROJECT, [], [])
         self.assertEqual(context, "")
+
+
+class _RecordingDriver:
+    """Records execute_query calls; returns queued record lists in order."""
+
+    def __init__(self, results: list[list[dict]] | None = None):
+        self.calls: list[tuple[str, dict]] = []
+        self._results = list(results or [])
+
+    def execute_query(self, query: str, **kwargs):
+        kwargs.pop("database_", None)
+        self.calls.append((query, kwargs))
+        return self._results.pop(0) if self._results else []
+
+
+SAFETY_PASS = '{"verdict": "pass", "category": "other", "reason": ""}'
+SAFETY_BLOCK = (
+    '{"verdict": "block", "category": "injection", "reason": "exfil step"}'
+)
+
+PENDING = {
+    "skill_id": "skill:proj:demo",
+    "slug": "demo",
+    "skill_status": "candidate",
+    "version_id": "skill:proj:demo:v1",
+    "action": "create",
+    "name": "Demo Skill",
+    "description": "Use when demoing.",
+    "content": "## When to use\n## Procedure\n## Pitfalls\n## Verification",
+    "created_at": "2026-08-29T00:00:00Z",
+}
+
+
+class SkillSafetyScreenTests(unittest.TestCase):
+    def test_safety_prompt_fences_the_skill(self) -> None:
+        prompt = consolidate_skills.build_skill_safety_prompt(
+            "Release check", "Use when releasing.", "## Procedure\n1. run tests"
+        )
+        self.assertIn("<<<SKILL", prompt)
+        self.assertIn("Release check", prompt)
+        self.assertIn("SKILL>>>", prompt)
+        # A skill is imperative by nature; the screen must say so instead of
+        # blocking on imperativeness alone.
+        self.assertIn("imperative wording alone is", prompt)
+
+    def test_passing_proposal_activates(self) -> None:
+        driver = _RecordingDriver(results=[[dict(PENDING)]])
+        with patch.object(
+            consolidate_skills, "llm_complete", return_value=SAFETY_PASS
+        ), patch.object(
+            consolidate_skills, "embed_texts", return_value=[[0.1]]
+        ):
+            counts = consolidate_skills.activate_pending_proposals(
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z"
+            )
+        self.assertEqual(counts, {"activated": 1, "blocked": 0, "deferred": 0})
+        activation_query = driver.calls[1][0]
+        self.assertIn("v.outcome = 'accepted'", activation_query)
+        self.assertIn("v.decided_by = 'auto_gate'", activation_query)
+        self.assertIn("sk.status = 'approved'", activation_query)
+        self.assertIn("DERIVED_FROM", activation_query)
+        self.assertIn("INFORMED_BY", activation_query)
+
+    def test_blocked_create_tombstones_the_candidate_skill(self) -> None:
+        driver = _RecordingDriver(results=[[dict(PENDING)]])
+        with patch.object(
+            consolidate_skills, "llm_complete", return_value=SAFETY_BLOCK
+        ):
+            counts = consolidate_skills.activate_pending_proposals(
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z"
+            )
+        self.assertEqual(counts, {"activated": 0, "blocked": 1, "deferred": 0})
+        block_query, block_params = driver.calls[1]
+        self.assertIn("v.outcome = 'blocked'", block_query)
+        self.assertIn("sk.status = 'blocked'", block_query)
+        self.assertIn("sk.embedding = null", block_query)
+        # Only a candidate (create) parent is tombstoned; a live skill whose
+        # patch is blocked stays untouched.
+        self.assertIn("WHERE sk.status = 'candidate'", block_query)
+        self.assertIn("injection", block_params["reason"])
+
+    def test_unusable_verdict_defers_the_proposal(self) -> None:
+        driver = _RecordingDriver(results=[[dict(PENDING)]])
+        with patch.object(
+            consolidate_skills, "llm_complete", return_value="not json"
+        ):
+            counts = consolidate_skills.activate_pending_proposals(
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z"
+            )
+        self.assertEqual(counts, {"activated": 0, "blocked": 0, "deferred": 1})
+        # Only the fetch ran; no verdict write happened.
+        self.assertEqual(len(driver.calls), 1)
+
+    def test_refused_fingerprints_include_blocked(self) -> None:
+        driver = _RecordingDriver(results=[[]])
+        consolidate_skills.fetch_refused_fingerprints(driver, "neo4j", "proj")
+        query = driver.calls[0][0]
+        self.assertIn("v.outcome IN ['rejected', 'blocked']", query)
 
 
 if __name__ == "__main__":

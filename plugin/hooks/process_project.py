@@ -1064,10 +1064,13 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     timestamp,
                     observation_rows=observation_rows,
                 )
-                # Auto-approval gate: promote consistent candidates, invalidate
-                # older items they supersede. No-op if embeddings/judge/index
-                # are unavailable (candidates simply stay 'candidate'). Runs only
-                # at Stop ('turn'), never at SessionEnd ('session').
+                # Autonomous gate: safety-screen each candidate (blocking
+                # laundered instructions, privilege grabs, and secrets as
+                # recorded tombstones), then promote consistent survivors and
+                # invalidate older items they supersede — both scopes, no human
+                # queue. No-op if embeddings/judge/index are unavailable
+                # (candidates simply stay 'candidate'). Runs only at Stop
+                # ('turn'), never at SessionEnd ('session').
                 if mode == "turn":
                     run_consistency_gate(
                         driver,

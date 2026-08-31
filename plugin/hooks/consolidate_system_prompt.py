@@ -8,7 +8,7 @@
 The base ``(:SystemPrompt)`` persona is frozen — seed scripts own it and
 nothing rewrites it at runtime. What this service maintains instead is the
 ``(:UserProfile)`` node: a compact "user adaptations" section distilled from
-durable, **human-approved** user-scoped facts, which the injection hook
+durable, **gate-approved** user-scoped facts, which the injection hook
 appends to the base prompt at session start. The persona mostly stays as-is;
 the appended section is where behaviour adapts to the person.
 
@@ -20,9 +20,13 @@ It runs in the background on every Stop / SessionEnd, but does real work rarely:
 2. Threshold gate. It only consolidates when *more than*
    ``MKG_PROMPT_CONSOLIDATION_THRESHOLD`` (default 5) user-profile memories are
    ready — user-scoped ``approved`` learnings not yet folded into the section.
-   Approval is a human decision made through the review queue (``/mkg-review``):
-   an unreviewed ``candidate`` can never reach the cross-project prompt on
-   its own, which is what stops a single poisoned fact from becoming permanent.
+   Approval is granted by the autonomous consistency + safety gate
+   (``consistency_gate.py``): a raw ``candidate`` never reaches the
+   cross-project prompt, and the gate's safety screen — which blocks laundered
+   instructions, privilege grabs, and secrets before they can be approved — is
+   what stops a single poisoned fact from becoming permanent. A human can
+   still retract an approved fact afterwards through
+   ``project_resolve_learning`` ("forget that").
    Exception: when a previously folded fact was later rejected or superseded
    (the profile is stale), the gate opens immediately — threshold and cooldown
    both yield, because a retracted fact should leave the prompt promptly.
@@ -129,9 +133,10 @@ def consolidation_gate(
     """Decide whether to run, applying the threshold then the cooldown.
 
     A stale profile (a previously folded fact was rejected or superseded)
-    bypasses both gates: retracted memory should leave the prompt promptly,
-    and staleness only ever arises from an explicit human review decision, so
-    it cannot loop.
+    bypasses both gates: retracted memory should leave the prompt promptly.
+    Staleness arises from a discrete retraction — a human override or a
+    gate-decided supersession — and each retracted fact is stamped
+    ``unfolded_at`` on repair, so it cannot loop.
 
     Pure so the rate-limit / threshold logic is testable without Neo4j.
     """

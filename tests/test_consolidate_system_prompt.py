@@ -373,7 +373,7 @@ class PendingCountQueryTests(unittest.TestCase):
 
         count = project_common.count_user_profile_memories_pending(FakeDriver(), "neo4j")
         self.assertEqual(count, 7)
-        # Only human-approved user facts are folded into the persona; unreviewed
+        # Only gate-approved user facts are folded into the persona; ungated
         # candidates must not reach it on their own.
         self.assertIn("scope: 'user', status: 'approved'", captured["query"])
         self.assertNotIn("status: 'candidate'", captured["query"])
@@ -405,9 +405,10 @@ class MkgStartCommandTests(unittest.TestCase):
                 text,
                 str(path),
             )
-            self.assertIn("human-approved user-scoped memories", text, str(path))
+            self.assertIn("gate-approved user-scoped memories", text, str(path))
             self.assertIn(
-                "service counts `scope:'user', status:'approved'` facts",
+                "does the consolidation service count\n"
+                "`scope:'user', status:'approved'` facts",
                 text,
                 str(path),
             )

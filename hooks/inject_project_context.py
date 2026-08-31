@@ -16,9 +16,8 @@ if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
 from project_common import (  # noqa: E402
-    count_pending_skill_proposals,
+    count_gate_blocked,
     count_project_observations,
-    count_review_queue,
     ensure_project_schema,
     embed_text,
     fetch_approved_skill_slugs,
@@ -72,9 +71,8 @@ def main() -> int:
     learnings: list[dict] = []
     observations: list[dict] = []
     observation_total = 0
-    review_pending = 0
+    gate_blocked = 0
     skill_slugs: list[str] = []
-    skill_proposals_pending = 0
 
     try:
         from neo4j import GraphDatabase
@@ -106,12 +104,10 @@ def main() -> int:
                         exclude_session_id=exclude_session_id,
                         query_vector=query_vector,
                     )
-                    # A once-per-session nudge toward /mkg-review when items are
-                    # waiting on a human (ambiguous conflicts, user candidates).
-                    review_pending = count_review_queue(
-                        driver, database, project_id=project.id
-                    )
-                    skill_proposals_pending = count_pending_skill_proposals(
+                    # Accountability, not review: the gate runs autonomously,
+                    # so session start surfaces what it recently blocked and
+                    # points at the audit tool instead of asking for decisions.
+                    gate_blocked = count_gate_blocked(
                         driver, database, project_id=project.id
                     )
                     # One line of approved-skill slugs so every session knows
@@ -156,9 +152,8 @@ def main() -> int:
         learnings,
         user_learnings,
         observations=observations,
-        review_pending=review_pending,
         skill_slugs=skill_slugs,
-        skill_proposals_pending=skill_proposals_pending,
+        gate_blocked=gate_blocked,
         observation_total=observation_total,
     )
     if not context:

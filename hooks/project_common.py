@@ -1421,28 +1421,6 @@ def task_pattern_node_id(project_id: str, normalized: str) -> str:
     return f"taskpattern:{project_id}:{digest}"
 
 
-def count_pending_skill_proposals(driver, database: str, project_id: str) -> int:
-    """Count skill proposals awaiting a human decision for this project.
-
-    A proposal is a ``:SkillVersion`` with ``outcome = 'pending'`` — either a
-    brand-new candidate skill or a proposed patch to a live one. Skills are
-    never auto-approved: like user-scoped facts, they mutate runtime behaviour,
-    so a human owns their promotion.
-    """
-    record = _execute_query_single(
-        driver,
-        database,
-        """
-        MATCH (sk:Skill {project_id: $project_id})-[:HAS_VERSION]->
-              (v:SkillVersion {outcome: 'pending'})
-        WHERE sk.status IN ['candidate', 'approved']
-        RETURN count(v) AS pending
-        """,
-        project_id=project_id,
-    )
-    return int(record["pending"]) if record else 0
-
-
 def fetch_approved_skill_slugs(
     driver,
     database: str,
@@ -1466,11 +1444,12 @@ def fetch_approved_skill_slugs(
 
 
 def count_user_profile_memories_pending(driver, database: str) -> int:
-    """Count human-approved user-scoped learnings still awaiting consolidation.
+    """Count gate-approved user-scoped learnings still awaiting consolidation.
 
-    Only ``approved`` user facts are folded into the cross-project persona: a
-    human owns the ``candidate -> approved`` promotion (via the review queue),
-    so an unreviewed candidate can never rewrite the persona on its own. A
+    Only ``approved`` user facts are folded into the cross-project persona.
+    Approval comes from the autonomous consistency + safety gate, whose safety
+    screen blocks laundered instructions, privilege grabs, and secrets before
+    they can be approved — a raw candidate never rewrites the persona. A
     learning counts as pending when it has been approved but never folded into
     the prompt (``consolidated_at`` unset) or has been edited since it last was,
     so a fact that changes after consolidation re-enters the backlog.
@@ -1493,10 +1472,11 @@ def fetch_user_profile_memories_pending(
     database: str,
     limit: int = 40,
 ) -> list[dict[str, Any]]:
-    """Fetch the human-approved user-scoped learnings the consolidation folds in.
+    """Fetch the gate-approved user-scoped learnings the consolidation folds in.
 
-    Approved-only: candidates are excluded so an unreviewed (and possibly
-    poisoned) user fact cannot reach the persona without a human decision.
+    Approved-only: candidates and blocked items are excluded, so an ungated
+    (and possibly poisoned) user fact cannot reach the persona — the gate's
+    safety screen is the boundary.
     """
     records = _execute_query(
         driver,
@@ -1519,85 +1499,47 @@ def fetch_user_profile_memories_pending(
     return [dict(record) for record in records]
 
 
-def count_review_queue(driver, database: str, project_id: str) -> int:
-    """Count learnings awaiting a human decision for this project.
+GATE_BLOCKED_WINDOW_DAYS = 7
 
-    Two populations need a person, because the automatic consistency gate
-    deliberately cannot resolve them:
-    - user-scoped ``candidate`` learnings (project-independent): never
-      auto-approved because they mutate the cross-project persona, so a human
-      owns their ``candidate -> approved`` promotion; and
-    - project-scoped ``candidate`` learnings the gate left ``ambiguous`` — a
-      genuine contradiction where it could not tell which side is right.
+
+def count_gate_blocked(
+    driver, database: str, project_id: str, days: int = GATE_BLOCKED_WINDOW_DAYS
+) -> int:
+    """Count what the autonomous gate blocked recently — the session-start
+    accountability signal.
+
+    The gate resolves everything itself; the one thing it must not do is drop
+    content silently. Blocked learnings (laundered instructions, privilege
+    grabs, secrets — user-scoped anywhere, project-scoped in this project) and
+    blocked skill proposals inside the window are counted here so the injected
+    context can point at ``project_gate_audit``, where the full record lives.
+    The window keeps the nudge about recent activity instead of nagging about
+    all history forever.
     """
     record = _execute_query_single(
         driver,
         database,
         """
-        MATCH (l:Learning {status: 'candidate'})
-        WHERE l.scope = 'user'
-           OR (l.scope = 'project'
-               AND l.project_id = $project_id
-               AND l.consistency_status = 'ambiguous')
-        RETURN count(l) AS pending
+        RETURN
+          COUNT {
+            MATCH (l:Learning {status: 'blocked'})
+            WHERE (l.scope = 'user'
+                   OR (l.scope = 'project' AND l.project_id = $project_id))
+              AND l.blocked_at >= datetime() - duration({days: $days})
+            RETURN l
+          }
+          +
+          COUNT {
+            MATCH (sk:Skill {project_id: $project_id})-[:HAS_VERSION]->
+                  (v:SkillVersion {outcome: 'blocked'})
+            WHERE v.decided_at >= datetime() - duration({days: $days})
+            RETURN v
+          } AS blocked
         """,
         project_id=project_id,
+        days=days,
     )
-    return int(record["pending"]) if record else 0
-
-
-def fetch_review_queue(
-    driver,
-    database: str,
-    project_id: str,
-    limit: int = 20,
-) -> list[dict[str, Any]]:
-    """Return the human-review queue, oldest first, with contradiction context.
-
-    Mirrors :func:`count_review_queue`'s two populations and attaches, for each
-    item, the existing learnings it was judged to contradict (``CONTRADICTS``)
-    plus the judge's stated reason for punting (``judge_reason``, stamped on
-    the edge by the gate) so a reviewer sees both sides *and* why the machine
-    could not decide. Oldest-first drains the backlog without starvation.
-    """
-    records = _execute_query(
-        driver,
-        database,
-        """
-        CALL () {
-            MATCH (l:Learning {scope: 'user', status: 'candidate'})
-            RETURN l
-          UNION
-            MATCH (l:Learning {scope: 'project', status: 'candidate'})
-            WHERE l.project_id = $project_id
-              AND l.consistency_status = 'ambiguous'
-            RETURN l
-        }
-        OPTIONAL MATCH (l)-[edge:CONTRADICTS]->(other:Learning)
-        WITH l, collect(
-            CASE WHEN other IS NULL THEN null
-            ELSE {id: other.id, text: other.text, status: other.status,
-                  confidence: other.confidence,
-                  judge_reason: coalesce(edge.reason, '')} END
-        ) AS raw
-        RETURN l.id AS id,
-               l.scope AS scope,
-               l.text AS text,
-               l.confidence AS confidence,
-               CASE
-                   WHEN l.scope = 'user' THEN 'user_scoped_candidate'
-                   ELSE 'ambiguous_contradiction'
-               END AS reason,
-               coalesce(l.consistency_status, 'unreviewed') AS consistency_status,
-               toString(coalesce(l.updated_at, l.created_at)) AS updated_at,
-               [c IN raw WHERE c IS NOT NULL] AS conflicts
-        ORDER BY updated_at ASC
-        LIMIT $limit
-        """,
-        project_id=project_id,
-        limit=limit,
-    )
-    return [dict(record) for record in records]
+    return int(record["blocked"]) if record else 0
 
 
 def read_system_prompt_state(driver, database: str, name: str) -> dict[str, Any]:
@@ -1760,8 +1702,8 @@ def fetch_user_profile_stale_facts(
     database: str,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """User facts folded into the profile that a human later rejected or
-    superseded.
+    """User facts folded into the profile that were later rejected or
+    superseded — by the gate or by a human override.
 
     These must be *removed* from the section on the next consolidation run;
     ``unfolded_at`` is stamped once that happens so a retracted fact is only
@@ -2479,9 +2421,8 @@ def format_learning_context(
     learnings: list[dict[str, Any]],
     user_learnings: list[dict[str, Any]] | None = None,
     observations: list[dict[str, Any]] | None = None,
-    review_pending: int = 0,
     skill_slugs: list[str] | None = None,
-    skill_proposals_pending: int = 0,
+    gate_blocked: int = 0,
     observation_total: int = 0,
 ) -> str:
     user_learnings = user_learnings or []
@@ -2491,9 +2432,8 @@ def format_learning_context(
         not learnings
         and not user_learnings
         and not observations
-        and not review_pending
         and not skill_slugs
-        and not skill_proposals_pending
+        and not gate_blocked
     ):
         return ""
 
@@ -2553,23 +2493,17 @@ def format_learning_context(
                 + ", ".join(skill_slugs),
             ]
         )
-    if review_pending:
-        plural = "item" if review_pending == 1 else "items"
+    if gate_blocked:
+        plural = "item" if gate_blocked == 1 else "items"
         lines.extend(
             [
                 "",
-                f"{review_pending} learning {plural} awaiting your review — "
-                "ambiguous contradictions and user-scoped facts the automatic "
-                "gate left for a human. Run /mkg-review to resolve them.",
-            ]
-        )
-    if skill_proposals_pending:
-        plural = "proposal" if skill_proposals_pending == 1 else "proposals"
-        lines.extend(
-            [
-                "",
-                f"{skill_proposals_pending} learned-skill {plural} awaiting your "
-                "review. Run /mkg-review to approve or reject them.",
+                f"The autonomous memory gate blocked {gate_blocked} unsafe "
+                f"{plural} in the last {GATE_BLOCKED_WINDOW_DAYS} days "
+                "(suspected injected instructions, privilege grabs, or "
+                "secrets) — recorded, not learned. Inspect the record with "
+                "project_gate_audit; a wrongly blocked fact can be reinstated "
+                "with project_resolve_learning.",
             ]
         )
     lines.extend(
