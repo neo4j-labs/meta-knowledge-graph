@@ -132,6 +132,77 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual(res["already_learned_ids"], [])
 
 
+class ResolveWithoutPromotionTests(unittest.TestCase):
+    """promote=False (user scope): the human owns approve/reject, so the only
+    automatic transition allowed is the already-learned fold."""
+
+    def test_clean_stays_candidate(self):
+        res = consistency_gate._resolve("cand", _neighbours("a"), [], promote=False)
+        self.assertEqual(res["outcome"], "candidate")
+        self.assertEqual(res["consistency"], "clean")
+        self.assertEqual(res["unclear_conflicts"], [])
+
+    def test_restatement_folds(self):
+        res = consistency_gate._resolve(
+            "cand", _neighbours("a"), [], already_learned_of="a", promote=False
+        )
+        self.assertEqual(res["outcome"], "already_learned")
+        self.assertEqual(res["already_learned_ids"], ["a"])
+
+    def test_veto_queues_conflict_instead_of_rejecting(self):
+        res = consistency_gate._resolve(
+            "cand",
+            _neighbours("a"),
+            [{"existing_id": "a", "winner": "existing", "reason": "trusted"}],
+            promote=False,
+        )
+        self.assertEqual(res["outcome"], "candidate")
+        self.assertEqual(res["consistency"], "ambiguous")
+        self.assertEqual(res["contradicted_by_ids"], [])
+        self.assertEqual(len(res["unclear_conflicts"]), 1)
+        self.assertEqual(res["unclear_conflicts"][0]["id"], "a")
+        self.assertIn("judge preferred the existing item", res["unclear_conflicts"][0]["reason"])
+        self.assertIn("trusted", res["unclear_conflicts"][0]["reason"])
+
+    def test_new_win_queues_conflict_instead_of_approving(self):
+        res = consistency_gate._resolve(
+            "cand",
+            _neighbours("a"),
+            [{"existing_id": "a", "winner": "new", "reason": "newer"}],
+            promote=False,
+        )
+        self.assertEqual(res["outcome"], "candidate")
+        self.assertEqual(res["consistency"], "ambiguous")
+        self.assertEqual(res["superseded_ids"], [])
+        self.assertEqual(len(res["unclear_conflicts"]), 1)
+        self.assertIn("judge preferred the new candidate", res["unclear_conflicts"][0]["reason"])
+
+    def test_conflict_blocks_fold(self):
+        # A restatement of one item that contradicts another must stay visible
+        # to the human rather than silently merging away.
+        res = consistency_gate._resolve(
+            "cand",
+            _neighbours("a", "b"),
+            [{"existing_id": "a", "winner": "unclear", "reason": "cannot tell"}],
+            already_learned_of="b",
+            promote=False,
+        )
+        self.assertEqual(res["outcome"], "candidate")
+        self.assertEqual(res["consistency"], "ambiguous")
+        self.assertEqual(res["already_learned_ids"], [])
+
+    def test_conflict_on_unknown_id_still_folds(self):
+        res = consistency_gate._resolve(
+            "cand",
+            _neighbours("a"),
+            [{"existing_id": "ghost", "winner": "existing", "reason": "?"}],
+            already_learned_of="a",
+            promote=False,
+        )
+        self.assertEqual(res["outcome"], "already_learned")
+        self.assertEqual(res["already_learned_ids"], ["a"])
+
+
 class ParseJudgeTests(unittest.TestCase):
     def test_plain_json(self):
         out = consistency_gate._parse_judge(
@@ -473,6 +544,68 @@ class PerRowApplyTests(unittest.TestCase):
         self.assertEqual(events, ["fetch:l1", "write:l1", "fetch:l2", "write:l2"])
 
 
+class UserScopePromotionWiringTests(unittest.TestCase):
+    def test_gate_one_label_resolves_user_rows_without_promotion(self):
+        captured = {}
+
+        def fake_resolve(
+            candidate_id, neighbours, contradictions, already_learned_of=None, *, promote=True
+        ):
+            captured[candidate_id] = promote
+            return {
+                "id": candidate_id,
+                "outcome": "candidate",
+                "consistency": "clean",
+                "superseded_ids": [],
+                "contradicted_by_ids": [],
+                "unclear_conflicts": [],
+                "already_learned_ids": [],
+            }
+
+        with patch.object(
+            consistency_gate,
+            "_fetch_neighbours_hybrid",
+            return_value=[{"id": "n1", "text": "t", "status": "candidate"}],
+        ), patch.object(
+            consistency_gate,
+            "llm_complete",
+            return_value='{"contradictions": [], "already_learned_of": null}',
+        ), patch.object(consistency_gate, "_resolve", side_effect=fake_resolve):
+            consistency_gate._gate_one_label(
+                _FakeDriver(),
+                "neo4j",
+                project=type("P", (), {"id": "proj"})(),
+                label="Learning",
+                index_name="project_learning_vector",
+                fulltext_index="project_learning_fulltext",
+                kind="learning",
+                rows=[
+                    {"id": "u1", "text": "a", "embedding": [0.1], "scope": "user"},
+                    {"id": "p1", "text": "b", "embedding": [0.2], "scope": "project"},
+                ],
+                model=None,
+                timestamp="2026-07-01T00:00:00Z",
+            )
+        self.assertEqual(captured, {"u1": False, "p1": True})
+
+
+class UngatedFetchTests(unittest.TestCase):
+    def test_sweep_fetch_spans_both_scopes(self):
+        driver = _RecordingDriver()
+        consistency_gate._fetch_ungated_candidates(
+            driver,
+            "neo4j",
+            label="Learning",
+            project_id="proj",
+            exclude_ids=[],
+            limit=5,
+        )
+        query, params = driver.log[0]
+        self.assertIn("n.scope IN ['project', 'user']", query)
+        self.assertIn("n.consistency_checked_at IS NULL", query)
+        self.assertEqual(params["project_id"], "proj")
+
+
 class SweepTests(unittest.TestCase):
     def _project(self):
         return type("P", (), {"id": "proj"})()
@@ -609,7 +742,7 @@ class GateGuardTests(unittest.TestCase):
             )
         self.assertEqual(result, {"learnings": 0})
 
-    def test_only_project_scoped_creates_are_gated(self):
+    def test_creates_in_both_scopes_are_gated(self):
         captured = {}
 
         def fake_gate(*args, rows, **kwargs):
@@ -634,9 +767,9 @@ class GateGuardTests(unittest.TestCase):
                 model=None,
                 timestamp="2026-07-01T00:00:00Z",
             )
-        # Project-scoped creates with text are gated (embedding or fulltext);
-        # user-scoped, updates, and text-less rows are excluded.
-        self.assertEqual(captured["Learning"], ["vec", "ft"])
+        # Creates with text are gated in both scopes (user rows resolve with
+        # promote=False downstream); updates and text-less rows are excluded.
+        self.assertEqual(captured["Learning"], ["vec", "ft", "usr"])
         self.assertNotIn("Decision", captured)
 
     def test_skips_when_judge_unavailable(self):

@@ -28,13 +28,22 @@ approval gate*. It runs only at Stop, never at SessionEnd:
      the judge's stated reason for punting is stamped on the edge so the
      reviewer sees why the pair needs a person
 
+**User-scoped candidates** run the same retrieve-judge pipeline but resolve
+with ``promote=False``: a human owns their ``candidate -> approved/rejected``
+transition (they mutate the cross-project persona), so the only automatic
+status change allowed is the *already-learned fold* — a restatement collapses
+into its canonical item instead of piling up in the review queue. Any judged
+contradiction, whichever side the judge preferred, is recorded as a
+``CONTRADICTS`` edge (the judge's lean preserved in the edge reason) and the
+candidate stays queued for the human with that context attached.
+
 Resolutions are applied per candidate, immediately after judging it, so later
 candidates in the same batch retrieve the updated statuses — two restatements
 extracted together collapse onto one canonical item instead of mutually folding
 into each other.
 
 A companion sweep (:func:`sweep_ungated_candidates`) runs after the batch gate
-and pushes through project-scoped candidates that entered the graph without a
+and pushes through candidates (both scopes) that entered the graph without a
 gate run — MCP memory tool writes, and rows left behind by an
 earlier judge or retrieval failure — backfilling and persisting their
 embeddings first.
@@ -533,6 +542,8 @@ def _resolve(
     neighbours: list[dict[str, Any]],
     contradictions: list[dict[str, Any]],
     already_learned_of: str | None = None,
+    *,
+    promote: bool = True,
 ) -> dict[str, Any]:
     """Map judged contradictions + already-learned onto a status transition.
 
@@ -541,6 +552,14 @@ def _resolve(
     rejected when the judge is confident an existing item is more reliable; only
     folded in as already-learned when nothing vetoes it; and only auto-approved as
     a supersede when it is neither vetoed nor a restatement.
+
+    With ``promote=False`` (user-scoped candidates, whose approve/reject a
+    human owns) the only automatic transition is the already-learned fold. Any
+    judged contradiction — whichever side the judge preferred — keeps the
+    candidate queued and is recorded as an unresolved conflict, the judge's
+    lean folded into the edge reason for the reviewer. A conflict also blocks
+    the fold: a restatement of one item that contradicts another must stay
+    visible to the human rather than silently merging away.
     """
     valid_ids = {item["id"] for item in neighbours}
     superseded, vetoed, unclear = [], [], []
@@ -562,6 +581,44 @@ def _resolve(
         if already_learned_of in valid_ids and already_learned_of != candidate_id
         else None
     )
+
+    if not promote:
+        conflict_reasons: dict[str, str] = {}
+        for conflict in contradictions:
+            existing_id = conflict["existing_id"]
+            if existing_id not in valid_ids or existing_id == candidate_id:
+                continue
+            lean = {
+                "existing": "judge preferred the existing item",
+                "new": "judge preferred the new candidate",
+            }.get(conflict["winner"], "judge could not decide")
+            reason = str(conflict.get("reason") or "")
+            conflict_reasons.setdefault(
+                existing_id, f"{lean}: {reason}" if reason else lean
+            )
+
+        if conflict_reasons:
+            outcome, consistency = "candidate", "ambiguous"
+        elif already_id:
+            outcome, consistency = "already_learned", "already_learned"
+        else:
+            outcome, consistency = "candidate", "clean"
+        return {
+            "id": candidate_id,
+            "outcome": outcome,
+            "consistency": consistency,
+            "superseded_ids": [],
+            "contradicted_by_ids": [],
+            "unclear_conflicts": (
+                [
+                    {"id": cid, "reason": conflict_reasons[cid]}
+                    for cid in sorted(conflict_reasons)
+                ]
+                if outcome == "candidate"
+                else []
+            ),
+            "already_learned_ids": [already_id] if outcome == "already_learned" else [],
+        }
 
     if vetoed:
         outcome, consistency = "rejected", "vetoed"
@@ -727,7 +784,16 @@ def _gate_one_label(
                     flush=True,
                 )
                 continue
-        resolution = _resolve(candidate_id, neighbours, contradictions, already_learned_of)
+        # User-scoped candidates are never auto-promoted or auto-rejected — a
+        # human owns those transitions — so the judge may only fold
+        # restatements and record conflicts for the review queue.
+        resolution = _resolve(
+            candidate_id,
+            neighbours,
+            contradictions,
+            already_learned_of,
+            promote=scope != "user",
+        )
         # Apply immediately, not after the loop: later rows in this batch then
         # retrieve the updated statuses, so two restatements extracted together
         # collapse onto one canonical item instead of mutually folding into
@@ -765,13 +831,15 @@ def run_consistency_gate(
     """Gate newly-created candidates. Returns per-label counts of items checked.
 
     Invoked only from the Stop pipeline (``--mode turn``); the caller does not
-    run it at SessionEnd. Only new, **project-scoped** candidates are gated;
-    ``update`` rows reinforce
-    nodes that already passed, and ``user``-scoped candidates flow through the
-    separate ``consolidate_system_prompt.py`` gate (which folds them into the
-    persona and owns their ``candidate → approved`` transition) — auto-approving
-    them here would pull them out of that backlog. No-ops (returning zeros) when
-    the gate is disabled or the LLM judge is unavailable, so candidates simply
+    run it at SessionEnd. New candidates in **both scopes** are gated;
+    ``update`` rows reinforce nodes that already passed. Project-scoped rows
+    get the full resolution (approve/reject/supersede); ``user``-scoped rows
+    resolve with ``promote=False`` — restatements fold into their canonical
+    item and conflicts are recorded for the review queue, but the
+    ``candidate → approved`` transition stays with the human and the
+    ``consolidate_system_prompt.py`` persona gate (auto-approving them here
+    would pull them out of that backlog). No-ops (returning zeros) when the
+    gate is disabled or the LLM judge is unavailable, so candidates simply
     keep ``status = 'candidate'``.
     """
     if not consistency_gate_enabled():
@@ -785,7 +853,7 @@ def run_consistency_gate(
         return (
             row.get("action") == "create"
             and bool(row.get("text"))
-            and str(row.get("scope") or "project") == "project"
+            and str(row.get("scope") or "project") in {"project", "user"}
         )
 
     learning_creates = [r for r in learning_rows if _gatable(r)]
@@ -833,18 +901,20 @@ def _fetch_ungated_candidates(
     exclude_ids: list[str],
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Project-scoped candidates the gate has never resolved, oldest first.
+    """Candidates (both scopes) the gate has never resolved, oldest first.
 
     ``consistency_checked_at`` is stamped by ``_apply_resolutions`` for every
     gated row (including ambiguous keep-as-candidate outcomes), so its absence
-    means the item bypassed the gate entirely: an MCP tool write, or a row an
-    earlier judge/retrieval failure skipped. Oldest-first drains the backlog
-    without starvation under the per-run limit.
+    means the item bypassed the gate entirely: an MCP tool write, a row an
+    earlier judge/retrieval failure skipped, or a user-scoped row written
+    before user-scope gating existed. Oldest-first drains the backlog without
+    starvation under the per-run limit. User-scoped rows are matched through
+    the ``project_id`` they were captured under, same as neighbour retrieval.
     """
     query = f"""
         MATCH (n:{label} {{status: 'candidate'}})
         WHERE n.project_id = $project_id
-          AND n.scope = 'project'
+          AND n.scope IN ['project', 'user']
           AND n.consistency_checked_at IS NULL
           AND n.text IS NOT NULL
           AND NOT n.id IN $exclude_ids
@@ -906,7 +976,7 @@ def sweep_ungated_candidates(
     timestamp: str,
     exclude_ids: list[str] | None = None,
 ) -> dict[str, int]:
-    """Gate project-scoped candidates that never went through the gate.
+    """Gate candidates (both scopes) that never went through the gate.
 
     The batch gate only sees rows the Stop extractor just produced, so
     candidates written through the MCP memory tools — and rows
@@ -917,8 +987,10 @@ def sweep_ungated_candidates(
     a row that failed the judge moments ago is not immediately retried.
 
     Bounded by :func:`sweep_limit` per label per run so a large backlog drains
-    across turns instead of stalling one Stop. User-scoped candidates are
-    excluded for the same reason as in :func:`run_consistency_gate`.
+    across turns instead of stalling one Stop. User-scoped rows resolve with
+    ``promote=False`` (see :func:`run_consistency_gate`), so sweeping them can
+    fold accumulated near-duplicate restatements out of the review queue but
+    never approves or rejects them.
     """
     if not consistency_gate_enabled():
         return {"learnings": 0}
