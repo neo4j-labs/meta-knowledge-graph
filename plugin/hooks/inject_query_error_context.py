@@ -17,7 +17,10 @@ against the per-tool pattern library via the vector index and the fulltext
 index, fused with RRF — so a pattern is recalled both when the *error* looks
 similar and when the *query* looks similar. Retrieval is always scoped to the
 failing tool's ``tool_key`` (and the active project), so guidance for one tool
-never leaks into another's failures.
+never leaks into another's failures. The vector branch is relevance-gated by
+the same cosine floor as memory injection (``MKG_INJECT_MIN_SIMILARITY``); the
+fulltext branch stays ungated because a lexical hit on the error's or query's
+own terms is its own relevance signal.
 
 Delivery depends on the event:
 
@@ -56,6 +59,7 @@ from consolidate_query_errors import (  # noqa: E402
 from project_common import (  # noqa: E402
     _hybrid_keyword_query,
     embed_text,
+    inject_min_similarity,
     load_mkg_env,
     neo4j_config,
     normalize_tool_failure_payload,
@@ -90,6 +94,7 @@ _VECTOR_BRANCH = f"""
             LIMIT $rank_limit
         ) SCORE AS raw_score
         WHERE node.status = 'active'
+          AND raw_score >= $min_vector_score
         WITH node, raw_score
         ORDER BY raw_score DESC
         WITH collect({{node: node, raw_score: raw_score}}) AS rows
@@ -173,8 +178,12 @@ def fetch_matching_patterns(
     search_text: str,
     query_vector: list[float] | None,
     limit: int = MAX_PATTERNS,
+    min_similarity: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Hybrid (vector + fulltext, RRF-fused) pattern lookup, scoped to one tool."""
+    """Hybrid (vector + fulltext, RRF-fused) pattern lookup, scoped to one tool.
+
+    ``min_similarity`` is a raw-cosine floor applied to the vector branch only,
+    with the same semantics as learning recall in ``project_common``."""
     keyword_query = _hybrid_keyword_query(search_text)
     if not query_vector and not keyword_query:
         return []
@@ -187,6 +196,10 @@ def fetch_matching_patterns(
         "rank_limit": RANK_LIMIT,
         "rrf_k": RRF_K,
         "limit": limit,
+        # The index reports cosine scores normalized to (1 + cos) / 2.
+        "min_vector_score": (
+            (1.0 + min_similarity) / 2.0 if min_similarity is not None else 0.0
+        ),
     }
 
     if query_vector:
@@ -338,6 +351,7 @@ def recall(payload: dict[str, Any]) -> dict[str, Any] | None:
             tool=request["tool_key"],
             search_text=request["search_text"],
             query_vector=query_vector,
+            min_similarity=inject_min_similarity(),
         )
         if not patterns:
             return None

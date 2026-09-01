@@ -208,6 +208,60 @@ class FetchPatternsTests(unittest.TestCase):
         self.assertEqual(params["project_id"], "proj")
         self.assertEqual(params["tool_key"], "neo4j_read_cypher")
 
+    def test_vector_branch_gated_by_cosine_floor(self) -> None:
+        driver = self.FakeDriver([[{"id": "p1", "title": "T", "score": 0.5}]])
+        inject_query_error_context.fetch_matching_patterns(
+            driver,
+            "neo4j",
+            project_id="proj",
+            tool="neo4j_read_cypher",
+            search_text="Syntax error Invalid input RETRUN",
+            query_vector=[0.1] * 4,
+            min_similarity=0.7,
+        )
+        query, params = driver.calls[0]
+        # Floor gates the vector branch only; the fulltext branch is a lexical
+        # match on the error's or query's own terms.
+        self.assertEqual(query.count("raw_score >= $min_vector_score"), 1)
+        # Raw cosine 0.7 converts to the index's (1 + cos) / 2 scale.
+        self.assertAlmostEqual(params["min_vector_score"], 0.85)
+
+    def test_no_floor_defaults_to_ungated_vector_scores(self) -> None:
+        driver = self.FakeDriver([[{"id": "p1", "title": "T", "score": 0.5}]])
+        inject_query_error_context.fetch_matching_patterns(
+            driver,
+            "neo4j",
+            project_id="proj",
+            tool="neo4j_read_cypher",
+            search_text="Syntax error Invalid input RETRUN",
+            query_vector=[0.1] * 4,
+        )
+        _, params = driver.calls[0]
+        self.assertEqual(params["min_vector_score"], 0.0)
+
+    def test_recall_passes_the_shared_injection_floor(self) -> None:
+        from unittest import mock
+
+        captured = {}
+
+        def fake_fetch(*args, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        with mock.patch.object(
+            inject_query_error_context, "fetch_matching_patterns", fake_fetch
+        ), mock.patch.object(
+            inject_query_error_context, "embed_text", lambda text: [0.1] * 4
+        ), mock.patch.object(
+            inject_query_error_context, "neo4j_config", lambda: ("bolt://x", "u", "p", "neo4j")
+        ), mock.patch.dict(
+            sys.modules,
+            {"neo4j": mock.Mock(GraphDatabase=mock.Mock(driver=mock.MagicMock()))},
+        ):
+            inject_query_error_context.recall(_payload())
+
+        self.assertAlmostEqual(captured.get("min_similarity"), 0.7)
+
     def test_vector_failure_falls_back_to_fulltext(self) -> None:
         driver = self.FakeDriver(
             [RuntimeError("no SEARCH clause"), [{"id": "p1", "title": "T", "score": 0.5}]]
