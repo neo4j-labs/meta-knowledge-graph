@@ -21,6 +21,12 @@ from typing import Any
 MAX_LEARNING_TEXT = 500
 HYBRID_RRF_K = 60.0
 HYBRID_KEYWORD_TERMS = 16
+# Relevance floor for prompt-time injection, in raw cosine units (matching
+# MKG_TASK_PATTERN_SIMILARITY_THRESHOLD). Only the vector branch is gated — the
+# keyword branch is a lexical match on the prompt's own terms, and Lucene
+# scores have no comparable scale. The Neo4j cosine index reports scores as
+# (1 + cos) / 2, so the floor is converted at query-build time.
+INJECT_MIN_SIMILARITY = 0.7
 DEFAULT_LLM_MODEL = "gpt-5.4-mini"
 DEFAULT_CLAUDE_LLM_MODEL = "anthropic/claude-haiku-4-5"
 ANTHROPIC_OAUTH_TOKEN_PREFIX = "sk-ant-oat"
@@ -1330,6 +1336,10 @@ def consolidation_interval_hours() -> float:
     )
 
 
+def inject_min_similarity() -> float:
+    return _env_float("MKG_INJECT_MIN_SIMILARITY", INJECT_MIN_SIMILARITY)
+
+
 # --- Skill distillation ------------------------------------------------------
 #
 # A rate-limited service (hooks/consolidate_skills.py) compiles groups of
@@ -1893,6 +1903,7 @@ def _ranked_vector_branch(
             LIMIT $rank_limit
         ) SCORE AS raw_score
         WHERE node.status IN $statuses
+          AND raw_score >= $min_vector_score
           AND {post_filter}
         WITH node, raw_score
         ORDER BY raw_score DESC
@@ -1947,10 +1958,22 @@ def _fetch_memory_hybrid(
     project_id: str | None = None,
     exclude_session_id: str | None = None,
     exclude_consolidated_user_facts: bool = False,
-) -> list[dict[str, Any]]:
+    min_similarity: float | None = None,
+) -> list[dict[str, Any]] | None:
+    """Hybrid (vector + keyword RRF) retrieval over one memory label.
+
+    ``min_similarity`` is a raw-cosine floor applied to the vector branch only;
+    the keyword branch stays ungated because a lexical hit on the prompt's own
+    terms is its own relevance signal.
+
+    Returns ``None`` when no retrieval query could run — no usable signal, or
+    the hybrid queries failed (older databases without the indexes) — and a
+    list, possibly empty, when a query actually executed. Callers use the
+    difference to tell "searched and found nothing" from "could not search".
+    """
     keyword_query = _hybrid_keyword_query(query)
     if not query_vector and not keyword_query:
-        return []
+        return None
 
     vector_index = _memory_vector_index(label)
     fulltext_index = _memory_fulltext_index(label)
@@ -1984,6 +2007,10 @@ def _fetch_memory_hybrid(
         "session_id": exclude_session_id,
         "search_query": keyword_query,
         "query_vector": query_vector,
+        # The index reports cosine scores normalized to (1 + cos) / 2.
+        "min_vector_score": (
+            (1.0 + min_similarity) / 2.0 if min_similarity is not None else 0.0
+        ),
     }
 
     if query_vector:
@@ -2050,9 +2077,9 @@ def _fetch_memory_hybrid(
                 for record in _execute_query(driver, database, query_text, **params)
             ]
         except Exception:
-            return []
+            return None
 
-    return []
+    return None
 
 
 def fetch_project_learnings(
@@ -2064,7 +2091,12 @@ def fetch_project_learnings(
     limit: int = 5,
     exclude_session_id: str | None = None,
     query_vector: list[float] | None = None,
+    min_similarity: float | None = None,
 ) -> list[dict[str, Any]]:
+    """``min_similarity`` (raw cosine) makes recall relevance-gated: below-floor
+    vector hits are dropped, and when retrieval ran but nothing survived, the
+    result is empty instead of falling back to recency padding. Callers that
+    deduplicate against this list (the extractor) leave it ``None``."""
     statuses = statuses or ["approved", "candidate"]
     if query and query.strip():
         rows = _fetch_memory_hybrid(
@@ -2078,9 +2110,14 @@ def fetch_project_learnings(
             limit=limit,
             project_id=project_id,
             exclude_session_id=exclude_session_id,
+            min_similarity=min_similarity,
         )
         if rows:
             return rows
+        if rows is not None and min_similarity is not None:
+            # Retrieval ran and nothing cleared the relevance bar: inject
+            # nothing rather than padding the context from the fallbacks.
+            return []
         # Legacy fulltext fallback for older databases or invalid vector indexes.
         try:
             records = _execute_query(
@@ -2117,6 +2154,9 @@ def fetch_project_learnings(
                 return rows
         except Exception:
             pass
+        if min_similarity is not None:
+            # Relevance-gated recall never degrades to the recency tail.
+            return []
 
     records = _execute_query(
         driver,
@@ -2155,6 +2195,7 @@ def fetch_user_learnings(
     exclude_session_id: str | None = None,
     query_vector: list[float] | None = None,
     include_consolidated: bool = False,
+    min_similarity: float | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch durable, cross-project facts about the user (``scope = 'user'``).
 
@@ -2169,6 +2210,9 @@ def fetch_user_learnings(
     memory extractor passes ``True``, because its copy of this list is what it
     deduplicates *against* — hiding a consolidated fact there would make it
     look brand new and get it re-created on the next mention.
+
+    ``min_similarity`` (raw cosine) makes recall relevance-gated, exactly as in
+    ``fetch_project_learnings``: injection passes it, the extractor never does.
     """
     statuses = statuses or ["approved", "candidate"]
     if query and query.strip():
@@ -2183,9 +2227,14 @@ def fetch_user_learnings(
             limit=limit,
             exclude_session_id=exclude_session_id,
             exclude_consolidated_user_facts=not include_consolidated,
+            min_similarity=min_similarity,
         )
         if rows:
             return rows
+        if rows is not None and min_similarity is not None:
+            # Retrieval ran and nothing cleared the relevance bar: inject
+            # nothing rather than padding the context from the fallbacks.
+            return []
         try:
             records = _execute_query(
                 driver,
@@ -2224,6 +2273,9 @@ def fetch_user_learnings(
                 return rows
         except Exception:
             pass
+        if min_similarity is not None:
+            # Relevance-gated recall never degrades to the recency tail.
+            return []
 
     records = _execute_query(
         driver,

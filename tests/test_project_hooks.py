@@ -1682,6 +1682,111 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(params["query_vector"], [0.1, 0.2])
         self.assertEqual(params["search_query"], "use rest for the api and keep graph schema stable")
 
+    def test_prompt_injection_gates_vector_branch_on_cosine_floor(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.fetch_project_learnings(
+            FakeDriver(),
+            "neo4j",
+            project_id="mkg",
+            query="How do we deploy the graph schema?",
+            query_vector=[0.1, 0.2],
+            min_similarity=0.7,
+        )
+
+        self.assertTrue(captured)
+        query, params = captured[0]
+        # The floor gates only the vector branch; the keyword branch is a
+        # lexical match with no comparable score scale.
+        self.assertEqual(query.count("raw_score >= $min_vector_score"), 1)
+        # Env knob is raw cosine; the index reports (1 + cos) / 2.
+        self.assertAlmostEqual(params["min_vector_score"], 0.85)
+
+    def test_prompt_injection_returns_empty_when_nothing_clears_the_floor(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        rows = project_common.fetch_project_learnings(
+            FakeDriver(),
+            "neo4j",
+            project_id="mkg",
+            query="Completely unrelated prompt.",
+            query_vector=[0.1, 0.2],
+            min_similarity=0.7,
+        )
+
+        # Retrieval ran and found nothing relevant: inject nothing instead of
+        # padding from the fulltext or recency fallbacks.
+        self.assertEqual(rows, [])
+        self.assertEqual(len(captured), 1)
+
+    def test_extractor_recall_keeps_fallbacks_without_floor(self) -> None:
+        # The extractor deduplicates against this list, so an empty hybrid
+        # result must still fall through to fulltext and recency as before.
+        captured: list[tuple[str, dict]] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.fetch_project_learnings(
+            FakeDriver(),
+            "neo4j",
+            project_id="mkg",
+            query="Completely unrelated prompt.",
+            query_vector=[0.1, 0.2],
+        )
+
+        self.assertEqual(len(captured), 3)
+
+    def test_user_learning_injection_is_relevance_gated_too(self) -> None:
+        captured: list[tuple[str, dict]] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        rows = project_common.fetch_user_learnings(
+            FakeDriver(),
+            "neo4j",
+            query="Unrelated prompt.",
+            query_vector=[0.1, 0.2],
+            min_similarity=0.7,
+        )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(len(captured), 1)
+        # The no-query SessionStart path stays recency-based and ungated.
+        captured.clear()
+        project_common.fetch_user_learnings(
+            FakeDriver(), "neo4j", query=None, min_similarity=0.7
+        )
+        self.assertEqual(len(captured), 1)
+        self.assertIn("last_used_at", captured[0][0])
+
+    def test_inject_min_similarity_defaults_and_env_override(self) -> None:
+        import os
+        from unittest import mock as _mock
+
+        with _mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MKG_INJECT_MIN_SIMILARITY", None)
+            self.assertAlmostEqual(project_common.inject_min_similarity(), 0.7)
+        with _mock.patch.dict(
+            os.environ, {"MKG_INJECT_MIN_SIMILARITY": "0.55"}, clear=False
+        ):
+            self.assertAlmostEqual(project_common.inject_min_similarity(), 0.55)
+
     def test_fetch_user_learnings_spans_projects_and_filters_scope(self) -> None:
         captured: list[tuple[str, dict]] = []
 
