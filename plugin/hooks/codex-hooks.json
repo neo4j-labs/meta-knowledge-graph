@@ -74,6 +74,15 @@
             "command": "HOOK=\"inject_query_error_context.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\""
           }
         ]
+      },
+      {
+        "matcher": ".*project_add_learning$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOK=\"link_learning_session.py\"; ROOT=\"${CODEX_PLUGIN_ROOT:-}\"; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then CACHE=\"${CODEX_HOME:-$HOME/.codex}/plugins/cache\"; ROOT=\"$(ls -dt \"$CACHE\"/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/hooks/$HOOK\" ]; then echo \"[mkg hooks] cannot locate $HOOK in installed Codex plugin cache\" >&2; exit 0; fi; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/$HOOK\""
+          }
+        ]
       }
     ],
     "PreCompact": [

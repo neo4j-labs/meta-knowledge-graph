@@ -74,6 +74,15 @@
             "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/inject_query_error_context.py\""
           }
         ]
+      },
+      {
+        "matcher": ".*project_add_learning$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" uv run --script \"$ROOT/hooks/link_learning_session.py\""
+          }
+        ]
       }
     ],
     "PreCompact": [
