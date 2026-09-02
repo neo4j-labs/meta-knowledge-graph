@@ -1151,6 +1151,30 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIs(rows[0]["resolved"], False)
         self.assertEqual(rows[0]["tool_key"], "Bash")
 
+    def test_every_project_learning_path_carries_the_error_fields(self) -> None:
+        # The extractor deduplicates against fetch_project_learnings and is
+        # told to match error learnings on their signature. The hybrid path
+        # projected the error fields; the fulltext and recency fallbacks did
+        # not, so on those paths the existing-memory block showed an error
+        # learning as a plain fact.
+        captured: list[str] = []
+
+        class FakeDriver:
+            def execute_query(self, query, **params):
+                captured.append(query)
+                return []
+
+        project_common.fetch_project_learnings(FakeDriver(), "neo4j", project_id="mkg", query=None)
+        project_common.fetch_project_learnings(
+            FakeDriver(), "neo4j", project_id="mkg", query="make lint fails"
+        )
+        learning_queries = [q for q in captured if "AS task_pattern" in q]
+        self.assertGreaterEqual(len(learning_queries), 3, "hybrid, fulltext and recency paths")
+        for query in learning_queries:
+            for field in ("scope", "kind", "tool_key", "error_signature", "resolved"):
+                with self.subTest(field=field):
+                    self.assertIn(f"AS {field}", query)
+
     def test_existing_error_learnings_show_their_state_to_the_extractor(self) -> None:
         rendered = process_project._format_existing_memory(
             [
@@ -1161,6 +1185,7 @@ class ProjectHookTests(unittest.TestCase):
                     "task_pattern": None,
                     "kind": "error",
                     "tool_key": "Bash",
+                    "error_signature": "No rule to make target 'lint'",
                     "resolved": False,
                     "text": "Bash: make lint fails; no fix known",
                 },
@@ -1173,7 +1198,11 @@ class ProjectHookTests(unittest.TestCase):
                 },
             ]
         )
-        self.assertIn("kind=error; tool_key=Bash; resolved=False; text=Bash: make lint", rendered)
+        self.assertIn(
+            "kind=error; tool_key=Bash; error_signature=No rule to make target 'lint'; "
+            "resolved=False; text=Bash: make lint",
+            rendered,
+        )
         self.assertIn("task_pattern=None; text=plain fact", rendered)
         self.assertNotIn("kind=fact", rendered)
 

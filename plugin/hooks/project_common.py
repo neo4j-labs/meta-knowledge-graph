@@ -2607,6 +2607,11 @@ def fetch_project_learnings(
                        node.status AS status,
                        node.confidence AS confidence,
                        node.task_pattern AS task_pattern,
+                       node.scope AS scope,
+                       node.kind AS kind,
+                       node.tool_key AS tool_key,
+                       node.error_signature AS error_signature,
+                       node.resolved AS resolved,
                        score
                 ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
                          score DESC,
@@ -2643,6 +2648,11 @@ def fetch_project_learnings(
                l.status AS status,
                l.confidence AS confidence,
                l.task_pattern AS task_pattern,
+               l.scope AS scope,
+               l.kind AS kind,
+               l.tool_key AS tool_key,
+               l.error_signature AS error_signature,
+               l.resolved AS resolved,
                0.0 AS score
         ORDER BY CASE l.status WHEN 'approved' THEN 0 ELSE 1 END,
                  toString(coalesce(l.last_used_at, l.updated_at, l.created_at)) DESC

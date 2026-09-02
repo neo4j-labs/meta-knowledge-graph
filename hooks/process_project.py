@@ -380,9 +380,12 @@ def _format_existing_memory(
         for item in learnings:
             error_fields = ""
             if item.get("kind") == "error":
+                # The prompt asks the model to match existing error learnings
+                # on their signature, so the signature has to be on the page.
                 error_fields = (
                     "kind=error; "
                     f"tool_key={item.get('tool_key')}; "
+                    f"error_signature={item.get('error_signature')}; "
                     f"resolved={bool(item.get('resolved'))}; "
                 )
             lines.append(
