@@ -2383,7 +2383,7 @@ def create_mcp_server(
         ),
     ) -> str:
         """Load one approved skill's full procedure, with its provenance (the
-        learning ids it was distilled from, and the tool-error patterns that
+        learning ids it was distilled from, and the error learnings that
         informed its pitfalls). Fetch only skills whose search hit actually
         matches the task at hand. A skill flagged ``needs_revision`` had a
         source learning rejected or superseded after distillation — its
@@ -2468,7 +2468,7 @@ def create_mcp_server(
         proposer's ``rationale``; the source learnings it was distilled from
         (``derived_from``, each with its text and *current* status, so every
         step can be traced back to approved memory and stale sources stand
-        out); the tool-error patterns folded into its pitfalls
+        out); the error learnings folded into its pitfalls
         (``informed_by``); and the safety screen's verdict — ``safety_status``
         is ``passed`` when the LLM judge screened it, or ``unscreened`` when
         the judge was unavailable and the reviewer is the only screen. Blocked
@@ -2637,7 +2637,7 @@ def create_mcp_server(
 
         Approval applies the pending ``:SkillVersion``'s content to the skill,
         stamps the version ``accepted``, creates the ``DERIVED_FROM``
-        (learnings) and ``INFORMED_BY`` (tool-error patterns) provenance edges,
+        (learnings) and ``INFORMED_BY`` (error learnings) provenance edges,
         clears any ``needs_revision`` flag, and embeds the skill so it enters
         ``skill_search``. Rejection stamps the version ``rejected`` and never
         touches a learning — the knowledge layer only ever grows.

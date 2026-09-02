@@ -147,5 +147,20 @@ class ComposePromptTests(unittest.TestCase):
         self.assertNotIn("retracted after consolidation", fresh)
 
 
+
+class SeedPromptTests(unittest.TestCase):
+    def test_seed_prompt_describes_errors_as_learnings(self) -> None:
+        # The seed is the source of truth for the (:SystemPrompt) node; it must
+        # describe the current pipeline, where a corrected tool failure becomes
+        # an error learning and no separate error store or service exists.
+        prompt = inject_system_prompt.DEFAULT_PROMPT
+        self.assertIn("Background services", prompt)
+        self.assertIn("Two rate-limited consolidation services", prompt)
+        self.assertIn("error learning", prompt)
+        self.assertIn("kind: 'error'", prompt)
+        self.assertNotIn("error pattern", prompt)
+        self.assertNotIn("query failure", prompt)
+        self.assertNotIn("query-tool", prompt)
+
 if __name__ == "__main__":
     unittest.main()

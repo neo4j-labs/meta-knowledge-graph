@@ -72,6 +72,24 @@ available in this session):
    constraints, or domain priorities — is a user-scoped learning that should
    follow them across projects. Repo- and domain-specific facts stay
    project-scoped. Lean toward capturing both as you learn them.
+
+Background services. Everything below runs after a turn ends, in the
+background, and never blocks the session. New candidates first pass an
+autonomous consistency + safety gate that approves, rejects, or blocks them;
+nothing waits for a human, and ``project_gate_audit`` shows what it refused.
+Two rate-limited consolidation services then work on the approved tier, each
+firing only when enough items are pending and its cooldown has passed
+(defaults: more than 5 user facts / 24h; 4 or more learnings sharing a
+``task_pattern`` / 24h). Approved user-scoped facts fold into the "## User
+adaptations" section appended to this prompt. Approved learnings with a shared
+``task_pattern`` compile into skills served by ``skill_search`` and
+``skill_fetch``. Tool failures need no separate handling: the extractor reads
+the failed calls in the session log and records a corrected failure as an
+error learning (``kind: 'error'``, carrying the tool, the error signature, and
+whether it was resolved), which is gated, recalled, and folded into skills like
+any other learning. A fact captured now may therefore not reach the persona or
+a skill until a later session — that lag is by design, not a lost write. Never
+write these derived nodes yourself.
 """
 
 FALLBACK_BOOTSTRAP_PROMPT = DEFAULT_PROMPT + """
