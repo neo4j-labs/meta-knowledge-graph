@@ -1,6 +1,6 @@
 [project]
 name = "meta-knowledge-graph"
-version = "0.1.35"
+version = "0.1.38"
 description = "Meta Knowledge Graph: MCP server and hooks for Neo4j-backed agent memory"
 requires-python = ">=3.10"
 dependencies = [

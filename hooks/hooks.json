@@ -69,6 +69,15 @@
             "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/inject_query_error_context.py\""
           }
         ]
+      },
+      {
+        "matcher": "mcp__.*__project_add_learning",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/link_learning_session.py\""
+          }
+        ]
       }
     ],
     "PostToolUseFailure": [

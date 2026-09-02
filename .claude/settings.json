@@ -68,6 +68,15 @@
             "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/inject_query_error_context.py"
           }
         ]
+      },
+      {
+        "matcher": "mcp__.*__project_add_learning",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/link_learning_session.py"
+          }
+        ]
       }
     ],
     "PostToolUseFailure": [

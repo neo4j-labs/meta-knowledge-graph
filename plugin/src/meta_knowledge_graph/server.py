@@ -131,6 +131,31 @@ def _truncate(value: str, limit: int = MAX_LEARNING_TEXT) -> str:
     return value[: limit - 3].rstrip() + "..."
 
 
+# ``task_pattern`` is the grouping key skill distillation clusters on: it
+# resolves to a ``(:TaskPattern)`` node by exact normalized match first, then by
+# embedding similarity over this very string. A paragraph-length value matches
+# nothing and never will, so its learning becomes a permanent singleton that no
+# skill can form from — the field silently stops working while still looking
+# populated. Anything past a short phrase is dropped rather than clipped: the
+# write coalesces, so a dropped pattern leaves any existing one intact, whereas
+# a truncated paragraph would overwrite a good key with a bad one. Kept in step
+# with hooks/process_project.py, which guards the extractor's writes the same
+# way.
+MAX_TASK_PATTERN_CHARS = 60
+MAX_TASK_PATTERN_WORDS = 6
+
+
+def _task_pattern(value: Optional[str]) -> Optional[str]:
+    pattern = " ".join(str(value or "").split())
+    if not pattern:
+        return None
+    if len(pattern) > MAX_TASK_PATTERN_CHARS:
+        return None
+    if len(pattern.split(" ")) > MAX_TASK_PATTERN_WORDS:
+        return None
+    return pattern
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1406,7 +1431,15 @@ def create_mcp_server(
         ),
         task_pattern: Optional[str] = Field(
             None,
-            description="Short reusable task pattern this learning applies to.",
+            description=(
+                "Grouping label naming the general kind of task this learning "
+                "applies to, so learnings from unrelated sessions can share it "
+                "verbatim and later compile into one skill. Lowercase noun "
+                "phrase, at most 6 words: 'hook pipeline debugging', 'cypher "
+                "schema migration'. Not a summary of the work and never steps "
+                "or instructions. Omit when nothing else would ever share it; "
+                "a longer value is dropped rather than stored."
+            ),
         ),
         scope: str = Field(
             "project",
@@ -1490,7 +1523,7 @@ def create_mcp_server(
                 project_id=resolved_pid,
                 row_id=row_id,
                 text=clean_text,
-                task_pattern=task_pattern,
+                task_pattern=_task_pattern(task_pattern),
                 status=normalized_status,
                 scope=normalized_scope,
                 source=MCP_LEARNING_SOURCE,

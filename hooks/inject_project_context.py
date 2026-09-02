@@ -25,6 +25,7 @@ from project_common import (  # noqa: E402
     fetch_recent_observations,
     fetch_user_learnings,
     format_learning_context,
+    inject_min_similarity,
     load_mkg_env,
     mark_injected_in_session,
     mark_learnings_used,
@@ -103,6 +104,7 @@ def main() -> int:
                         limit=5,
                         exclude_session_id=exclude_session_id,
                         query_vector=query_vector,
+                        min_similarity=inject_min_similarity(),
                     )
                     # Accountability, not review: the gate runs autonomously,
                     # so session start surfaces what it recently blocked and
@@ -118,6 +120,8 @@ def main() -> int:
                             driver, database, project_id=project.id
                         )
                 else:
+                    # Relevance-gated: only memory clearing the cosine floor
+                    # (MKG_INJECT_MIN_SIMILARITY) rides along with a prompt.
                     learnings = fetch_project_learnings(
                         driver,
                         database,
@@ -127,6 +131,7 @@ def main() -> int:
                         limit=5,
                         exclude_session_id=exclude_session_id,
                         query_vector=query_vector,
+                        min_similarity=inject_min_similarity(),
                     )
                 learning_ids = [
                     learning["id"]
