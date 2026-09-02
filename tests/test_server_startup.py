@@ -153,3 +153,32 @@ def test_resolve_learning_restores_embedding_on_reinstate() -> None:
     source = Path(server.__file__).read_text()
     assert "l.embedding = coalesce(l.embedding, $embedding)" in source
     assert "c.embedding = coalesce(c.embedding, $embedding)" in source
+
+
+def test_mcp_task_pattern_drops_paragraph_values() -> None:
+    # The MCP tool is the second writer of the same grouping key. A procedure
+    # pasted into it clusters with nothing, exactly as through the extractor.
+    assert (
+        server._task_pattern(
+            "To bootstrap UserProfile: (1) extract or MCP-add six user-scoped "
+            "Learning candidates; (2) ensure the window has non-lifecycle events."
+        )
+        is None
+    )
+    assert server._task_pattern("when you debug the hook and it fails again") is None
+    assert server._task_pattern(None) is None
+    assert server._task_pattern("   ") is None
+
+
+def test_mcp_task_pattern_keeps_short_labels() -> None:
+    assert server._task_pattern("  hook pipeline\n  debugging ") == "hook pipeline debugging"
+    assert server._task_pattern("cypher schema migration") == "cypher schema migration"
+
+
+def test_mcp_task_pattern_caps_match_the_extractor() -> None:
+    # Two entry points, one grouping key: capping them differently would let a
+    # pattern the extractor rejects enter the graph through the tool.
+    hooks_source = (ROOT / "hooks" / "process_project.py").read_text()
+    for constant in ("MAX_TASK_PATTERN_CHARS", "MAX_TASK_PATTERN_WORDS"):
+        value = getattr(server, constant)
+        assert f"{constant} = {value}\n" in hooks_source

@@ -109,6 +109,19 @@ about the person or the project; a clearly personal fact always takes "user".
 Never store secrets, sensitive personal data, transient details, or one-off task
 context in either scope.
 
+A learning may also carry a task_pattern: the short, general name of the *kind
+of task* it applies to. This is a grouping label, not a summary of the work.
+Learnings from unrelated sessions should be able to carry the exact same
+pattern verbatim — that shared label is what later lets them compile into one
+reusable skill, so a pattern used once is a pattern wasted. Write it as a
+lowercase noun phrase of at most 6 words naming the recurring theme:
+"hook pipeline debugging", "cypher schema migration", "flaky test triage",
+"release checklist". Never put steps, conditions, ids, or instructions in it —
+the procedure belongs in text. Prefer the more general theme whenever two
+phrasings would both fit. Use null when the learning is a standalone fact with
+no recurring task behind it; a pattern nothing else will ever share is worse
+than none.
+
 Return JSON only with this shape:
 {
   "learnings": [
@@ -117,7 +130,7 @@ Return JSON only with this shape:
       "existing_id": "learning id when action is update, otherwise null",
       "scope": "project|user",
       "text": "concise durable learning, or null",
-      "task_pattern": "short reusable task pattern, or null",
+      "task_pattern": "general recurring theme, <=6 words, or null",
       "confidence": 0.0,
       "reason": "why this action"
     }
@@ -410,6 +423,30 @@ def _scope_from_action(item: dict[str, Any], existing_id: str) -> str:
     return "project"
 
 
+# ``task_pattern`` is the grouping key skill distillation clusters on: it
+# resolves to a ``(:TaskPattern)`` node by exact normalized match first, then by
+# embedding similarity over this very string. A paragraph-length value matches
+# nothing and never will, so its learning becomes a permanent singleton that no
+# skill can ever form from — the field silently stops working while still
+# looking populated. Anything past a short phrase is dropped rather than
+# clipped: a null pattern leaves the learning skill-ineligible, which is the
+# honest outcome for one with no reusable theme, whereas a truncated paragraph
+# is a bad key forever.
+MAX_TASK_PATTERN_CHARS = 60
+MAX_TASK_PATTERN_WORDS = 6
+
+
+def _task_pattern(value: object) -> str | None:
+    pattern = " ".join(str(value or "").split())
+    if not pattern:
+        return None
+    if len(pattern) > MAX_TASK_PATTERN_CHARS:
+        return None
+    if len(pattern.split(" ")) > MAX_TASK_PATTERN_WORDS:
+        return None
+    return pattern
+
+
 def _memory_rows_from_actions(
     project: ProjectRef,
     mode: str,
@@ -440,7 +477,7 @@ def _memory_rows_from_actions(
                 "id": row_id,
                 "action": action,
                 "text": text or None,
-                "task_pattern": item.get("task_pattern"),
+                "task_pattern": _task_pattern(item.get("task_pattern")),
                 "confidence": _confidence(item.get("confidence")),
                 "status": "candidate",
                 "scope": scope,

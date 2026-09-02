@@ -838,6 +838,10 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("fold the reason it matters into the learning text", prompt)
         self.assertIn('"scope": "project|user"', prompt)
         self.assertIn("durable fact about the *person*", prompt)
+        # task_pattern is a shared grouping label, not a summary of the work:
+        # the prompt has to say so, or the model writes a procedure into it.
+        self.assertIn("grouping label, not a summary", prompt)
+        self.assertIn("at most 6 words", prompt)
         self.assertIn("collaborate with them", prompt)
         self.assertIn("sensitive personal data", prompt)
         # The self-rewriting prompt-suggestion buckets are gone.
@@ -1266,6 +1270,67 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("INTERMEDIATE-NARRATION", corpus)
         self.assertNotIn("TOOL-INPUT-MUST-NOT-LEAK", corpus)
         self.assertEqual(corpus.count("FINAL-ANSWER"), 1)
+
+    def test_paragraph_task_pattern_is_dropped(self) -> None:
+        # A procedure crammed into the grouping key matches nothing on exact
+        # normalized comparison and clears no embedding floor, so the learning
+        # would sit as a permanent singleton no skill can cluster. Dropping it
+        # is what keeps the field either usable or visibly empty.
+        rows = process_project._memory_rows_from_actions(
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "turn",
+            {
+                "learnings": [
+                    {
+                        "action": "create",
+                        "text": "The consolidation gate is strict on the threshold.",
+                        "task_pattern": (
+                            "To bootstrap UserProfile: (1) extract or MCP-add six "
+                            "user-scoped Learning candidates; (2) ensure the window "
+                            "has non-lifecycle events; (3) run consolidation."
+                        ),
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["task_pattern"])
+
+    def test_short_task_pattern_is_kept_and_whitespace_collapsed(self) -> None:
+        rows = process_project._memory_rows_from_actions(
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "turn",
+            {
+                "learnings": [
+                    {
+                        "action": "create",
+                        "text": "Hook failures never block the session.",
+                        "task_pattern": "  hook pipeline\n  debugging ",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(rows[0]["task_pattern"], "hook pipeline debugging")
+
+    def test_task_pattern_over_the_word_cap_is_dropped(self) -> None:
+        # Short enough in characters, too many words to be a reusable label.
+        rows = process_project._memory_rows_from_actions(
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "turn",
+            {
+                "learnings": [
+                    {
+                        "action": "create",
+                        "text": "Learnings need a shared label to cluster.",
+                        "task_pattern": "when you debug the hook and it fails again",
+                    },
+                ],
+            },
+        )
+
+        self.assertIsNone(rows[0]["task_pattern"])
 
     def test_llm_action_rows_skip_ignored_memory(self) -> None:
         project = project_common.ProjectRef(id="mkg", name="MKG")
