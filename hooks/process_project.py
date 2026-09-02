@@ -13,6 +13,7 @@ retrieval.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import subprocess
@@ -297,6 +298,11 @@ def _window_assistant_texts(events: list[dict[str, Any]]) -> list[tuple[str, str
 # crowds out the dialog.
 MAX_ERROR_TEXT = 600
 MAX_RETRY_INPUT_TEXT = 600
+# A later successful call to the same tool is offered as the fix only when
+# this share of the failed input survives in it: a corrected retry keeps most
+# of the original and changes a part; an unrelated later call shares little.
+MIN_RETRY_INPUT_OVERLAP = 0.6
+MAX_OVERLAP_TEXT = 1000
 
 
 def _is_failed_tool_event(event: dict[str, Any]) -> bool:
@@ -310,15 +316,55 @@ def _is_failed_tool_event(event: dict[str, Any]) -> bool:
     return is_error_tool_response(event.get("tool_response"))
 
 
+def _leaf_strings(node: Any) -> list[str]:
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [text for value in node.values() for text in _leaf_strings(value)]
+    if isinstance(node, list):
+        return [text for value in node for text in _leaf_strings(value)]
+    return [] if node is None else [str(node)]
+
+
+def _input_content(text: str) -> str:
+    """A tool input reduced to what the call actually said: the values of a
+    JSON object without its keys and punctuation, else the raw text. Keys such
+    as ``command`` are shared by every call and would inflate the overlap."""
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            value = json.loads(stripped)
+        except json.JSONDecodeError:
+            value = None
+        if isinstance(value, dict):
+            return " ".join(_leaf_strings(value))
+    return stripped
+
+
+def _retry_overlaps(failed_input: str, retry_input: str) -> bool:
+    """True when most of the failed input survives in the retry."""
+    failed = _input_content(failed_input)[:MAX_OVERLAP_TEXT].lower()
+    retry = _input_content(retry_input)[:MAX_OVERLAP_TEXT].lower()
+    if not failed or not retry:
+        return False
+    matcher = difflib.SequenceMatcher(None, failed, retry, autojunk=False)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return matched / len(failed) >= MIN_RETRY_INPUT_OVERLAP
+
+
 def _later_success_same_tool(events: list[dict[str, Any]], index: int) -> str | None:
-    """Input of the first later successful call to the same tool, if any.
+    """Input of the first later successful call to the same tool whose input
+    resembles the failed one, if any.
 
     The corrected retry is the evidence that pairs an error with its fix, so
     the corpus states the pairing outright instead of leaving the extractor to
-    infer it from event order."""
+    infer it from event order. Resemblance is required because the next call
+    to a general tool such as Bash is often unrelated, and the pairing is
+    stated to the extractor as fact."""
     failed = events[index]
     tool_name = str(failed.get("tool_name") or "")
-    if not tool_name:
+    failed_input = _event_text(failed, "tool_input")
+    if not tool_name or not failed_input:
         return None
     for later in events[index + 1 :]:
         if str(later.get("event_name") or "") != "PostToolUse":
@@ -327,7 +373,9 @@ def _later_success_same_tool(events: list[dict[str, Any]], index: int) -> str | 
             continue
         if _is_failed_tool_event(later):
             continue
-        return _event_text(later, "tool_input") or None
+        retry_input = _event_text(later, "tool_input")
+        if retry_input and _retry_overlaps(failed_input, retry_input):
+            return retry_input
     return None
 
 

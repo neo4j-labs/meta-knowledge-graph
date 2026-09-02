@@ -987,6 +987,50 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("tool_error: make: *** No rule to make target 'lint'", corpus)
         self.assertNotIn("later_call_to_same_tool_succeeded", corpus)
 
+    def test_event_corpus_pairs_a_failure_only_with_a_resembling_retry(self) -> None:
+        # For a general tool like Bash the next successful call is often
+        # unrelated; offering it as "the fix" states false evidence to the
+        # extractor. The corrected retry keeps most of the failed input.
+        def bash(ts: str, command: str, response: str, failed: bool = False) -> dict:
+            event = {
+                "event_name": "PostToolUse",
+                "timestamp": ts,
+                "tool_name": "Bash",
+                "tool_input": json.dumps({"command": command}),
+                "tool_response": response,
+            }
+            if failed:
+                event["tool_error"] = True
+            return event
+
+        events = [
+            bash(
+                "2026-09-02T10:00:00Z",
+                "pytest tests/test_x.py",
+                "ModuleNotFoundError: No module named 'pytest'",
+                failed=True,
+            ),
+            bash("2026-09-02T10:00:01Z", "git status", "On branch main"),
+            bash(
+                "2026-09-02T10:00:02Z",
+                "uv run --with pytest python -m pytest tests/test_x.py",
+                "3 passed",
+            ),
+        ]
+
+        corpus = process_project._event_corpus(events)
+        self.assertIn(
+            "later_call_to_same_tool_succeeded_with_input: "
+            '{"command": "uv run --with pytest python -m pytest tests/test_x.py"}',
+            corpus,
+        )
+        self.assertNotIn('succeeded_with_input: {"command": "git status"}', corpus)
+
+        # With only the unrelated call after it, the failure stays unpaired.
+        corpus = process_project._event_corpus(events[:2])
+        self.assertIn("tool_error: ModuleNotFoundError", corpus)
+        self.assertNotIn("later_call_to_same_tool_succeeded", corpus)
+
     def test_event_corpus_elides_transient_failures(self) -> None:
         # A timeout says nothing about the tool: its text stays out of the
         # corpus, and the identical successful retry is not offered as a fix.
