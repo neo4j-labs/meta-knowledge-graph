@@ -679,6 +679,18 @@ class _RowsDriver:
         return self.rows
 
 
+class _SequenceDriver:
+    """One canned result per execute_query call, in order."""
+
+    def __init__(self, batches):
+        self.batches = list(batches)
+        self.calls: list[tuple[str, dict]] = []
+
+    def execute_query(self, query, **params):
+        self.calls.append((query, params))
+        return self.batches.pop(0) if self.batches else []
+
+
 class GroupErrorContextTests(unittest.TestCase):
     def test_curated_tier_reads_approved_error_learnings_from_the_task_sessions(self) -> None:
         driver = _RowsDriver(rows=[])
@@ -691,12 +703,43 @@ class GroupErrorContextTests(unittest.TestCase):
         self.assertIn("(tp)-[:OBSERVED_IN]->(:Session)<-[:FROM_SESSION]-(e:Learning)", curated)
         self.assertIn("e.kind = 'error'", curated)
         self.assertIn("e.status = 'approved'", curated)
-        self.assertIn("NOT e.id IN $exclude_ids", curated)
         self.assertNotIn("QueryErrorPattern", curated)
-        self.assertEqual(params["exclude_ids"], ["l1", "l2"])
+        # Members are filtered in Python (their tool keys are still needed),
+        # and the window grows by their number so they cannot eat the limit.
+        self.assertNotIn("$exclude_ids", curated)
+        self.assertEqual(params["limit"], consolidate_skills.MAX_ERROR_PATTERNS_PER_GROUP + 2)
         self.assertEqual(params["pattern_ids"], ["tp-1"])
         raw, _ = driver.calls[1]
         self.assertIn("ev.tool_error = true", raw)
+
+    def test_excluded_members_still_cover_their_tool(self) -> None:
+        # l1 is a group member: it stays out of the curated tier (it is already
+        # in the prompt as a learning) but its Bash failures must not come
+        # back through the raw tier as the very stack trace l1 explains.
+        member = {
+            "id": "l1",
+            "kind": "learning",
+            "tool_key": "Bash",
+            "title": "make lint fails",
+            "error_signature": "No rule to make target 'lint'",
+            "resolution": None,
+            "resolved": False,
+            "occurrences": 3,
+        }
+        other = dict(member, id="l9", tool_key="neo4j_read_cypher", title="datetime serializes as {}")
+        raw_rows = [
+            {"tool_name": "Bash", "tool_response": "make: *** No rule to make target 'lint'"},
+            {"tool_name": "WebFetch", "tool_response": "404 Not Found"},
+        ]
+        driver = _SequenceDriver([[member, other], raw_rows])
+
+        context = consolidate_skills.fetch_group_error_context(
+            driver, "neo4j", ["tp-1"], exclude_ids=["l1"]
+        )
+
+        self.assertEqual([row["id"] for row in context], ["l9", None])
+        self.assertEqual(context[1]["kind"], "raw_failure")
+        self.assertEqual(context[1]["tool_key"], "WebFetch")
 
     def test_no_pattern_ids_means_no_queries(self) -> None:
         driver = _RowsDriver()

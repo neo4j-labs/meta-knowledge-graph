@@ -618,12 +618,18 @@ def fetch_group_error_context(
     Two tiers, both reached through the ``(tp)-[:OBSERVED_IN]->(:Session)``
     hub: gate-approved error learnings extracted from those sessions
     (``kind = 'error'``: the error signature and, when ``resolved``, the fix
-    that worked — most-supported first), skipping ``exclude_ids`` (the group's
-    own members, already in the prompt as learnings), then a digest of other
-    failed tool calls from the same sessions' ``SessionEvent.tool_error`` log
-    for tools without an error learning."""
+    that worked — most-supported first), then a digest of other failed tool
+    calls from the same sessions' ``SessionEvent.tool_error`` log for tools
+    without an error learning.
+
+    ``exclude_ids`` are the group's own members, already in the prompt as
+    learnings. They are left out of the curated tier but still count as
+    covering their tool: a member is often *the* error learning for that
+    tool, and forgetting that would hand its failures back to the prompt as
+    raw stack traces the learning already explains."""
     if not pattern_ids:
         return []
+    excluded = {str(item) for item in (exclude_ids or [])}
     curated_records = _execute_query(
         driver,
         database,
@@ -633,7 +639,6 @@ def fetch_group_error_context(
         MATCH (tp)-[:OBSERVED_IN]->(:Session)<-[:FROM_SESSION]-(e:Learning)
         WHERE e.kind = 'error'
           AND e.status = 'approved'
-          AND NOT e.id IN $exclude_ids
         WITH DISTINCT e
         RETURN e.id AS id,
                'learning' AS kind,
@@ -648,13 +653,20 @@ def fetch_group_error_context(
         LIMIT $limit
         """,
         pattern_ids=pattern_ids,
-        exclude_ids=list(exclude_ids or []),
-        limit=MAX_ERROR_PATTERNS_PER_GROUP,
+        # Members are read for their tool keys and dropped below; widen the
+        # window so they cannot crowd out the learnings that are kept.
+        limit=MAX_ERROR_PATTERNS_PER_GROUP + len(excluded),
     )
-    context = [dict(record) for record in curated_records]
-    covered = {
-        str(row.get("tool_key") or "").lower() for row in context if row.get("tool_key")
-    }
+    context: list[dict[str, Any]] = []
+    covered: set[str] = set()
+    for record in curated_records:
+        row = dict(record)
+        if row.get("tool_key"):
+            covered.add(str(row["tool_key"]).lower())
+        if str(row.get("id")) in excluded:
+            continue
+        context.append(row)
+    context = context[:MAX_ERROR_PATTERNS_PER_GROUP]
 
     raw_records = _execute_query(
         driver,
