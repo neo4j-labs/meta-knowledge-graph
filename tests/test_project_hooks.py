@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -910,6 +911,223 @@ class ProjectHookTests(unittest.TestCase):
             [],
         )
         self.assertNotIn("TOOL-OUTPUT-MUST-NOT-LEAK", prompt)
+
+    def test_event_corpus_keeps_failed_tool_output_and_pairs_the_fixing_retry(self) -> None:
+        tool = "mcp__plugin_meta-knowledge-graph_meta-knowledge-graph__neo4j_read_cypher"
+        failure = json.dumps(
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Neo.ClientError.Statement.SyntaxError: Invalid input 'RETRUN'",
+                    }
+                ],
+                "isError": True,
+            }
+        )
+        events = [
+            {
+                "event_name": "PostToolUse",
+                "timestamp": "2026-09-02T10:00:00Z",
+                "tool_name": tool,
+                "tool_input": "MATCH (n) RETRUN n",
+                "tool_response": failure,
+                "tool_error": True,
+                "source_event": "PostToolUseFailure",
+            },
+            {
+                "event_name": "PreToolUse",
+                "timestamp": "2026-09-02T10:00:01Z",
+                "tool_name": tool,
+                "tool_input": "MATCH (n) RETURN n",
+            },
+            {
+                "event_name": "PostToolUse",
+                "timestamp": "2026-09-02T10:00:02Z",
+                "tool_name": tool,
+                "tool_input": "MATCH (n) RETURN n",
+                "tool_response": '[{"n": 1}]',
+            },
+        ]
+
+        corpus = process_project._event_corpus(events)
+        self.assertIn("tool_key: neo4j_read_cypher", corpus)
+        self.assertIn(
+            "tool_error: Neo.ClientError.Statement.SyntaxError: Invalid input 'RETRUN'",
+            corpus,
+        )
+        self.assertIn(
+            "later_call_to_same_tool_succeeded_with_input: MATCH (n) RETURN n", corpus
+        )
+        # The successful retry's own output still stays out of the corpus.
+        self.assertNotIn('{"n": 1}', corpus)
+
+    def test_event_corpus_skips_interrupts_and_leaves_unpaired_failures_unpaired(self) -> None:
+        events = [
+            {
+                "event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": json.dumps({"command": "npm test"}),
+                "tool_response": "interrupted",
+                "tool_error": True,
+                "is_interrupt": True,
+            },
+            {
+                "event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": json.dumps({"command": "make lint"}),
+                "tool_response": "make: *** No rule to make target 'lint'",
+                "tool_error": True,
+            },
+        ]
+
+        corpus = process_project._event_corpus(events)
+        self.assertNotIn("tool_error: interrupted", corpus)
+        self.assertIn("tool_key: Bash", corpus)
+        self.assertIn("tool_error: make: *** No rule to make target 'lint'", corpus)
+        self.assertNotIn("later_call_to_same_tool_succeeded", corpus)
+
+    def test_event_corpus_treats_mcp_error_envelope_as_failure(self) -> None:
+        # Codex-style: no PostToolUseFailure event, the failure arrives as an
+        # isError result on a plain PostToolUse with no tool_error flag.
+        events = [
+            {
+                "event_name": "PostToolUse",
+                "tool_name": "mcp__meta_knowledge_graph__neo4j_read_cypher",
+                "tool_input": "RETURN apoc.map.fromPairs([])",
+                "tool_response": json.dumps(
+                    {
+                        "content": [{"type": "text", "text": "Unknown function 'apoc.map.fromPairs'"}],
+                        "isError": True,
+                    }
+                ),
+            }
+        ]
+        corpus = process_project._event_corpus(events)
+        self.assertIn("tool_error: Unknown function 'apoc.map.fromPairs'", corpus)
+
+    def test_extraction_prompt_teaches_error_learnings(self) -> None:
+        prompt = process_project.DEFAULT_MEMORY_EXTRACTION_PROMPT
+        for token in (
+            '"kind": "fact|error"',
+            '"tool_key"',
+            '"error_signature"',
+            '"resolved"',
+            "Never record transient failures",
+        ):
+            self.assertIn(token, prompt)
+
+    def test_memory_rows_carry_error_learning_fields(self) -> None:
+        rows = process_project._memory_rows_from_actions(
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "turn",
+            {
+                "learnings": [
+                    {
+                        "action": "create",
+                        "scope": "project",
+                        "kind": "error",
+                        "text": (
+                            "neo4j_read_cypher: datetime properties serialize as {} — "
+                            "project them with toString(...)"
+                        ),
+                        "task_pattern": "cypher query debugging",
+                        "tool_key": "mcp__plugin_mkg_meta-knowledge-graph__neo4j_read_cypher",
+                        "error_signature": "  result contains   {} for datetime ",
+                        "resolved": "true",
+                        "confidence": 0.8,
+                        "reason": "fixed in session",
+                    },
+                    {
+                        "action": "create",
+                        "scope": "project",
+                        "text": "plain fact",
+                        "confidence": 0.7,
+                        "reason": "r",
+                    },
+                    {
+                        "action": "update",
+                        "existing_id": "learning:mkg:abc",
+                        "text": "updated text",
+                        "confidence": 0.7,
+                        "reason": "r",
+                    },
+                ]
+            },
+            user_id="a@b.c",
+        )
+        error_row, fact_row, update_row = rows
+
+        self.assertEqual(error_row["kind"], "error")
+        self.assertEqual(error_row["tool_key"], "neo4j_read_cypher")
+        self.assertEqual(error_row["error_signature"], "result contains {} for datetime")
+        self.assertIs(error_row["resolved"], True)
+
+        self.assertEqual(fact_row["kind"], "fact")
+        self.assertIsNone(fact_row["tool_key"])
+        self.assertIsNone(fact_row["error_signature"])
+        self.assertIsNone(fact_row["resolved"])
+
+        # An update that does not restate the kind must not rewrite it: the
+        # write coalesces null onto the stored value.
+        self.assertIsNone(update_row["kind"])
+        self.assertIsNone(update_row["resolved"])
+
+    def test_new_error_learning_without_a_stated_fix_is_unresolved(self) -> None:
+        rows = process_project._memory_rows_from_actions(
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "turn",
+            {
+                "learnings": [
+                    {
+                        "action": "create",
+                        "kind": "error",
+                        "text": "Bash: `make lint` has no target in this repo; no fix known",
+                        "tool_key": "Bash",
+                        "error_signature": "No rule to make target 'lint'",
+                        "confidence": 0.6,
+                        "reason": "r",
+                    }
+                ]
+            },
+            user_id="a@b.c",
+        )
+        self.assertIs(rows[0]["resolved"], False)
+        self.assertEqual(rows[0]["tool_key"], "Bash")
+
+    def test_existing_error_learnings_show_their_state_to_the_extractor(self) -> None:
+        rendered = process_project._format_existing_memory(
+            [
+                {
+                    "id": "learning:mkg:err",
+                    "scope": "project",
+                    "status": "approved",
+                    "task_pattern": None,
+                    "kind": "error",
+                    "tool_key": "Bash",
+                    "resolved": False,
+                    "text": "Bash: make lint fails; no fix known",
+                },
+                {
+                    "id": "learning:mkg:fact",
+                    "scope": "project",
+                    "status": "approved",
+                    "task_pattern": None,
+                    "text": "plain fact",
+                },
+            ]
+        )
+        self.assertIn("kind=error; tool_key=Bash; resolved=False; text=Bash: make lint", rendered)
+        self.assertIn("task_pattern=None; text=plain fact", rendered)
+        self.assertNotIn("kind=fact", rendered)
+
+    def test_learning_writes_persist_error_fields_on_create_and_update(self) -> None:
+        source = inspect.getsource(process_project._write_processing)
+        for column in ("l.kind", "l.tool_key", "l.error_signature", "l.resolved"):
+            self.assertIn(column, source)
+        # The update path coalesces so an omitted field keeps its stored value.
+        self.assertIn("l.kind = coalesce(row.kind, l.kind)", source)
+        self.assertIn("l.resolved = coalesce(row.resolved, l.resolved)", source)
 
     def test_event_corpus_includes_intermediate_assistant_messages(self) -> None:
         base_records = [
@@ -2200,10 +2418,11 @@ class ProjectHookTests(unittest.TestCase):
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
         stop_hooks = config["hooks"]["Stop"][0]["hooks"]
 
-        # The self-rewriting prompt-rebuild Stop hooks are gone; logging, memory
-        # extraction, and the rate-limited prompt-, skill-, and
-        # query-error-consolidation services remain.
-        self.assertEqual(len(stop_hooks), 5)
+        # The self-rewriting prompt-rebuild Stop hooks are gone, and so is the
+        # separate query-error consolidation service (error fixes are
+        # learnings now); logging, memory extraction, and the rate-limited
+        # prompt- and skill-consolidation services remain.
+        self.assertEqual(len(stop_hooks), 4)
         self.assertIn("hooks/log_event.py", stop_hooks[0]["command"])
         self.assertIn("--client codex", stop_hooks[0]["command"])
         self.assertIn("hooks/process_project.py", stop_hooks[1]["command"])
@@ -2212,11 +2431,10 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("--background", stop_hooks[2]["command"])
         self.assertIn("hooks/consolidate_skills.py", stop_hooks[3]["command"])
         self.assertIn("--background", stop_hooks[3]["command"])
-        self.assertIn("hooks/consolidate_query_errors.py", stop_hooks[4]["command"])
-        self.assertIn("--background", stop_hooks[4]["command"])
         joined = "\n".join(hook["command"] for hook in stop_hooks)
         self.assertNotIn("apply_system_prompt.py", joined)
         self.assertNotIn("apply_memory_extraction_prompt.py", joined)
+        self.assertNotIn("consolidate_query_errors.py", joined)
 
     def test_codex_hooks_inject_project_context_for_supported_context_events(self) -> None:
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
@@ -2235,61 +2453,48 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("hooks/log_event.py", prompt_hooks[1]["command"])
         self.assertIn("--client codex", prompt_hooks[1]["command"])
 
-    def test_codex_post_tool_use_captures_query_failures(self) -> None:
-        config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
-        post_tool_groups = config["hooks"]["PostToolUse"]
-        query_groups = [
-            group
-            for group in post_tool_groups
-            if "bigquery_execute_query" in group.get("matcher", "")
-            and "neo4j_read_cypher" in group.get("matcher", "")
-        ]
+    CLAUDE_HOOK_CONFIGS = (
+        ROOT / ".claude" / "settings.json",
+        ROOT / "hooks" / "hooks.json",
+        ROOT / "plugin" / "hooks" / "hooks.json",
+    )
 
-        self.assertEqual(len(query_groups), 1)
-        commands = [hook["command"] for hook in query_groups[0]["hooks"]]
-        self.assertTrue(
-            any("hooks/capture_query_failures.py" in command for command in commands)
-        )
-        self.assertTrue(
-            any("hooks/inject_query_error_context.py" in command for command in commands)
+    @staticmethod
+    def _all_commands(config: dict) -> str:
+        return "\n".join(
+            hook["command"]
+            for groups in config["hooks"].values()
+            for group in groups
+            for hook in group["hooks"]
         )
 
-    def test_claude_post_tool_use_captures_query_failures(self) -> None:
-        config = json.loads((ROOT / ".claude" / "settings.json").read_text())
-        post_tool_groups = config["hooks"]["PostToolUse"]
-        query_groups = [
-            group
-            for group in post_tool_groups
-            if "bigquery_execute_query" in group.get("matcher", "")
-            and "neo4j_read_cypher" in group.get("matcher", "")
-        ]
+    def test_query_failure_pipeline_is_gone_from_every_hook_config(self) -> None:
+        for hooks_path in self.CLAUDE_HOOK_CONFIGS + (
+            ROOT / ".codex" / "hooks.json",
+            ROOT / "plugin" / "hooks" / "codex-hooks.json",
+        ):
+            with self.subTest(hooks_path=hooks_path):
+                config = json.loads(hooks_path.read_text())
+                joined = self._all_commands(config)
+                self.assertNotIn("capture_query_failures.py", joined)
+                self.assertNotIn("consolidate_query_errors.py", joined)
+                self.assertNotIn("inject_query_error_context.py", joined)
+                # There is no failure-time hook at all: errors reach memory
+                # through the event log and the Stop-time extractor only.
+                self.assertNotIn("inject_error_context.py", joined)
 
-        self.assertEqual(len(query_groups), 1)
-        commands = [hook["command"] for hook in query_groups[0]["hooks"]]
-        self.assertTrue(
-            any("hooks/capture_query_failures.py" in command for command in commands)
-        )
-        self.assertTrue(
-            any("hooks/inject_query_error_context.py" in command for command in commands)
-        )
-
-    def test_claude_post_tool_use_failure_captures_and_recalls_query_failures(self) -> None:
-        config = json.loads((ROOT / ".claude" / "settings.json").read_text())
-        failure_groups = [
-            group
-            for group in config["hooks"]["PostToolUseFailure"]
-            if "bigquery_execute_query" in group.get("matcher", "")
-            and "neo4j_read_cypher" in group.get("matcher", "")
-        ]
-
-        self.assertEqual(len(failure_groups), 1)
-        commands = [hook["command"] for hook in failure_groups[0]["hooks"]]
-        self.assertTrue(
-            any("hooks/capture_query_failures.py" in command for command in commands)
-        )
-        self.assertTrue(
-            any("hooks/inject_query_error_context.py" in command for command in commands)
-        )
+    def test_post_tool_use_failure_only_logs_the_event(self) -> None:
+        # A failed call is captured into the session's event log, and the
+        # Stop-time extractor turns it into an error learning. Nothing else
+        # runs on the failure itself.
+        for hooks_path in self.CLAUDE_HOOK_CONFIGS:
+            with self.subTest(hooks_path=hooks_path):
+                config = json.loads(hooks_path.read_text())
+                groups = config["hooks"]["PostToolUseFailure"]
+                self.assertEqual(len(groups), 1)
+                commands = [hook["command"] for hook in groups[0]["hooks"]]
+                self.assertEqual(len(commands), 1)
+                self.assertIn("hooks/log_event.py", commands[0])
 
     def test_codex_logs_documented_lifecycle_events_without_session_end(self) -> None:
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
@@ -2727,6 +2932,81 @@ class ObservationTests(unittest.TestCase):
         self.assertIn("FOR (o:Observation) REQUIRE o.id IS UNIQUE", joined)
         self.assertIn("project_observation_fulltext", joined)
 
+
+
+class ToolKeyTests(unittest.TestCase):
+    def test_mcp_names_reduce_to_the_bare_tool(self) -> None:
+        for name in (
+            "mcp__meta-knowledge-graph__neo4j_read_cypher",
+            "mcp__plugin_meta-knowledge-graph_meta-knowledge-graph__neo4j_read_cypher",
+            "mcp__meta_knowledge_graph__neo4j_read_cypher",
+        ):
+            self.assertEqual(project_common.tool_key(name), "neo4j_read_cypher")
+
+    def test_builtin_tools_keep_their_name(self) -> None:
+        self.assertEqual(project_common.tool_key("Bash"), "Bash")
+        self.assertEqual(project_common.tool_key("  Edit "), "Edit")
+        self.assertIsNone(project_common.tool_key(""))
+        self.assertIsNone(project_common.tool_key(None))
+
+
+class FailureTextTests(unittest.TestCase):
+    def test_unwraps_mcp_error_envelope_from_dict_and_json_string(self) -> None:
+        envelope = {
+            "content": [{"type": "text", "text": "Neo.ClientError: Unknown label"}],
+            "isError": True,
+        }
+        self.assertEqual(
+            project_common.tool_failure_text(envelope), "Neo.ClientError: Unknown label"
+        )
+        self.assertEqual(
+            project_common.tool_failure_text(json.dumps(envelope)),
+            "Neo.ClientError: Unknown label",
+        )
+        self.assertTrue(project_common.is_error_tool_response(envelope))
+        self.assertTrue(project_common.is_error_tool_response('{"isError": true}'))
+
+    def test_plain_strings_and_caps(self) -> None:
+        self.assertEqual(project_common.tool_failure_text("  plain   error "), "plain error")
+        self.assertEqual(project_common.tool_failure_text(None), "")
+        self.assertEqual(project_common.tool_failure_text("abcdefghij", limit=8), "abcde...")
+        self.assertFalse(project_common.is_error_tool_response("not json"))
+        self.assertFalse(project_common.is_error_tool_response({"isError": False}))
+
+
+class ErrorLearningRecallTests(unittest.TestCase):
+    def test_prompt_time_recall_tags_error_learnings(self) -> None:
+        # Error learnings are recalled by the ordinary prompt-time path; the
+        # tag tells the model whether it is holding a fix or an open failure.
+        context = project_common.format_learning_context(
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            [
+                {
+                    "id": "l1",
+                    "status": "approved",
+                    "confidence": 0.8,
+                    "kind": "error",
+                    "resolved": True,
+                    "text": "neo4j_read_cypher: wrap datetime properties in toString(...)",
+                },
+                {
+                    "id": "l2",
+                    "status": "approved",
+                    "confidence": 0.6,
+                    "kind": "error",
+                    "resolved": False,
+                    "text": "Bash: `make lint` has no target here; no fix known",
+                },
+                {"id": "l3", "status": "approved", "confidence": 0.9, "text": "plain fact"},
+            ],
+        )
+        self.assertIn(
+            "- [approved, confidence 0.80, error fix] neo4j_read_cypher", context
+        )
+        self.assertIn(
+            "- [approved, confidence 0.60, known failure, no fix] Bash", context
+        )
+        self.assertIn("- [approved, confidence 0.90] plain fact", context)
 
 if __name__ == "__main__":
     unittest.main()

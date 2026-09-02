@@ -38,6 +38,7 @@ from project_common import (  # noqa: E402
     fetch_user_learnings,
     has_project_work_events,
     in_extraction_subprocess,
+    is_error_tool_response,
     learning_id,
     learning_namespace,
     llm_complete,
@@ -53,11 +54,12 @@ from project_common import (  # noqa: E402
     resolve_llm_model,
     resolve_project,
     resolve_user,
+    tool_failure_text,
+    tool_key,
     transcript_records,
     truncate,
 )
 
-import capture_query_failures  # noqa: E402
 from consistency_gate import (  # noqa: E402
     attach_candidate_embeddings,
     ensure_memory_vector_indexes,
@@ -125,6 +127,24 @@ phrasings would both fit. Use null when the learning is a standalone fact with
 no recurring task behind it; a pattern nothing else will ever share is worse
 than none.
 
+Failures are learnings too. Every learning has a kind: "fact" (the default) or
+"error". The corpus keeps the output of failed tool calls only, marked
+tool_error, with the tool's tool_key and — when a later call to the same tool
+succeeded — that call's input. When a failure was corrected in this work (a
+changed retry succeeded, or the assistant worked around it), record the
+error-and-fix as one learning with "kind": "error": the text names the tool,
+what fails, and the correction that worked ("neo4j_read_cypher: datetime
+properties serialize as {} — project them with toString(...)"); "tool_key"
+copies the tool_key shown with the failure; "error_signature" is a one-line
+normalized form of the error message; "resolved" is true. A failure that was
+never resolved is worth recording with "resolved": false only when it is a
+durable, deterministic failure future sessions will hit again — then the text
+states what fails and that no fix is known. Never record transient failures
+(timeouts, rate limits, connectivity, resource exhaustion, permissions, user
+interrupts) as learnings. When a listed existing error learning has the same
+signature, update it instead of creating another; an unresolved one becomes
+resolved when the fix appears. Facts leave the error fields null.
+
 Return JSON only with this shape:
 {
   "learnings": [
@@ -132,8 +152,12 @@ Return JSON only with this shape:
       "action": "create|update|ignore",
       "existing_id": "learning id when action is update, otherwise null",
       "scope": "project|user",
+      "kind": "fact|error",
       "text": "concise durable learning, or null",
       "task_pattern": "general recurring theme, <=6 words, or null",
+      "tool_key": "for kind error: the tool_key shown with the failure; else null",
+      "error_signature": "for kind error: one-line normalized error message; else null",
+      "resolved": "for kind error: true when the work found the fix, false otherwise; null for facts",
       "confidence": 0.0,
       "reason": "why this action"
     }
@@ -267,6 +291,45 @@ def _window_assistant_texts(events: list[dict[str, Any]]) -> list[tuple[str, str
         return []
 
 
+# Failed tool output is the one tool output the corpus keeps: the error text is
+# what an error learning is built from. Capped so a wall of stack trace never
+# crowds out the dialog.
+MAX_ERROR_TEXT = 600
+MAX_RETRY_INPUT_TEXT = 600
+
+
+def _is_failed_tool_event(event: dict[str, Any]) -> bool:
+    """A tool call that failed and was not a user interrupt: the live
+    ``PostToolUseFailure`` normalization (``tool_error``) or an MCP error
+    envelope stored on a plain ``PostToolUse`` event."""
+    if event.get("is_interrupt") is True:
+        return False
+    if event.get("tool_error") is True:
+        return True
+    return is_error_tool_response(event.get("tool_response"))
+
+
+def _later_success_same_tool(events: list[dict[str, Any]], index: int) -> str | None:
+    """Input of the first later successful call to the same tool, if any.
+
+    The corrected retry is the evidence that pairs an error with its fix, so
+    the corpus states the pairing outright instead of leaving the extractor to
+    infer it from event order."""
+    failed = events[index]
+    tool_name = str(failed.get("tool_name") or "")
+    if not tool_name:
+        return None
+    for later in events[index + 1 :]:
+        if str(later.get("event_name") or "") != "PostToolUse":
+            continue
+        if str(later.get("tool_name") or "") != tool_name:
+            continue
+        if _is_failed_tool_event(later):
+            continue
+        return _event_text(later, "tool_input") or None
+    return None
+
+
 def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
     entries: list[tuple[str, int, str]] = []
     for order, event in enumerate(events):
@@ -274,12 +337,24 @@ def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
         event_name = _event_text(event, "event_name")
         if event_name:
             parts.append(f"Event: {event_name}")
-        # Tool outputs are deliberately excluded: memory extraction reads only
-        # user prompts, assistant messages, and tool inputs.
+        # Successful tool outputs are deliberately excluded: memory extraction
+        # reads user prompts, assistant messages, tool inputs — and, below,
+        # the error text of failed calls only.
         for key in ("prompt", "last_assistant_message", "tool_name", "tool_input"):
             text = _event_text(event, key)
             if text:
                 parts.append(f"{key}: {truncate(text, 1200)}")
+        if _is_failed_tool_event(event):
+            error_text = tool_failure_text(event.get("tool_response"), MAX_ERROR_TEXT)
+            if error_text:
+                parts.append(f"tool_key: {tool_key(event.get('tool_name')) or 'unknown'}")
+                parts.append(f"tool_error: {error_text}")
+                retry_input = _later_success_same_tool(events, order)
+                if retry_input:
+                    parts.append(
+                        "later_call_to_same_tool_succeeded_with_input: "
+                        f"{truncate(retry_input, MAX_RETRY_INPUT_TEXT)}"
+                    )
         if parts:
             entries.append((_ts_sort_key(event.get("timestamp")), order, "\n".join(parts)))
     for ts, text in _window_assistant_texts(events):
@@ -297,12 +372,20 @@ def _format_existing_memory(
     lines: list[str] = ["Existing similar learnings:"]
     if learnings:
         for item in learnings:
+            error_fields = ""
+            if item.get("kind") == "error":
+                error_fields = (
+                    "kind=error; "
+                    f"tool_key={item.get('tool_key')}; "
+                    f"resolved={bool(item.get('resolved'))}; "
+                )
             lines.append(
                 "- "
                 f"id={item.get('id')}; "
                 f"scope={item.get('scope') or 'project'}; "
                 f"status={item.get('status')}; "
                 f"task_pattern={item.get('task_pattern')}; "
+                f"{error_fields}"
                 f"text={truncate(str(item.get('text') or ''), 300)}"
             )
     else:
@@ -450,6 +533,55 @@ def _task_pattern(value: object) -> str | None:
     return pattern
 
 
+LEARNING_KINDS = frozenset({"fact", "error"})
+MAX_ERROR_SIGNATURE_CHARS = 300
+
+
+def _learning_kind(value: object) -> str | None:
+    """``"fact"`` / ``"error"`` when the extractor stated a kind, else None so
+    an update never silently rewrites the kind of an existing learning."""
+    kind = str(value or "").strip().lower()
+    return kind if kind in LEARNING_KINDS else None
+
+
+def _bool_or_none(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes"}:
+            return True
+        if lowered in {"false", "no"}:
+            return False
+    return None
+
+
+def _error_fields(item: dict[str, Any], action: str) -> dict[str, Any]:
+    """The error-learning columns of one extractor item.
+
+    A fact carries nulls. An error learning carries the canonical tool key,
+    a one-line error signature, and ``resolved`` — defaulting to False on
+    create (an error with no stated fix is unresolved) and left None on
+    update so an omitted field keeps the stored value."""
+    kind = _learning_kind(item.get("kind"))
+    if action == "create" and kind is None:
+        kind = "fact"
+    if kind != "error":
+        return {"kind": kind, "tool_key": None, "error_signature": None, "resolved": None}
+    signature = " ".join(str(item.get("error_signature") or "").split()) or None
+    if signature and len(signature) > MAX_ERROR_SIGNATURE_CHARS:
+        signature = signature[: MAX_ERROR_SIGNATURE_CHARS - 3].rstrip() + "..."
+    resolved = _bool_or_none(item.get("resolved"))
+    if action == "create" and resolved is None:
+        resolved = False
+    return {
+        "kind": "error",
+        "tool_key": tool_key(item.get("tool_key")),
+        "error_signature": signature,
+        "resolved": resolved,
+    }
+
+
 def _memory_rows_from_actions(
     project: ProjectRef,
     mode: str,
@@ -487,6 +619,7 @@ def _memory_rows_from_actions(
                 "action": action,
                 "text": text or None,
                 "task_pattern": _task_pattern(item.get("task_pattern")),
+                **_error_fields(item, action),
                 "confidence": _confidence(item.get("confidence")),
                 "status": "candidate",
                 "scope": scope,
@@ -756,6 +889,10 @@ def _write_processing(
             ON CREATE SET l.created_at = datetime($timestamp),
                           l.text = row.text,
                           l.task_pattern = row.task_pattern,
+                          l.kind = row.kind,
+                          l.tool_key = row.tool_key,
+                          l.error_signature = row.error_signature,
+                          l.resolved = row.resolved,
                           l.summary = row.summary,
                           l.source = row.source,
                           l.created_by_model = row.llm_model,
@@ -766,6 +903,10 @@ def _write_processing(
                           l.support_count = 0
             SET l.text = row.text,
                 l.task_pattern = row.task_pattern,
+                l.kind = coalesce(row.kind, l.kind, 'fact'),
+                l.tool_key = coalesce(row.tool_key, l.tool_key),
+                l.error_signature = coalesce(row.error_signature, l.error_signature),
+                l.resolved = coalesce(row.resolved, l.resolved),
                 l.summary = row.summary,
                 l.embedding = coalesce(row.embedding, l.embedding),
                 l.last_source = row.source,
@@ -823,6 +964,10 @@ def _write_processing(
                   AND row.text <> l.text) AS demoted
             SET l.text = coalesce(row.text, l.text),
                 l.task_pattern = coalesce(row.task_pattern, l.task_pattern),
+                l.kind = coalesce(row.kind, l.kind),
+                l.tool_key = coalesce(row.tool_key, l.tool_key),
+                l.error_signature = coalesce(row.error_signature, l.error_signature),
+                l.resolved = coalesce(row.resolved, l.resolved),
                 l.summary = coalesce(row.summary, l.summary),
                 l.last_source = row.source,
                 l.last_source_session_id = $session_id,
@@ -1265,31 +1410,6 @@ def main() -> int:
     if args.session_id:
         payload["session_id"] = args.session_id
     project = resolve_project(payload, project_root)
-
-    # Deterministic query-failure capture runs synchronously in the foreground
-    # hook: it is LLM-free, and only the foreground payload carries
-    # transcript_path (the background re-invocation gets only --session-id).
-    # Claude Code captures failures live via PostToolUseFailure, but Codex has
-    # no failure event (PostToolUse never fires for isError results there), so
-    # this transcript scan stays as the Codex path — and as an idempotent
-    # safety net when a live hook never ran; shared stable ids make re-capture
-    # converge instead of duplicating.
-    transcript_path = payload.get("transcript_path")
-    if transcript_path:
-        try:
-            captured = capture_query_failures.capture_transcript(
-                transcript_path,
-                str(payload.get("session_id") or "unknown"),
-                payload,
-                project_root,
-            )
-            if captured:
-                print(f"[process_project] captured {captured} query issue(s) from transcript")
-        except Exception as exc:  # pragma: no cover - hook must never crash the session
-            print(
-                f"[process_project] transcript failure capture failed: {exc}",
-                file=sys.stderr,
-            )
 
     if args.background:
         _spawn_background(

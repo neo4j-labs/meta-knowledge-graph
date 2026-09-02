@@ -285,12 +285,13 @@ class ValidateProposalTests(unittest.TestCase):
     )
     ERROR_CONTEXT = [
         {
-            "id": "query-error-pattern:proj:neo4j_read_cypher:abc",
-            "kind": "pattern",
+            "id": "learning:proj:err-unknown-label",
+            "kind": "learning",
             "tool_key": "neo4j_read_cypher",
-            "title": "Unknown label",
+            "title": "no such label",
             "error_signature": "no such label",
-            "resolution": "check the schema first",
+            "resolution": "neo4j_read_cypher: unknown label — check the schema first",
+            "resolved": True,
         },
         {
             "id": None,
@@ -450,7 +451,7 @@ class ValidateProposalTests(unittest.TestCase):
         self.assertIn("## Pitfalls", error)
         self.assertIn("## Verification", error)
 
-    def test_informed_by_labels_resolve_to_pattern_ids(self) -> None:
+    def test_informed_by_labels_resolve_to_error_learning_ids(self) -> None:
         normalized, error = consolidate_skills.validate_proposal(
             self._create_proposal(informed_by=["E1"]),
             self.CREATE_GROUP,
@@ -458,10 +459,7 @@ class ValidateProposalTests(unittest.TestCase):
             self.ERROR_CONTEXT,
         )
         self.assertIsNone(error)
-        self.assertEqual(
-            normalized["informed_by"],
-            ["query-error-pattern:proj:neo4j_read_cypher:abc"],
-        )
+        self.assertEqual(normalized["informed_by"], ["learning:proj:err-unknown-label"])
 
     def test_informed_by_raw_digest_label_yields_no_provenance_id(self) -> None:
         # E2 is a raw failure digest with no graph node behind it: valid to
@@ -524,16 +522,24 @@ class ProposalPromptTests(unittest.TestCase):
         learnings = {"l1": {"id": "l1", "text": "t", "task_pattern": "p"}}
         error_context = [
             {
-                "id": "query-error-pattern:proj:neo4j_read_cypher:abc",
+                "id": "learning:proj:err-unknown-label",
                 "tool_key": "neo4j_read_cypher",
                 "error_signature": "Unknown label `Persn`",
                 "resolution": "check labels with get-schema first",
+                "resolved": True,
             },
             {
                 "id": None,
                 "tool_key": "mcp__github__create_pr",
                 "error_signature": "422 validation failed",
                 "resolution": None,
+            },
+            {
+                "id": "learning:proj:err-apoc",
+                "tool_key": "neo4j_read_cypher",
+                "error_signature": "Unknown function 'apoc.map.fromPairs'",
+                "resolution": None,
+                "resolved": False,
             },
         ]
         prompt = consolidate_skills.build_proposal_prompt(
@@ -545,6 +551,8 @@ class ProposalPromptTests(unittest.TestCase):
         self.assertIn("Unknown label `Persn`", prompt)
         self.assertIn("known fix: check labels with get-schema first", prompt)
         self.assertIn("[E2] tool: mcp__github__create_pr", prompt)
+        self.assertIn("[E3] tool: neo4j_read_cypher", prompt)
+        self.assertIn("no known fix recorded", prompt)
         self.assertIn("informed_by", prompt)
 
     def test_prompt_without_error_context_says_none(self) -> None:
@@ -659,6 +667,52 @@ class ErrorContextTests(unittest.TestCase):
         ]
         digests = consolidate_skills.digest_raw_failures(rows, set(), cap=3)
         self.assertEqual(len(digests), 3)
+
+
+class _RowsDriver:
+    def __init__(self, rows=None):
+        self.calls: list[tuple[str, dict]] = []
+        self.rows = rows or []
+
+    def execute_query(self, query, **params):
+        self.calls.append((query, params))
+        return self.rows
+
+
+class GroupErrorContextTests(unittest.TestCase):
+    def test_curated_tier_reads_approved_error_learnings_from_the_task_sessions(self) -> None:
+        driver = _RowsDriver(rows=[])
+        context = consolidate_skills.fetch_group_error_context(
+            driver, "neo4j", ["tp-1"], exclude_ids=["l1", "l2"]
+        )
+        self.assertEqual(context, [])
+        self.assertEqual(len(driver.calls), 2)
+        curated, params = driver.calls[0]
+        self.assertIn("(tp)-[:OBSERVED_IN]->(:Session)<-[:FROM_SESSION]-(e:Learning)", curated)
+        self.assertIn("e.kind = 'error'", curated)
+        self.assertIn("e.status = 'approved'", curated)
+        self.assertIn("NOT e.id IN $exclude_ids", curated)
+        self.assertNotIn("QueryErrorPattern", curated)
+        self.assertEqual(params["exclude_ids"], ["l1", "l2"])
+        self.assertEqual(params["pattern_ids"], ["tp-1"])
+        raw, _ = driver.calls[1]
+        self.assertIn("ev.tool_error = true", raw)
+
+    def test_no_pattern_ids_means_no_queries(self) -> None:
+        driver = _RowsDriver()
+        self.assertEqual(consolidate_skills.fetch_group_error_context(driver, "neo4j", []), [])
+        self.assertEqual(driver.calls, [])
+
+    def test_provenance_writes_link_skills_to_learnings(self) -> None:
+        import inspect
+
+        for name in ("write_create_proposal", "activate_proposal"):
+            fn = getattr(consolidate_skills, name, None)
+            if fn is None:
+                continue
+            source = inspect.getsource(fn)
+            self.assertIn("MATCH (e:Learning {id: eid})", source)
+            self.assertNotIn("QueryErrorPattern", source)
 
 
 class SkillConfigTests(unittest.TestCase):

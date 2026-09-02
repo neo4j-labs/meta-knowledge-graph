@@ -48,9 +48,6 @@ link_learning_session = load_module(
 inject_system_prompt = load_module(
     HOOKS / "inject_system_prompt.py", "inject_system_prompt"
 )
-capture_query_failures = load_module(
-    HOOKS / "capture_query_failures.py", "capture_query_failures"
-)
 from meta_knowledge_graph import server  # noqa: E402
 
 USER = project_common.UserRef("tomaz@example.com", "env")
@@ -450,19 +447,6 @@ class GraphWriteTests(unittest.TestCase):
         self.assertIn("MERGE (u)-[:HAS_SESSION]->(s)", query)
         self.assertIn("l.user_id = coalesce(l.user_id, $user_id)", query)
         self.assertEqual(params["user_id"], "a@b.c")
-
-    def test_query_failures_are_tagged(self) -> None:
-        tx = _RecordingTx()
-        project = project_common.ProjectRef(id="mkg", name="MKG")
-        projection = {"query": {"id": "q1"}, "issues": []}
-        capture_query_failures.write_failure_projection(
-            tx, project, "s1", projection, "2026-09-02T09:00:00+00:00", "a@b.c"
-        )
-        _, merge_params = tx.calls[0]
-        write_query, write_params = tx.calls[1]
-        self.assertEqual(merge_params["user_id"], "a@b.c")
-        self.assertIn("q.user_id = coalesce(q.user_id, $user_id)", write_query)
-        self.assertEqual(write_params["user_id"], "a@b.c")
 
     def test_prompt_injection_record_is_tagged(self) -> None:
         captured: dict = {}

@@ -87,6 +87,82 @@ def normalize_tool_failure_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def tool_key(tool_name: Any) -> str | None:
+    """Client-independent identity of a tool.
+
+    The same MCP tool mounts under different full names per client and
+    install mode (``mcp__meta-knowledge-graph__neo4j_read_cypher``,
+    ``mcp__plugin_..._meta-knowledge-graph__neo4j_read_cypher``, ...), so
+    error learnings are keyed on the bare tool name — the segment after the
+    last ``__`` of an MCP name — while built-in tools (``Bash``, ``Edit``)
+    keep their name as is.
+    """
+    name = str(tool_name or "").strip()
+    if not name:
+        return None
+    if name.lower().startswith("mcp__") and "__" in name[5:]:
+        return name.rsplit("__", 1)[-1] or None
+    return name
+
+
+def tool_failure_text(value: Any, limit: int | None = None) -> str:
+    """Human-readable error text out of a tool response of any shape.
+
+    Accepts the raw hook ``tool_response`` (dict/list/str) or the JSON string
+    log_event stores on a ``SessionEvent``; digs out ``text`` / ``error`` /
+    ``message`` payloads from the MCP ``{content: [...], isError}`` envelope
+    and falls back to the raw string. Whitespace-collapsed, optionally capped.
+    """
+    node = value
+    if isinstance(node, str):
+        stripped = node.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                node = json.loads(stripped)
+            except json.JSONDecodeError:
+                node = stripped
+        else:
+            node = stripped
+
+    def _texts(item: Any) -> list[str]:
+        if isinstance(item, str):
+            return [item]
+        if isinstance(item, list):
+            return [text for child in item for text in _texts(child)]
+        if isinstance(item, dict):
+            for key in ("text", "error", "message"):
+                if isinstance(item.get(key), str) and item[key].strip():
+                    return [item[key]]
+            if "content" in item:
+                return _texts(item["content"])
+            if "result" in item:
+                return _texts(item["result"])
+        return []
+
+    text = " ".join(part.strip() for part in _texts(node) if part and part.strip())
+    if not text and node is not None and not isinstance(node, (dict, list)):
+        text = str(node)
+    text = " ".join(text.split())
+    if limit is not None and len(text) > limit:
+        return text[: limit - 3].rstrip() + "..."
+    return text
+
+
+def is_error_tool_response(value: Any) -> bool:
+    """True for an MCP error envelope (``isError: true``), whether the response
+    arrives as a dict or as the JSON string a ``SessionEvent`` stores."""
+    node = value
+    if isinstance(node, str):
+        stripped = node.strip()
+        if not stripped.startswith("{"):
+            return False
+        try:
+            node = json.loads(stripped)
+        except json.JSONDecodeError:
+            return False
+    return isinstance(node, dict) and node.get("isError") is True
+
+
 def _non_empty_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -2186,6 +2262,10 @@ def _memory_projection(label: str) -> str:
                node.confidence AS confidence,
                node.task_pattern AS task_pattern,
                node.scope AS scope,
+               node.kind AS kind,
+               node.tool_key AS tool_key,
+               node.error_signature AS error_signature,
+               node.resolved AS resolved,
                score,
                sources
         """
@@ -2799,6 +2879,14 @@ def mark_learnings_used(driver, database: str, learning_ids: list[str]) -> None:
     )
 
 
+def _learning_badge(learning: dict[str, Any]) -> str:
+    """Extra tag for an error learning so recall shows what it is: a fix that
+    worked, or a failure that is known but not yet fixed."""
+    if learning.get("kind") != "error":
+        return ""
+    return ", error fix" if learning.get("resolved") else ", known failure, no fix"
+
+
 def format_learning_context(
     project: ProjectRef,
     learnings: list[dict[str, Any]],
@@ -2836,7 +2924,7 @@ def format_learning_context(
                 f", confidence {float(confidence):.2f}" if confidence is not None else ""
             )
             lines.append(
-                f"- [{status}{confidence_text}] "
+                f"- [{status}{confidence_text}{_learning_badge(learning)}] "
                 f"{truncate(str(learning.get('text') or ''), 240)}"
             )
     if observations:
@@ -2868,7 +2956,7 @@ def format_learning_context(
                 f", confidence {float(confidence):.2f}" if confidence is not None else ""
             )
             lines.append(
-                f"- [{status}{confidence_text}] "
+                f"- [{status}{confidence_text}{_learning_badge(learning)}] "
                 f"{truncate(str(learning.get('text') or ''), 240)}"
             )
     if skill_slugs:

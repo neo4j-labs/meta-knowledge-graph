@@ -88,7 +88,7 @@ approving text an agent will execute, so nothing is summarised away:
    both versions; describe the diff, and show the exact old/new lines where a
    step changed meaning.
 4. **Provenance** — one line per `derived_from` learning: its text and its
-   current `status`. Then the `informed_by` tool-error patterns, if any.
+   current `status`. Then the `informed_by` error learnings (the failures folded into *Pitfalls*), if any.
 
 Then run this **validation checklist** yourself and report what you found,
 plainly, before asking for a decision. Say "checked, fine" for a clean item;

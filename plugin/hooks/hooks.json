@@ -58,19 +58,6 @@
         ]
       },
       {
-        "matcher": "mcp__.*__(bigquery_execute_query|neo4j_read_cypher)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/capture_query_failures.py\""
-          },
-          {
-            "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/inject_query_error_context.py\""
-          }
-        ]
-      },
-      {
         "matcher": "mcp__.*__project_add_learning",
         "hooks": [
           {
@@ -86,19 +73,6 @@
           {
             "type": "command",
             "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__.*__(bigquery_execute_query|neo4j_read_cypher)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/capture_query_failures.py\""
-          },
-          {
-            "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/inject_query_error_context.py\""
           }
         ]
       }
@@ -131,10 +105,6 @@
           {
             "type": "command",
             "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/consolidate_skills.py\" --background"
-          },
-          {
-            "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/consolidate_query_errors.py\" --background"
           }
         ]
       }
@@ -183,10 +153,6 @@
           {
             "type": "command",
             "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/consolidate_skills.py\" --background"
-          },
-          {
-            "type": "command",
-            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/consolidate_query_errors.py\" --background"
           }
         ]
       }

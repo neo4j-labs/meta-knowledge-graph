@@ -63,19 +63,6 @@
         ]
       },
       {
-        "matcher": ".*(bigquery_execute_query|neo4j_read_cypher)$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" MKG_CLIENT=codex uv run --script \"$ROOT/hooks/capture_query_failures.py\""
-          },
-          {
-            "type": "command",
-            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" MKG_CLIENT=codex uv run --script \"$ROOT/hooks/inject_query_error_context.py\""
-          }
-        ]
-      },
-      {
         "matcher": ".*project_add_learning$",
         "hooks": [
           {
@@ -147,10 +134,6 @@
           {
             "type": "command",
             "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" MKG_CLIENT=codex uv run --script \"$ROOT/hooks/consolidate_skills.py\" --background"
-          },
-          {
-            "type": "command",
-            "command": "ROOT=\"$(git rev-parse --show-toplevel)\"; MKG_HOOK_ROOT=\"$ROOT\" MKG_CLIENT=codex uv run --script \"$ROOT/hooks/consolidate_query_errors.py\" --background"
           }
         ]
       }

@@ -320,6 +320,18 @@ MAX_TASK_PATTERN_CHARS = 60
 MAX_TASK_PATTERN_WORDS = 6
 
 
+def _tool_key(value: Optional[str]) -> Optional[str]:
+    """Bare tool name an error learning is keyed on (mirrors the hooks'
+    ``project_common.tool_key``): the segment after the last ``__`` of an MCP
+    tool name, or a built-in tool's name as is."""
+    name = str(value or "").strip()
+    if not name:
+        return None
+    if name.lower().startswith("mcp__") and "__" in name[5:]:
+        return name.rsplit("__", 1)[-1] or None
+    return name
+
+
 def _task_pattern(value: Optional[str]) -> Optional[str]:
     pattern = " ".join(str(value or "").split())
     if not pattern:
@@ -1662,9 +1674,41 @@ def create_mcp_server(
             0.6,
             description="Confidence 0.0-1.0. Existing higher confidence is preserved.",
         ),
+        kind: str = Field(
+            "fact",
+            description=(
+                "'fact' (default), or 'error' for an error-and-fix learning: the "
+                "text names the tool, what fails, and the correction that worked. "
+                "Error learnings are gated, recalled, and compiled into skills "
+                "like any other learning."
+            ),
+        ),
+        tool_key: Optional[str] = Field(
+            None,
+            description=(
+                "For kind 'error': the bare name of the tool that failed "
+                "('neo4j_read_cypher', 'Bash'); an MCP-prefixed name is reduced "
+                "to it, so recall and skills can tell which tool it concerns."
+            ),
+        ),
+        error_signature: Optional[str] = Field(
+            None,
+            description="For kind 'error': one-line normalized form of the error message.",
+        ),
+        resolved: Optional[bool] = Field(
+            None,
+            description=(
+                "For kind 'error': true when the text carries a fix that worked, "
+                "false when the failure is known but no fix is. Defaults to false "
+                "on a new error learning."
+            ),
+        ),
     ) -> str:
         """Persist a durable learning. Idempotent on (scope namespace, text);
-        a user-scoped learning is namespaced to the calling user."""
+        a user-scoped learning is namespaced to the calling user. An error
+        learning (``kind='error'``) additionally carries the failing tool, the
+        error signature, and whether it is resolved, and is served through the
+        same recall as every other learning."""
         clean_text = _truncate((text or "").strip())
         if not clean_text:
             return json.dumps({"status": "error", "error": "text is required"})
@@ -1674,6 +1718,18 @@ def create_mcp_server(
         # or blocks it — both scopes, no human queue.
         normalized_status = "candidate"
         clamped_confidence = max(0.0, min(1.0, float(confidence)))
+        normalized_kind = "error" if str(kind or "").strip().lower() == "error" else "fact"
+        error_tool = _tool_key(tool_key) if normalized_kind == "error" else None
+        clean_signature = (
+            _truncate(" ".join(str(error_signature or "").split()), 300) or None
+            if normalized_kind == "error"
+            else None
+        )
+        error_resolved = (
+            (bool(resolved) if resolved is not None else False)
+            if normalized_kind == "error"
+            else None
+        )
         resolved_pid = _resolve_project_id(project_id)
         user_id = _resolve_user_id()
         row_id = _learning_id(
@@ -1718,6 +1774,13 @@ def create_mcp_server(
                     l.summary = $text,
                     l.embedding = coalesce($embedding, l.embedding),
                     l.task_pattern = coalesce($task_pattern, l.task_pattern),
+                    l.kind = CASE
+                        WHEN $kind = 'error' THEN 'error'
+                        ELSE coalesce(l.kind, 'fact')
+                    END,
+                    l.tool_key = coalesce($tool_key, l.tool_key),
+                    l.error_signature = coalesce($error_signature, l.error_signature),
+                    l.resolved = coalesce($resolved, l.resolved),
                     l.status = CASE
                         WHEN l.status = 'approved' THEN l.status
                         ELSE $status
@@ -1741,6 +1804,8 @@ def create_mcp_server(
                 RETURN l.id AS id, l.text AS text, l.status AS status,
                        l.scope AS scope, l.user_id AS user_id,
                        l.confidence AS confidence, l.task_pattern AS task_pattern,
+                       l.kind AS kind, l.tool_key AS tool_key,
+                       l.error_signature AS error_signature, l.resolved AS resolved,
                        l.support_count AS support_count,
                        CASE WHEN l.created_at = l.updated_at THEN 'created' ELSE 'updated' END AS action
                 """,
@@ -1749,6 +1814,10 @@ def create_mcp_server(
                 row_id=row_id,
                 text=clean_text,
                 task_pattern=_task_pattern(task_pattern),
+                kind=normalized_kind,
+                tool_key=error_tool,
+                error_signature=clean_signature,
+                resolved=error_resolved,
                 status=normalized_status,
                 scope=normalized_scope,
                 source=MCP_LEARNING_SOURCE,
@@ -2329,7 +2398,7 @@ def create_mcp_server(
             """
             MATCH (sk:Skill {project_id: $project_id, slug: $slug, status: 'approved'})
             OPTIONAL MATCH (sk)-[:DERIVED_FROM]->(l:Learning)
-            OPTIONAL MATCH (sk)-[:INFORMED_BY]->(e:QueryErrorPattern)
+            OPTIONAL MATCH (sk)-[:INFORMED_BY]->(e:Learning)
             RETURN sk.id AS id, sk.slug AS slug, sk.name AS name,
                    sk.description AS description, sk.content AS content,
                    coalesce(sk.version, 1) AS version,
@@ -2340,7 +2409,7 @@ def create_mcp_server(
                     WHERE x IS NOT NULL] AS stale_sources,
                    [x IN collect(DISTINCT
                         CASE WHEN e IS NULL THEN null
-                        ELSE {id: e.id, title: e.title} END)
+                        ELSE {id: e.id, title: coalesce(e.error_signature, e.text)} END)
                     WHERE x IS NOT NULL] AS informed_by,
                    coalesce(sk.needs_revision, false) AS needs_revision,
                    sk.revision_reason AS revision_reason
@@ -2476,8 +2545,10 @@ def create_mcp_server(
         informed: dict[str, dict[str, Any]] = {}
         if informed_ids:
             pattern_records = await _execute_query(
-                "UNWIND $ids AS eid MATCH (e:QueryErrorPattern {id: eid}) "
-                "RETURN e.id AS id, e.title AS title, e.resolution AS resolution",
+                "UNWIND $ids AS eid MATCH (e:Learning {id: eid}) "
+                "RETURN e.id AS id, coalesce(e.error_signature, e.text) AS title, "
+                "e.text AS resolution, e.status AS status, "
+                "coalesce(e.resolved, false) AS resolved",
                 ids=informed_ids,
             )
             informed = {str(r["id"]): dict(r) for r in pattern_records}
@@ -2704,7 +2775,7 @@ def create_mcp_server(
                     }
                     CALL (sk, v) {
                         UNWIND coalesce(v.informed_by, []) AS eid
-                        MATCH (e:QueryErrorPattern {id: eid})
+                        MATCH (e:Learning {id: eid})
                         MERGE (sk)-[i:INFORMED_BY]->(e)
                         ON CREATE SET i.created_at = datetime($ts)
                     }

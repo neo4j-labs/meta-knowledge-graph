@@ -35,15 +35,17 @@ rarely:
    The ``:TaskPattern`` node is also the grouping hub for everything else the
    task touched: resolution materializes ``(tp)-[:OBSERVED_IN]->(:Session)``
    from the tagged learnings' origin sessions, so a pattern transitively
-   groups the sessions, query executions, tool failures, and observations of
-   one kind of task — the raw material future skills are built from.
+   groups the sessions, tool failures, and observations of one kind of task —
+   the raw material future skills are built from.
 4. Attach the task's tool failures. Through the ``OBSERVED_IN`` hub each group
-   pulls in the curated ``(:QueryErrorPattern)`` guidance distilled from query
-   failures in its sessions, plus a deduplicated digest of other failed tool
-   calls (``SessionEvent.tool_error``). They enter the proposal prompt as
-   labelled, untrusted context so the skill's "## Pitfalls" section teaches
-   the failures the agent actually hit; the patterns the proposer folds in are
-   recorded as ``[:INFORMED_BY]`` provenance.
+   pulls in the gate-approved *error learnings* (``:Learning {kind: 'error'}``
+   — an error the agent hit in those sessions and, when ``resolved``, the fix
+   that worked) that are not already group members, plus a deduplicated
+   digest of other failed tool calls (``SessionEvent.tool_error``) for tools
+   with no error learning yet. They enter the proposal prompt as labelled,
+   untrusted context so the skill's "## Pitfalls" section teaches the
+   failures the agent actually hit; the error learnings the proposer folds in
+   are recorded as ``[:INFORMED_BY]`` provenance.
 5. Propose. Up to ``MKG_SKILL_MAX_PROPOSALS_PER_RUN`` groups (strongest first;
    patches for skills flagged ``needs_revision`` outrank everything) each get
    one LLM call returning one atomic proposal (create / update / ignore). The
@@ -158,8 +160,8 @@ REQUIRED_SKILL_SECTIONS = (
 )
 
 # Caps for the tool-failure context attached to one group's proposal prompt:
-# curated (:QueryErrorPattern) guidance first, then a digest of other failed
-# tool calls seen in the group's sessions.
+# approved error learnings first, then a digest of other failed tool calls
+# seen in the group's sessions.
 MAX_ERROR_PATTERNS_PER_GROUP = 6
 MAX_RAW_FAILURES_PER_GROUP = 4
 MAX_RAW_FAILURE_SCAN = 40
@@ -570,8 +572,8 @@ def digest_raw_failures(
 ) -> list[dict[str, Any]]:
     """Compress raw failed tool calls into distinct (tool, error) digests.
 
-    Tools whose failures already have curated ``:QueryErrorPattern`` guidance
-    are skipped — the pattern says the same thing better — and repeats of the
+    Tools that already have an error learning in the context are skipped —
+    the learning says the same thing better — and repeats of the
     same error head collapse to one entry. Digests carry no node id, so they
     inform the prompt but never receive provenance edges."""
     digests: list[dict[str, Any]] = []
@@ -606,15 +608,20 @@ def digest_raw_failures(
 
 
 def fetch_group_error_context(
-    driver, database: str, pattern_ids: list[str]
+    driver,
+    database: str,
+    pattern_ids: list[str],
+    exclude_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Tool failures observed in the sessions this group's task patterns ran in.
 
     Two tiers, both reached through the ``(tp)-[:OBSERVED_IN]->(:Session)``
-    hub: curated ``:QueryErrorPattern`` guidance distilled from the sessions'
-    query failures (signature, root cause, fix — highest occurrence first),
-    then a digest of other failed tool calls from the same sessions'
-    ``SessionEvent.tool_error`` log for tools without a curated library."""
+    hub: gate-approved error learnings extracted from those sessions
+    (``kind = 'error'``: the error signature and, when ``resolved``, the fix
+    that worked — most-supported first), skipping ``exclude_ids`` (the group's
+    own members, already in the prompt as learnings), then a digest of other
+    failed tool calls from the same sessions' ``SessionEvent.tool_error`` log
+    for tools without an error learning."""
     if not pattern_ids:
         return []
     curated_records = _execute_query(
@@ -623,21 +630,25 @@ def fetch_group_error_context(
         """
         MATCH (tp:TaskPattern)
         WHERE tp.id IN $pattern_ids
-        MATCH (tp)-[:OBSERVED_IN]->(:Session)
-              -[:HAS_QUERY_EXECUTION]->(q:QueryExecution)
-        MATCH (e:QueryErrorPattern {status: 'active'})-[:DERIVED_FROM]->(q)
+        MATCH (tp)-[:OBSERVED_IN]->(:Session)<-[:FROM_SESSION]-(e:Learning)
+        WHERE e.kind = 'error'
+          AND e.status = 'approved'
+          AND NOT e.id IN $exclude_ids
         WITH DISTINCT e
         RETURN e.id AS id,
-               'pattern' AS kind,
+               'learning' AS kind,
                e.tool_key AS tool_key,
-               e.title AS title,
-               e.error_signature AS error_signature,
-               e.resolution AS resolution,
-               coalesce(e.occurrence_count, 0) AS occurrences
+               coalesce(e.error_signature, e.text) AS title,
+               coalesce(e.error_signature, e.text) AS error_signature,
+               CASE WHEN coalesce(e.resolved, false) THEN e.text ELSE null END
+                 AS resolution,
+               coalesce(e.resolved, false) AS resolved,
+               coalesce(e.support_count, 0) AS occurrences
         ORDER BY occurrences DESC
         LIMIT $limit
         """,
         pattern_ids=pattern_ids,
+        exclude_ids=list(exclude_ids or []),
         limit=MAX_ERROR_PATTERNS_PER_GROUP,
     )
     context = [dict(record) for record in curated_records]
@@ -726,6 +737,8 @@ def build_proposal_prompt(
         resolution = row.get("resolution")
         if resolution:
             parts.append(f"known fix: {truncate(str(resolution), MAX_FAILURE_EXCERPT)}")
+        elif row.get("resolved") is False:
+            parts.append("no known fix recorded")
         failure_lines.append(" | ".join(parts))
     failures_text = "\n".join(failure_lines) if failure_lines else "(none)"
 
@@ -1061,7 +1074,7 @@ def resolve_task_patterns(
     Every resolved pattern is also linked ``(tp)-[:OBSERVED_IN]->(:Session)``
     to the origin sessions of its tagged learnings, making the pattern the
     grouping hub for the whole task: through the sessions it transitively
-    collects the query executions, tool failures, and observations of one kind
+    collects the tool failures and observations of one kind
     of task, which is where the skill proposer sources its error context.
     Returns learning id -> pattern id for every row with a task pattern.
     """
@@ -1272,7 +1285,7 @@ def write_create_proposal(
         }
         CALL (sk) {
             UNWIND $informed_by AS eid
-            MATCH (e:QueryErrorPattern {id: eid})
+            MATCH (e:Learning {id: eid})
             MERGE (sk)-[i:INFORMED_BY]->(e)
             ON CREATE SET i.created_at = datetime($now)
         }
@@ -1463,7 +1476,7 @@ def apply_skill_activation(
         }
         CALL (sk, v) {
             UNWIND coalesce(v.informed_by, []) AS eid
-            MATCH (e:QueryErrorPattern {id: eid})
+            MATCH (e:Learning {id: eid})
             MERGE (sk)-[i:INFORMED_BY]->(e)
             ON CREATE SET i.created_at = datetime($now)
         }
@@ -1792,7 +1805,9 @@ def consolidate(payload: dict[str, Any]) -> None:
                     if member in pattern_by_learning
                 }
             )
-            error_context = fetch_group_error_context(driver, database, pattern_ids)
+            error_context = fetch_group_error_context(
+                driver, database, pattern_ids, exclude_ids=chosen["members"]
+            )
             prompt = build_proposal_prompt(
                 project.name,
                 project.id,
@@ -1860,7 +1875,7 @@ def consolidate(payload: dict[str, Any]) -> None:
                 print(
                     f"[consolidate_skills] proposed new skill {proposal['slug']!r} "
                     f"({node_id}) from {len(proposal['derived_from'])} learnings "
-                    f"and {len(proposal['informed_by'])} error pattern(s); "
+                    f"and {len(proposal['informed_by'])} error learning(s); "
                     "queued for the safety screen"
                 )
             else:
@@ -1878,7 +1893,7 @@ def consolidate(payload: dict[str, Any]) -> None:
                 print(
                     f"[consolidate_skills] proposed patch to skill {proposal['slug']!r} "
                     f"from {len(proposal['derived_from'])} learnings "
-                    f"and {len(proposal['informed_by'])} error pattern(s); "
+                    f"and {len(proposal['informed_by'])} error learning(s); "
                     "queued for the safety screen"
                 )
 

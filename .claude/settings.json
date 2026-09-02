@@ -57,19 +57,6 @@
         ]
       },
       {
-        "matcher": "mcp__.*__(bigquery_execute_query|neo4j_read_cypher)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/capture_query_failures.py"
-          },
-          {
-            "type": "command",
-            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/inject_query_error_context.py"
-          }
-        ]
-      },
-      {
         "matcher": "mcp__.*__project_add_learning",
         "hooks": [
           {
@@ -85,19 +72,6 @@
           {
             "type": "command",
             "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/.claude/hooks/log_event.py --client claude_code"
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__.*__(bigquery_execute_query|neo4j_read_cypher)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/capture_query_failures.py"
-          },
-          {
-            "type": "command",
-            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/inject_query_error_context.py"
           }
         ]
       }
@@ -130,10 +104,6 @@
           {
             "type": "command",
             "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/consolidate_skills.py --background"
-          },
-          {
-            "type": "command",
-            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/consolidate_query_errors.py --background"
           }
         ]
       }
@@ -182,10 +152,6 @@
           {
             "type": "command",
             "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/consolidate_skills.py --background"
-          },
-          {
-            "type": "command",
-            "command": "uv run --project ${CLAUDE_PROJECT_DIR} --no-sync python ${CLAUDE_PROJECT_DIR}/hooks/consolidate_query_errors.py --background"
           }
         ]
       }
