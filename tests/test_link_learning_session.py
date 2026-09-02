@@ -173,7 +173,7 @@ class WriteSessionLinksTests(unittest.TestCase):
 
         tx = FakeTx()
         link_learning_session.write_session_links(
-            tx, "session-1", [LEARNING_ROW["id"]], "2026-09-01T00:00:00+00:00"
+            tx, "session-1", [LEARNING_ROW["id"]], "2026-09-01T00:00:00+00:00", user_id="tomaz@example.com"
         )
 
         statement, params = tx.calls[-1]

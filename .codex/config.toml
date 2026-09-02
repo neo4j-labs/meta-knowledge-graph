@@ -5,6 +5,9 @@ args = [
     "meta-knowledge-graph",
 ]
 command = "uv"
+# Tells MKG which signed-in harness account to read the user id from when
+# MKG_USER_ID is not set explicitly.
+env = { MKG_CLIENT = "codex" }
 
 [mcp_servers.meta-knowledge-graph.tools.bigquery_execute_query]
 approval_mode = "approve"

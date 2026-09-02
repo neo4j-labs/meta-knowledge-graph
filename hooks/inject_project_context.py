@@ -30,7 +30,9 @@ from project_common import (  # noqa: E402
     mark_injected_in_session,
     mark_learnings_used,
     neo4j_config,
+    project_git_root,
     resolve_project,
+    resolve_user,
     skill_catalog_inject_enabled,
 )
 
@@ -64,6 +66,9 @@ def main() -> int:
     project = resolve_project(payload, project_root)
     if not project:
         return 0
+    # User facts are recalled per person: only this user's memory, this
+    # user's gate record, and this user's name on the injected block.
+    user = resolve_user(project_git_root(project))
 
     prompt = payload.get("prompt") or payload.get("last_assistant_message") or ""
     query_vector = embed_text(prompt) if prompt else None
@@ -105,12 +110,13 @@ def main() -> int:
                         exclude_session_id=exclude_session_id,
                         query_vector=query_vector,
                         min_similarity=inject_min_similarity(),
+                        user_id=user.id,
                     )
                     # Accountability, not review: the gate runs autonomously,
                     # so session start surfaces what it recently blocked and
                     # points at the audit tool instead of asking for decisions.
                     gate_blocked = count_gate_blocked(
-                        driver, database, project_id=project.id
+                        driver, database, project_id=project.id, user_id=user.id
                     )
                     # One line of approved-skill slugs so every session knows
                     # the skill_search / skill_fetch surface exists; anything
@@ -160,6 +166,7 @@ def main() -> int:
         skill_slugs=skill_slugs,
         gate_blocked=gate_blocked,
         observation_total=observation_total,
+        user_id=user.id,
     )
     if not context:
         return 0

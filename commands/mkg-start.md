@@ -117,7 +117,7 @@ You will **learn the purpose of the agent** from the user, store it as durable
 **user-scoped** memories, and let MKG's consolidation service fold those into a
 custom "user adaptations" section. The mechanism: the Stop / SessionEnd
 `consolidate_system_prompt` service folds pending **approved user-scoped**
-learnings into `(:UserProfile {name:'default'})` — the section SessionStart
+learnings into the user's own `(:UserProfile {user_id: <your id>})` — the section SessionStart
 appends to the frozen base prompt — once **more than 5** are pending. Raw
 candidates are approved automatically by the consistency + safety gate that
 runs at the end of each turn; **6 approved user memories** is the trigger that
@@ -166,13 +166,13 @@ separate `(:UserProfile)` section appended to it at SessionStart. So:
 
 1. When this turn ends, the background `consolidate_system_prompt` Stop hook sees
    `> 5` pending user memories (and, on a fresh setup, no prior consolidation, so
-   no cooldown) and folds them into `(:UserProfile {name:'default'})`, archiving
+   no cooldown) and folds them into your `(:UserProfile {user_id: <your id>})`, archiving
    any previous section as a `:UserProfileVersion`.
 2. Tell the user to **start a new session** (or `/clear`) so SessionStart injects
    the base persona composed with the freshly consolidated section. They can
    re-run `/mkg-start` anytime to add more memories and re-consolidate.
 3. To verify after the next turn, read the section back:
-   `MATCH (up:UserProfile {name:'default'}) RETURN up.version, left(up.content, 300)`
+   `MATCH (u:User)-[:HAS_PROFILE]->(up:UserProfile) RETURN u.id, up.version, left(up.content, 300)`
    — the version should have bumped and the content should reflect their purpose.
 
 Notes:

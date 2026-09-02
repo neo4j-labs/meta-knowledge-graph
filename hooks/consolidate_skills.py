@@ -113,7 +113,9 @@ from project_common import (  # noqa: E402
     neo4j_config,
     normalize_task_pattern,
     project_env,
+    project_git_root,
     resolve_project,
+    resolve_user,
     skill_consolidation_enabled,
     skill_consolidation_interval_hours,
     skill_consolidation_threshold,
@@ -1862,7 +1864,8 @@ def main() -> int:
         # active project rather than the installed hook/plugin directory.
         project = resolve_project(payload, project_root)
         _spawn_background(
-            str(payload.get("session_id") or "unknown"), project_env(project)
+            str(payload.get("session_id") or "unknown"),
+            project_env(project, resolve_user(project_git_root(project))),
         )
         return 0
 

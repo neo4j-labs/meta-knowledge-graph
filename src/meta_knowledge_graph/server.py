@@ -1,9 +1,15 @@
 import asyncio
+import base64
+import binascii
+import getpass
 import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
@@ -100,6 +106,171 @@ def _resolve_project_id(explicit: Optional[str]) -> str:
     return _slugify_project_id(Path(os.getcwd()).name or "default")
 
 
+# --------------------------------------------------------------------------- #
+# User identity
+#
+# The MCP tools tag what they write, and filter what they read, by the same
+# user id the hooks use, so the two halves agree on who "the user" is. The
+# resolution functions below are kept textually identical to
+# hooks/project_common.py (tests/test_user_identity.py guards the drift); a
+# change to one must be mirrored in the other.
+# --------------------------------------------------------------------------- #
+USER_ID_ENV_VAR = "MKG_USER_ID"
+USER_ID_SOURCE_ENV_VAR = "MKG_USER_ID_SOURCE"
+CLIENT_HINT_ENV_VAR = "MKG_CLIENT"
+USER_ID_SOURCE_ENV = "env"
+USER_ID_SOURCE_CLAUDE = "claude_code"
+USER_ID_SOURCE_CODEX = "codex"
+USER_ID_SOURCE_GIT = "git"
+USER_ID_SOURCE_OS = "os"
+USER_ID_MAX_CHARS = 254
+IDENTITY_LOOKUP_TIMEOUT_SECONDS = 3
+CLAUDE_HARNESS_ENV_VARS = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PROJECT_DIR")
+CODEX_HARNESS_ENV_VARS = ("CODEX_PLUGIN_ROOT", "CODEX_WORKSPACE_ROOT")
+
+
+@dataclass(frozen=True)
+class UserRef:
+    id: str
+    source: str
+
+
+def normalize_user_id(value: object) -> str | None:
+    """Canonical user id: trimmed, lower-cased, whitespace-free, bounded."""
+    text = str(value or "").strip().lower()
+    if not text or any(ch.isspace() for ch in text):
+        return None
+    return text[:USER_ID_MAX_CHARS]
+
+
+def _claude_account_email() -> str | None:
+    """Email of the Claude Code account signed in on this machine."""
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(override).expanduser() if override else Path.home()
+    try:
+        payload = json.loads((base / ".claude.json").read_text())
+    except (OSError, ValueError):
+        return None
+    account = payload.get("oauthAccount") if isinstance(payload, dict) else None
+    if not isinstance(account, dict):
+        return None
+    return normalize_user_id(account.get("emailAddress"))
+
+
+def _jwt_claims(token: str) -> dict[str, Any] | None:
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    segment = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(segment))
+    except (ValueError, binascii.Error):
+        return None
+    return claims if isinstance(claims, dict) else None
+
+
+def _codex_account_email() -> str | None:
+    """Email of the Codex (ChatGPT) account signed in on this machine, read
+    from the ``email`` claim of its OpenID id_token. The token is decoded,
+    never verified or kept: it names the local account and grants nothing."""
+    override = os.environ.get("CODEX_HOME")
+    base = Path(override).expanduser() if override else Path.home() / ".codex"
+    try:
+        payload = json.loads((base / "auth.json").read_text())
+    except (OSError, ValueError):
+        return None
+    tokens = payload.get("tokens") if isinstance(payload, dict) else None
+    id_token = tokens.get("id_token") if isinstance(tokens, dict) else None
+    if not isinstance(id_token, str) or not id_token:
+        return None
+    claims = _jwt_claims(id_token)
+    return normalize_user_id(claims.get("email")) if claims else None
+
+
+def _git_user_email(cwd: Path | None) -> str | None:
+    """``git config user.email`` as seen from ``cwd`` (repo-local first, then
+    the global config); ``None`` outside git or when unset."""
+    if not shutil.which("git"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--get", "user.email"],
+            capture_output=True,
+            text=True,
+            timeout=IDENTITY_LOOKUP_TIMEOUT_SECONDS,
+            check=False,
+            cwd=str(cwd) if cwd is not None and cwd.is_dir() else None,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return normalize_user_id(proc.stdout)
+
+
+def _active_harness(client: str | None = None) -> str | None:
+    """Which harness is driving this process, when it can be told: an explicit
+    client hint (``--client`` / ``MKG_CLIENT``) wins, else the harness env
+    markers each host sets for its hooks and MCP servers."""
+    hint = str(client or os.environ.get(CLIENT_HINT_ENV_VAR) or "").strip().lower()
+    if hint in {USER_ID_SOURCE_CLAUDE, USER_ID_SOURCE_CODEX}:
+        return hint
+    if any(os.environ.get(var) for var in CODEX_HARNESS_ENV_VARS):
+        return USER_ID_SOURCE_CODEX
+    if any(os.environ.get(var) for var in CLAUDE_HARNESS_ENV_VARS):
+        return USER_ID_SOURCE_CLAUDE
+    return None
+
+
+def _harness_account_lookups(client: str | None = None) -> list[tuple[str, Any]]:
+    """Signed-in harness accounts to try, the active harness first."""
+    claude = (USER_ID_SOURCE_CLAUDE, _claude_account_email)
+    codex = (USER_ID_SOURCE_CODEX, _codex_account_email)
+    if _active_harness(client) == USER_ID_SOURCE_CODEX:
+        return [codex, claude]
+    return [claude, codex]
+
+
+def resolve_user(project_root: Path | None = None, client: str | None = None) -> UserRef:
+    """Identify the person behind this session. First hit wins:
+
+    1. ``MKG_USER_ID`` — explicit, from the MKG ``.env`` or the shell. The
+       recommended setting for shared graphs and CI; background workers are
+       respawned with it pinned so they never re-derive a different id.
+    2. The signed-in harness account: Claude Code's ``~/.claude.json``
+       (``oauthAccount.emailAddress``) or Codex's ``~/.codex/auth.json``
+       (id_token ``email`` claim), the active harness first.
+    3. ``git config user.email`` as seen from the project.
+    4. The OS account name — never empty, so every write carries *some* id.
+
+    ``MKG_USER_ID_SOURCE`` rides along with a pinned id so a respawned worker
+    reports where the id originally came from instead of just ``env``.
+    """
+    explicit = normalize_user_id(os.environ.get(USER_ID_ENV_VAR))
+    if explicit:
+        pinned_source = str(os.environ.get(USER_ID_SOURCE_ENV_VAR) or "").strip().lower()
+        return UserRef(explicit, pinned_source or USER_ID_SOURCE_ENV)
+    for source, lookup in _harness_account_lookups(client):
+        email = lookup()
+        if email:
+            return UserRef(email, source)
+    email = _git_user_email(project_root)
+    if email:
+        return UserRef(email, USER_ID_SOURCE_GIT)
+    return UserRef(normalize_user_id(getpass.getuser()) or "unknown", USER_ID_SOURCE_OS)
+
+
+def _resolve_user() -> UserRef:
+    """The MCP server's view of the user: resolved per call (env first, then
+    the signed-in harness account, git, OS), from the server's working
+    directory, which the harness sets to the active project."""
+    return resolve_user(Path(os.getcwd()))
+
+
+def _resolve_user_id() -> str:
+    return _resolve_user().id
+
+
 USER_LEARNING_NAMESPACE = "user"
 LEARNING_SCOPES = ("project", "user")
 
@@ -115,8 +286,12 @@ def _normalize_scope(value: Optional[str]) -> str:
     return scope if scope in LEARNING_SCOPES else "project"
 
 
-def _learning_namespace(project_id: str, scope: str) -> str:
-    return USER_LEARNING_NAMESPACE if _normalize_scope(scope) == "user" else project_id
+def _learning_namespace(project_id: str, scope: str, user_id: str) -> str:
+    # User facts are keyed per person (``user:<user_id>``) so the same sentence
+    # about two people never collides; kept in step with the hook extractor.
+    if _normalize_scope(scope) != "user":
+        return project_id
+    return f"{USER_LEARNING_NAMESPACE}:{user_id}"
 
 
 def _learning_id(namespace: str, text: str) -> str:
@@ -576,6 +751,7 @@ def create_mcp_server(
         limit: int,
         project_id: Optional[str] = None,
         exclude_consolidated_user_facts: bool = False,
+        user_id: Optional[str] = None,
     ) -> list[dict]:
         keyword_query = _hybrid_keyword_query(query_text)
         if not query_vector and not keyword_query:
@@ -596,6 +772,11 @@ def create_mcp_server(
                 "(node.consolidated_at IS NULL "
                 "OR coalesce(node.updated_at, node.created_at) > node.consolidated_at)"
             )
+        # User facts are one person's: filter after the index walk (the
+        # vector index pre-filters only project_id / scope) so another
+        # user's memory never rides along.
+        if scope == "user":
+            filters.append("node.user_id = $user_id")
         post_filter = "\n          AND ".join(filters)
         rank_limit = max(1, int(limit))
         params = {
@@ -607,6 +788,7 @@ def create_mcp_server(
             "rank_limit": rank_limit,
             "limit": limit,
             "rrf_k": HYBRID_RRF_K,
+            "user_id": user_id,
         }
 
         if query_vector:
@@ -1001,6 +1183,7 @@ def create_mcp_server(
         resolved_pid = _resolve_project_id(project_id)
         resolved_statuses = statuses or ["approved", "candidate"]
         normalized_query = (query or "").strip()
+        user_id = _resolve_user_id()
         query_vector = (
             await _embed_learning_text(normalized_query) if normalized_query else None
         )
@@ -1043,6 +1226,8 @@ def create_mcp_server(
                 )
                 learnings = [dict(r) for r in records]
 
+            # User facts are the calling user's only; project memory is
+            # shared by everyone on the project.
             user_learnings: list[dict] = []
             if normalized_query:
                 user_learnings = await _fetch_context_memory_hybrid(
@@ -1052,12 +1237,13 @@ def create_mcp_server(
                     statuses=resolved_statuses,
                     limit=limit,
                     exclude_consolidated_user_facts=True,
+                    user_id=user_id,
                 )
 
             if not user_learnings:
                 records = await _execute_query(
                     """
-                    MATCH (l:Learning {scope: 'user'})
+                    MATCH (l:Learning {scope: 'user', user_id: $user_id})
                     WHERE l.status IN $statuses
                       AND (l.consolidated_at IS NULL
                            OR coalesce(l.updated_at, l.created_at) > l.consolidated_at)
@@ -1070,6 +1256,7 @@ def create_mcp_server(
                     """,
                     statuses=resolved_statuses,
                     limit=limit,
+                    user_id=user_id,
                 )
                 user_learnings = [dict(r) for r in records]
 
@@ -1101,6 +1288,7 @@ def create_mcp_server(
                        o.title AS title,
                        o.facts AS facts,
                        o.narrative AS narrative,
+                       o.user_id AS user_id,
                        toString(coalesce(o.ended_at, o.created_at)) AS ended_at
                 ORDER BY coalesce(o.ended_at, o.created_at) DESC, o.id DESC
                 LIMIT $limit
@@ -1112,6 +1300,7 @@ def create_mcp_server(
 
         payload = {
             "project": dict(project_record) if project_record else {"id": resolved_pid},
+            "user_id": user_id,
             "query": normalized_query or None,
             "statuses": resolved_statuses,
             "user_learnings": user_learnings,
@@ -1175,6 +1364,7 @@ def create_mcp_server(
                        toString(o.started_at) AS started_at,
                        toString(coalesce(o.ended_at, o.created_at)) AS ended_at,
                        o.session_id AS session_id,
+                       o.user_id AS user_id,
                        head(prev_ids) AS prev_id,
                        head(next_ids) AS next_id,
                        [x IN collect(DISTINCT
@@ -1237,6 +1427,7 @@ def create_mcp_server(
                    toString(o.started_at) AS started_at,
                    toString(ts) AS ended_at,
                    o.session_id AS session_id,
+                   o.user_id AS user_id,
                    head(prev_ids) AS prev_id,
                    head(next_ids) AS next_id
             ORDER BY ts DESC, o.id DESC
@@ -1302,6 +1493,7 @@ def create_mcp_server(
         projection = (
             "node.id AS id, node.type AS type, node.title AS title, "
             "toString(coalesce(node.ended_at, node.created_at)) AS ended_at, "
+            "node.user_id AS user_id, "
             "left(coalesce(node.narrative, ''), 160) AS snippet, score, sources"
         )
         if normalized_query:
@@ -1454,7 +1646,8 @@ def create_mcp_server(
             description="Confidence 0.0-1.0. Existing higher confidence is preserved.",
         ),
     ) -> str:
-        """Persist a durable learning. Idempotent on (scope namespace, text)."""
+        """Persist a durable learning. Idempotent on (scope namespace, text);
+        a user-scoped learning is namespaced to the calling user."""
         clean_text = _truncate((text or "").strip())
         if not clean_text:
             return json.dumps({"status": "error", "error": "text is required"})
@@ -1465,8 +1658,9 @@ def create_mcp_server(
         normalized_status = "candidate"
         clamped_confidence = max(0.0, min(1.0, float(confidence)))
         resolved_pid = _resolve_project_id(project_id)
+        user_id = _resolve_user_id()
         row_id = _learning_id(
-            _learning_namespace(resolved_pid, normalized_scope), clean_text
+            _learning_namespace(resolved_pid, normalized_scope, user_id), clean_text
         )
         timestamp = _now_iso()
         # Embed at write time so the learning is immediately visible to the
@@ -1478,11 +1672,16 @@ def create_mcp_server(
             for stmt in (
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE",
                 "CREATE CONSTRAINT IF NOT EXISTS FOR (l:Learning) REQUIRE l.id IS UNIQUE",
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
                 "CREATE FULLTEXT INDEX project_learning_fulltext IF NOT EXISTS "
                 "FOR (l:Learning) ON EACH [l.text, l.task_pattern, l.summary]",
             ):
                 await _execute_query(stmt)
 
+            # The learning is tagged with the writing user (first writer
+            # sticks; every writer is recorded as last_user_id). A user fact
+            # also hangs off that person's (:User), mirroring how a project
+            # fact hangs off its (:Project).
             record = await _execute_query_single(
                 """
                 MERGE (p:Project {id: $project_id})
@@ -1491,6 +1690,9 @@ def create_mcp_server(
                               p.source = 'agent'
                 SET p.updated_at = datetime($timestamp),
                     p.last_activity_at = datetime($timestamp)
+                MERGE (u:User {id: $user_id})
+                ON CREATE SET u.created_at = datetime($timestamp)
+                SET u.last_seen_at = datetime($timestamp)
                 MERGE (l:Learning {id: $row_id})
                 ON CREATE SET l.created_at = datetime($timestamp),
                               l.use_count = 0,
@@ -1504,6 +1706,8 @@ def create_mcp_server(
                         ELSE $status
                     END,
                     l.scope = $scope,
+                    l.user_id = coalesce(l.user_id, $user_id),
+                    l.last_user_id = $user_id,
                     l.source = coalesce(l.source, $source),
                     l.last_source = $source,
                     l.project_id = $project_id,
@@ -1514,13 +1718,17 @@ def create_mcp_server(
                         ELSE l.confidence
                     END
                 MERGE (p)-[:HAS_LEARNING]->(l)
+                FOREACH (_ IN CASE WHEN $scope = 'user' THEN [1] ELSE [] END |
+                    MERGE (u)-[:HAS_LEARNING]->(l)
+                )
                 RETURN l.id AS id, l.text AS text, l.status AS status,
-                       l.scope AS scope,
+                       l.scope AS scope, l.user_id AS user_id,
                        l.confidence AS confidence, l.task_pattern AS task_pattern,
                        l.support_count AS support_count,
                        CASE WHEN l.created_at = l.updated_at THEN 'created' ELSE 'updated' END AS action
                 """,
                 project_id=resolved_pid,
+                user_id=user_id,
                 row_id=row_id,
                 text=clean_text,
                 task_pattern=_task_pattern(task_pattern),
@@ -1567,13 +1775,17 @@ def create_mcp_server(
           or ``project_resolve_skill(action='retire')`` takes one offline now.
         """
         resolved_pid = _resolve_project_id(project_id)
+        # The user-scoped half of the record is the calling user's own; the
+        # project-scoped half is shared by the project.
+        user_id = _resolve_user_id()
         blocked_records = await _execute_query(
             """
             MATCH (l:Learning {status: 'blocked'})
-            WHERE l.scope = 'user'
+            WHERE (l.scope = 'user' AND l.user_id = $user_id)
                OR (l.scope = 'project' AND l.project_id = $project_id)
             RETURN l.id AS id,
                    l.scope AS scope,
+                   l.user_id AS user_id,
                    l.text AS text,
                    l.blocked_reason AS blocked_reason,
                    toString(l.blocked_at) AS blocked_at
@@ -1581,6 +1793,7 @@ def create_mcp_server(
             LIMIT $limit
             """,
             project_id=resolved_pid,
+            user_id=user_id,
             limit=limit,
         )
         blocked_learnings = [
@@ -1611,7 +1824,7 @@ def create_mcp_server(
             """
             MATCH (l:Learning {status: 'approved',
                                consistency_status: 'ambiguous_kept_both'})
-            WHERE l.scope = 'user'
+            WHERE (l.scope = 'user' AND l.user_id = $user_id)
                OR (l.scope = 'project' AND l.project_id = $project_id)
             OPTIONAL MATCH (l)-[edge:CONTRADICTS]->(other:Learning)
             WITH l, collect(
@@ -1621,6 +1834,7 @@ def create_mcp_server(
             ) AS raw
             RETURN l.id AS id,
                    l.scope AS scope,
+                   l.user_id AS user_id,
                    l.text AS text,
                    toString(coalesce(l.consistency_checked_at, l.updated_at))
                        AS decided_at,
@@ -1629,6 +1843,7 @@ def create_mcp_server(
             LIMIT $limit
             """,
             project_id=resolved_pid,
+            user_id=user_id,
             limit=limit,
         )
         kept_conflicts = [
@@ -1660,6 +1875,7 @@ def create_mcp_server(
         return json.dumps(
             {
                 "project_id": resolved_pid,
+                "user_id": user_id,
                 "blocked_count": len(blocked_learnings) + len(blocked_skills),
                 "blocked_learnings": blocked_learnings,
                 "blocked_skills": blocked_skills,
@@ -1731,6 +1947,9 @@ def create_mcp_server(
         if not clean_id:
             return _json_error("learning_id is required")
         timestamp = _now_iso()
+        # Human overrides are attributed: reviewed_by stays the provenance
+        # tier ('human'), reviewed_by_user_id says which human.
+        user_id = _resolve_user_id()
 
         target = await _execute_query_single(
             "MATCH (l:Learning {id: $id}) "
@@ -1752,11 +1971,13 @@ def create_mcp_server(
                     l.embedding = coalesce($embedding, l.embedding),
                     l.status = 'approved',
                     l.reviewed_by = 'human', l.reviewed_at = datetime($ts),
+                    l.reviewed_by_user_id = $user_id,
                     l.consistency_status = 'human_reviewed',
                     l.updated_at = datetime($ts)
                 WITH l OPTIONAL MATCH (l)-[r:CONTRADICTS]->() DELETE r
                 """,
                 id=clean_id, text=new_text, embedding=embedding, ts=timestamp,
+                user_id=user_id,
             )
         elif action in {"approve", "keep_both"}:
             # A blocked or rejected item lost its embedding when it died;
@@ -1769,11 +1990,12 @@ def create_mcp_server(
                 SET l.status = 'approved',
                     l.embedding = coalesce(l.embedding, $embedding),
                     l.reviewed_by = 'human', l.reviewed_at = datetime($ts),
+                    l.reviewed_by_user_id = $user_id,
                     l.consistency_status = 'human_reviewed',
                     l.updated_at = datetime($ts)
                 WITH l OPTIONAL MATCH (l)-[r:CONTRADICTS]->() DELETE r
                 """,
-                id=clean_id, embedding=embedding, ts=timestamp,
+                id=clean_id, embedding=embedding, ts=timestamp, user_id=user_id,
             )
         elif action == "reject":
             await _execute_query(
@@ -1781,13 +2003,14 @@ def create_mcp_server(
                 MATCH (l:Learning {id: $id})
                 SET l.status = 'rejected',
                     l.reviewed_by = 'human', l.reviewed_at = datetime($ts),
+                    l.reviewed_by_user_id = $user_id,
                     l.rejected_at = datetime($ts),
                     l.rejected_reason = 'human_review',
                     l.embedding = null,
                     l.updated_at = datetime($ts)
                 WITH l OPTIONAL MATCH (l)-[r:CONTRADICTS]->() DELETE r
                 """,
-                id=clean_id, ts=timestamp,
+                id=clean_id, ts=timestamp, user_id=user_id,
             )
         elif action == "keep_new":
             embedding = await _embed_learning_text(str(target["text"] or ""))
@@ -1797,6 +2020,7 @@ def create_mcp_server(
                 SET c.status = 'approved',
                     c.embedding = coalesce(c.embedding, $embedding),
                     c.reviewed_by = 'human', c.reviewed_at = datetime($ts),
+                    c.reviewed_by_user_id = $user_id,
                     c.consistency_status = 'human_reviewed',
                     c.updated_at = datetime($ts)
                 WITH c
@@ -1813,6 +2037,7 @@ def create_mcp_server(
                 DELETE r
                 """,
                 id=clean_id, conflict_id=conflict_id, embedding=embedding, ts=timestamp,
+                user_id=user_id,
             )
         elif action == "keep_existing":
             await _execute_query(
@@ -1820,6 +2045,7 @@ def create_mcp_server(
                 MATCH (c:Learning {id: $id})
                 SET c.status = 'rejected',
                     c.reviewed_by = 'human', c.reviewed_at = datetime($ts),
+                    c.reviewed_by_user_id = $user_id,
                     c.rejected_at = datetime($ts),
                     c.rejected_reason = 'human_kept_existing',
                     c.embedding = null,
@@ -1833,7 +2059,7 @@ def create_mcp_server(
                 )
                 DELETE r
                 """,
-                id=clean_id, conflict_id=conflict_id, ts=timestamp,
+                id=clean_id, conflict_id=conflict_id, ts=timestamp, user_id=user_id,
             )
 
         if action in {"reject", "keep_new", "keep_existing"}:
@@ -1858,10 +2084,10 @@ def create_mcp_server(
                 ts=timestamp,
             )
             # Same for the consolidated user-adaptations section: a retracted
-            # fact that was already folded in makes the profile stale. The
-            # consolidation service sees the flag (and the fact's missing
-            # unfolded_at) and repairs the section on its next run, bypassing
-            # threshold and cooldown.
+            # fact that was already folded in makes *its owner's* profile
+            # stale. The consolidation service sees the flag (and the fact's
+            # missing unfolded_at) and repairs the section on its next run,
+            # bypassing threshold and cooldown.
             await _execute_query(
                 """
                 MATCH (l:Learning {scope: 'user', status: 'rejected'})
@@ -1870,6 +2096,7 @@ def create_mcp_server(
                   AND l.consolidated_at IS NOT NULL
                   AND l.unfolded_at IS NULL
                 MATCH (up:UserProfile)
+                WHERE up.user_id = coalesce(l.user_id, $user_id)
                 SET up.needs_revision = true,
                     up.revision_reason =
                         'folded user fact ' + l.id + ' was rejected or superseded',
@@ -1877,12 +2104,15 @@ def create_mcp_server(
                 """,
                 id=clean_id,
                 ts=timestamp,
+                user_id=user_id,
             )
 
         result = await _execute_query_single(
             "MATCH (l:Learning {id: $id}) "
             "RETURN l.id AS id, l.status AS status, l.scope AS scope, "
-            "l.reviewed_by AS reviewed_by, l.consistency_status AS consistency_status",
+            "l.user_id AS user_id, l.reviewed_by AS reviewed_by, "
+            "l.reviewed_by_user_id AS reviewed_by_user_id, "
+            "l.consistency_status AS consistency_status",
             id=clean_id,
         )
         return json.dumps(

@@ -84,7 +84,9 @@ from project_common import (  # noqa: E402
     load_mkg_env,
     neo4j_config,
     project_env,
+    project_git_root,
     resolve_project,
+    resolve_user,
     truncate,
 )
 
@@ -771,7 +773,7 @@ def _spawn_background(session_id: str, project: ProjectRef | None) -> None:
         subprocess.Popen(
             command,
             cwd=str(project_root),
-            env=project_env(project),
+            env=project_env(project, resolve_user(project_git_root(project))),
             stdin=stdin,
             stdout=output,
             stderr=output,

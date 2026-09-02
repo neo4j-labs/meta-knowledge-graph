@@ -71,11 +71,12 @@ from project_common import (  # noqa: E402
     load_mkg_env,
     neo4j_config,
     read_user_profile_state,
+    resolve_user,
     snapshot_and_update_user_profile,
     truncate,
+    user_env,
 )
 
-PROFILE_NAME = "default"
 # The section is a handful of bullets, not a persona: a valid revision can be
 # short, but a near-empty reply still reads as a failed generation.
 MIN_CONSOLIDATED_PROMPT_CHARS = 20
@@ -249,22 +250,29 @@ def ask_llm_for_consolidated_prompt(prompt: str) -> str | None:
 
 def consolidate(payload: dict[str, Any]) -> None:
     session_id = str(payload.get("session_id") or "unknown")
+    # One profile per person: everything below — the pending backlog, the
+    # stale facts, the section itself — is this user's alone.
+    user = resolve_user()
 
     from neo4j import GraphDatabase
 
     now = datetime.now(timezone.utc)
     timestamp = now.isoformat()
-    uri, user, password, database = neo4j_config()
+    uri, db_user, password, database = neo4j_config()
     threshold = consolidation_threshold()
     interval_hours = consolidation_interval_hours()
 
-    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+    with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(ensure_project_schema)
 
-            pending_count = count_user_profile_memories_pending(driver, database)
-            stale_facts = fetch_user_profile_stale_facts(driver, database)
-            state = read_user_profile_state(driver, database, PROFILE_NAME)
+            pending_count = count_user_profile_memories_pending(
+                driver, database, user_id=user.id
+            )
+            stale_facts = fetch_user_profile_stale_facts(
+                driver, database, user_id=user.id
+            )
+            state = read_user_profile_state(driver, database, user.id)
 
             proceed, reason = consolidation_gate(
                 pending_count=pending_count,
@@ -286,7 +294,9 @@ def consolidate(payload: dict[str, Any]) -> None:
                 )
                 return
 
-            memories = fetch_user_profile_memories_pending(driver, database, limit=40)
+            memories = fetch_user_profile_memories_pending(
+                driver, database, limit=40, user_id=user.id
+            )
             if not memories and not stale_facts:
                 return
 
@@ -305,7 +315,7 @@ def consolidate(payload: dict[str, Any]) -> None:
             unfolded_ids = [str(f["id"]) for f in stale_facts if f.get("id")]
             result = session.execute_write(
                 snapshot_and_update_user_profile,
-                name=PROFILE_NAME,
+                user_id=user.id,
                 new_content=new_content,
                 folded_learning_ids=folded_ids,
                 unfolded_learning_ids=unfolded_ids,
@@ -316,7 +326,7 @@ def consolidate(payload: dict[str, Any]) -> None:
             print(
                 f"[consolidate_system_prompt] consolidated {len(folded_ids)} "
                 f"user-profile memories (removed {len(unfolded_ids)} retracted) "
-                f"into (:UserProfile {{name: '{PROFILE_NAME}'}}) "
+                f"into (:UserProfile {{user_id: '{user.id}'}}) "
                 f"v{result['old_version']} -> v{result['new_version']} "
                 f"(history kept as :UserProfileVersion); {len(new_content)} chars"
             )
@@ -342,7 +352,9 @@ def _spawn_background(session_id: str) -> None:
         subprocess.Popen(
             command,
             cwd=str(project_root),
-            env=os.environ.copy(),
+            # Pin the identity the foreground hook resolved so the detached
+            # worker consolidates the same person's profile.
+            env=user_env(resolve_user()),
             stdin=stdin,
             stdout=output,
             stderr=output,

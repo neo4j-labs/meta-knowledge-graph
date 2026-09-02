@@ -46,7 +46,9 @@ from project_common import (  # noqa: E402
     merge_project_and_session,
     neo4j_config,
     project_env,
+    project_git_root,
     resolve_project,
+    resolve_user,
     slugify,
     truncate,
 )
@@ -612,6 +614,7 @@ def _write_event_enrichment(
     mode: str,
     projection: dict[str, Any],
     timestamp: str,
+    user_id: str,
 ) -> None:
     tx.run(
         """
@@ -621,11 +624,13 @@ def _write_event_enrichment(
             p.last_activity_at = datetime($timestamp)
         MERGE (s:Session {session_id: $session_id})
         ON CREATE SET s.created_at = datetime($timestamp)
+        SET s.user_id = coalesce(s.user_id, $user_id)
         MERGE (p)-[:HAS_SESSION]->(s)
         MERGE (ee:EventEnrichment {id: $enrichment_id})
         ON CREATE SET ee.created_at = datetime($timestamp)
         SET ee.project_id = $project_id,
             ee.session_id = $session_id,
+            ee.user_id = coalesce(ee.user_id, $user_id),
             ee.mode = $mode,
             ee.summary = $summary,
             ee.event_count = size($event_ids),
@@ -643,6 +648,7 @@ def _write_event_enrichment(
         """,
         project_id=project.id,
         session_id=session_id,
+        user_id=user_id,
         mode=mode,
         enrichment_id=projection["id"],
         summary=projection["summary"],
@@ -838,13 +844,16 @@ def enrich_events(payload: dict[str, Any], mode: str, limit: int) -> None:
 
     from neo4j import GraphDatabase
 
+    user = resolve_user(project_git_root(project))
     timestamp = datetime.now(timezone.utc).isoformat()
-    uri, user, password, database = neo4j_config()
+    uri, db_user, password, database = neo4j_config()
 
-    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+    with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(ensure_event_enrichment_schema)
-            session.execute_write(merge_project_and_session, project, session_id, timestamp)
+            session.execute_write(
+                merge_project_and_session, project, session_id, timestamp, user.id
+            )
             events = _fetch_unprocessed_events(
                 driver,
                 database,
@@ -863,6 +872,7 @@ def enrich_events(payload: dict[str, Any], mode: str, limit: int) -> None:
                 mode,
                 projection,
                 timestamp,
+                user.id,
             )
 
 
@@ -890,7 +900,7 @@ def _spawn_background(
         subprocess.Popen(
             command,
             cwd=str(project_root),
-            env=project_env(project),
+            env=project_env(project, resolve_user(project_git_root(project))),
             stdin=stdin,
             stdout=output,
             stderr=output,
