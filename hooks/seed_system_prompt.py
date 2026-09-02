@@ -47,10 +47,10 @@ def main(argv: list[str]) -> int:
 
     from neo4j import GraphDatabase
 
-    uri, user, password, database = neo4j_config()
+    uri, db_user, password, database = neo4j_config()
     now = datetime.now(timezone.utc).isoformat()
 
-    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+    with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(ensure_project_schema)
             result = session.execute_write(

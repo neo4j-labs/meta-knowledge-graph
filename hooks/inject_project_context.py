@@ -86,8 +86,8 @@ def main() -> int:
     try:
         from neo4j import GraphDatabase
 
-        uri, user, password, database = neo4j_config()
-        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        uri, db_user, password, database = neo4j_config()
+        with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
             with driver.session(database=database) as session:
                 session.execute_write(ensure_project_schema)
                 if context_scope == "user":

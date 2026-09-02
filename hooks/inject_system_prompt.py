@@ -198,10 +198,10 @@ def fetch_prompt_bundle_from_neo4j(
     except ImportError:
         return None, None, False
 
-    uri, user, password, database = neo4j_config()
+    uri, db_user, password, database = neo4j_config()
 
     try:
-        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
             prompt_record = _first_record(
                 driver.execute_query(
                     "MATCH (p:SystemPrompt {name: $name}) "
@@ -327,13 +327,13 @@ def record_injection(
     except ImportError:
         return True
 
-    uri, user, password, database = neo4j_config()
+    uri, db_user, password, database = neo4j_config()
     timestamp = datetime.now(timezone.utc).isoformat()
     injection_id = f"{session_id}_{timestamp}_{hook_event}_{target}"
     content_summary = summarize_injection_content(prompt_name, content, source)
 
     try:
-        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
             row = _first_record(
                 driver.execute_query(
                     """

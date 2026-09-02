@@ -1690,13 +1690,13 @@ def consolidate(payload: dict[str, Any]) -> None:
 
     now = datetime.now(timezone.utc)
     timestamp = now.isoformat()
-    uri, user, password, database = neo4j_config()
+    uri, db_user, password, database = neo4j_config()
     threshold = skill_consolidation_threshold()
     interval_hours = skill_consolidation_interval_hours()
     pattern_floor = task_pattern_similarity_threshold()
     min_size = skill_min_cluster_size()
 
-    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+    with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(ensure_project_schema)
         ensure_memory_vector_indexes(driver, database)
