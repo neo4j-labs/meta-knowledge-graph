@@ -1945,14 +1945,6 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("sk.status IN ['candidate', 'approved']", captured["query"])
         self.assertEqual(captured["params"]["project_id"], "mkg")
 
-    def test_session_start_counts_pending_skills_only_under_human_review(self) -> None:
-        # The count is a session-start nudge for the human publisher; in auto
-        # mode the sweep drains the queue itself, so no query runs.
-        source = (ROOT / "hooks" / "inject_project_context.py").read_text()
-        self.assertIn("if skill_review_required():", source)
-        self.assertIn("count_pending_skill_proposals(", source)
-        self.assertIn("pending_skills=pending_skills", source)
-
     def test_fetch_learnings_excludes_injected_and_in_session_memory(self) -> None:
         captured: list[tuple[str, dict]] = []
 

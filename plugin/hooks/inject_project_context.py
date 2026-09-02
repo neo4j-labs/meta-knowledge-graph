@@ -36,10 +36,12 @@ from project_common import (  # noqa: E402
     resolve_user,
     skill_catalog_inject_enabled,
     skill_review_required,
+    truncate,
 )
 
 
 USER_SCOPED_CONTEXT_EVENTS = {"SessionStart"}
+MAX_DEGRADED_REASON = 200
 
 
 def _read_payload() -> dict:
@@ -52,6 +54,33 @@ def _read_payload() -> dict:
 
 def context_scope_for_hook(hook_event: str) -> str:
     return "user" if hook_event in USER_SCOPED_CONTEXT_EVENTS else "project"
+
+
+def format_degraded_context(hook_event: str, exc: BaseException) -> str:
+    """One line for the transcript when the memory pipeline fails.
+
+    A hook must never crash the session, so failures are caught and the hook
+    exits 0. But exit 0 with nothing on stdout looks exactly like a project
+    with no memory, and stderr is not shown in a normal session: the hook
+    once ran dead for weeks that way. Saying so in the injected context puts
+    the failure where the agent and the user will see it."""
+    reason = truncate(" ".join(f"{type(exc).__name__}: {exc}".split()), MAX_DEGRADED_REASON)
+    unit = "session" if hook_event == "SessionStart" else "prompt"
+    return (
+        f"Persistent memory could not be loaded for this {unit}: the "
+        f"inject_project_context hook failed ({reason}). Memory recall is "
+        "degraded until the store is reachable."
+    )
+
+
+def _emit(hook_event: str, context: str) -> None:
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": hook_event,
+            "additionalContext": context,
+        }
+    }
+    print(json.dumps(output))
 
 
 def main() -> int:
@@ -164,8 +193,10 @@ def main() -> int:
                     source=payload.get("source"),
                     prompt=payload.get("prompt"),
                 )
-    except Exception as exc:  # pragma: no cover - hook must never crash the session
+    except Exception as exc:
+        # Never crash the session, never fail silently either.
         print(f"[inject_project_context] error: {exc}", file=sys.stderr)
+        _emit(hook_event, format_degraded_context(hook_event, exc))
         return 0
 
     context = format_learning_context(
@@ -182,13 +213,7 @@ def main() -> int:
     if not context:
         return 0
 
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": hook_event,
-            "additionalContext": context,
-        }
-    }
-    print(json.dumps(output))
+    _emit(hook_event, context)
     return 0
 
 
