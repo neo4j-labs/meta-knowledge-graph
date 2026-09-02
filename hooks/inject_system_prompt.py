@@ -31,7 +31,12 @@ HOOK_DIR = Path(__file__).resolve().parent
 if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
-from project_common import load_mkg_env, neo4j_config, resolve_user  # noqa: E402
+from project_common import (  # noqa: E402
+    load_mkg_env,
+    neo4j_config,
+    resolve_user,
+    skill_activation_mode,
+)
 
 DEFAULT_PROMPT = """You are a general-purpose AI assistant with persistent memory.
 
@@ -83,13 +88,21 @@ firing only when enough items are pending and its cooldown has passed
 ``task_pattern`` / 24h). Approved user-scoped facts fold into the "## User
 adaptations" section appended to this prompt. Approved learnings with a shared
 ``task_pattern`` compile into skills served by ``skill_search`` and
-``skill_fetch``. Tool failures need no separate handling: the extractor reads
-the failed calls in the session log and records a corrected failure as an
-error learning (``kind: 'error'``, carrying the tool, the error signature, and
-whether it was resolved), which is gated, recalled, and folded into skills like
-any other learning. A fact captured now may therefore not reach the persona or
-a skill until a later session — that lag is by design, not a lost write. Never
-write these derived nodes yourself.
+``skill_fetch``. Every skill proposal passes a safety screen; who then
+publishes it is ``MKG_SKILL_ACTIVATION``. In ``auto`` mode the service
+activates a screened proposal itself and no one needs to confirm it. In
+``human`` mode a screened proposal waits ``pending`` in ``skill_review_queue``
+until a person publishes it through ``project_resolve_skill``
+(``/mkg-skill-review`` walks the queue), and nothing is served before that.
+The mode active in this environment is stated in the "## Skill activation"
+section appended to this prompt; consult it before telling the user whether a
+skill needs their confirmation. Tool failures need no separate handling: the
+extractor reads the failed calls in the session log and records a corrected
+failure as an error learning (``kind: 'error'``, carrying the tool, the error
+signature, and whether it was resolved), which is gated, recalled, and folded
+into skills like any other learning. A fact captured now may therefore not
+reach the persona or a skill until a later session — that lag is by design,
+not a lost write. Never write these derived nodes yourself.
 """
 
 FALLBACK_BOOTSTRAP_PROMPT = DEFAULT_PROMPT + """
@@ -129,6 +142,36 @@ in project context):
 
 
 USER_PROFILE_HEADER = "## User adaptations"
+SKILL_ACTIVATION_HEADER = "## Skill activation"
+
+# The mode is an environment setting read at run time, not part of the frozen
+# base persona, so it is stated in a section composed at injection — the same
+# way the user adaptations are — and the seeded prompt stays as-is.
+SKILL_ACTIVATION_SECTIONS = {
+    "auto": (
+        "Mode in this environment: auto. Screened skill proposals go live on "
+        "their own; no human confirmation is needed before a skill is served. "
+        "A person can still take a live skill offline with "
+        "``project_resolve_skill(action='retire')``."
+    ),
+    "human": (
+        "Mode in this environment: human. A screened skill proposal is parked "
+        "``pending`` until a person publishes it; nothing enters "
+        "``skill_search`` / ``skill_fetch`` without that approval. Session "
+        "start reports how many proposals are waiting. Walk the queue with "
+        "``/mkg-skill-review`` or list it with ``skill_review_queue``, and "
+        "publish, edit, or reject only what the user explicitly decides, "
+        "through ``project_resolve_skill``."
+    ),
+}
+
+
+def skill_activation_section(mode: str | None) -> str:
+    """The injected statement of the live skill-activation mode; empty when no
+    mode is given (callers that only compose a base and a profile)."""
+    if not mode:
+        return ""
+    return SKILL_ACTIVATION_SECTIONS.get(mode, SKILL_ACTIVATION_SECTIONS["auto"])
 
 
 def _first_record(result):
@@ -194,40 +237,54 @@ def fetch_prompt_bundle_from_neo4j(
     return None, None, False
 
 
-def compose_prompt(base: str, profile: str | None, needs_revision: bool = False) -> str:
-    """Append the consolidated user-adaptations section to the frozen base.
+def compose_prompt(
+    base: str,
+    profile: str | None,
+    needs_revision: bool = False,
+    skill_mode: str | None = None,
+) -> str:
+    """Append the run-time sections to the frozen base.
 
     The base persona is never edited by consolidation; everything durable the
-    graph has learned about the user arrives through this appended section, so
-    the seeded prompt stays as-is while behaviour still adapts to the person.
+    graph has learned about the user arrives through the appended
+    user-adaptations section, and the live skill-activation mode (an
+    environment setting, not a graph fact) through the skill-activation
+    section — so the seeded prompt stays as-is while behaviour still adapts to
+    the person and the agent knows whether a human must confirm skills.
     """
     section = (profile or "").strip()
-    if not section:
+    skill_section = skill_activation_section(skill_mode)
+    if not section and not skill_section:
         return base
-    parts = [
-        base.rstrip(),
-        "",
-        USER_PROFILE_HEADER,
-        "",
-        (
-            "Consolidated from human-approved memory about this user. Apply "
-            "these adaptations on top of the persona above; the user can "
-            "revise them through the learning review queue."
-        ),
-        "",
-        section,
-    ]
-    if needs_revision:
+    parts = [base.rstrip()]
+    if section:
         parts.extend(
             [
                 "",
+                USER_PROFILE_HEADER,
+                "",
                 (
-                    "(Note: part of this section traces to memory that was "
-                    "retracted after consolidation; weigh it carefully until "
-                    "the section is re-consolidated.)"
+                    "Consolidated from human-approved memory about this user. Apply "
+                    "these adaptations on top of the persona above; the user can "
+                    "revise them through the learning review queue."
                 ),
+                "",
+                section,
             ]
         )
+        if needs_revision:
+            parts.extend(
+                [
+                    "",
+                    (
+                        "(Note: part of this section traces to memory that was "
+                        "retracted after consolidation; weigh it carefully until "
+                        "the section is re-consolidated.)"
+                    ),
+                ]
+            )
+    if skill_section:
+        parts.extend(["", SKILL_ACTIVATION_HEADER, "", skill_section])
     return "\n".join(parts)
 
 
@@ -355,7 +412,9 @@ def main() -> int:
         prompt_name, user.id
     )
     base = fetched or FALLBACK_BOOTSTRAP_PROMPT
-    prompt = compose_prompt(base, profile, profile_needs_revision)
+    prompt = compose_prompt(
+        base, profile, profile_needs_revision, skill_mode=skill_activation_mode()
+    )
     source = "neo4j" if fetched else "default"
 
     is_new_injection = record_injection(

@@ -146,6 +146,46 @@ class ComposePromptTests(unittest.TestCase):
         fresh = inject_system_prompt.compose_prompt("Base.", "- A bullet.")
         self.assertNotIn("retracted after consolidation", fresh)
 
+    def test_skill_activation_section_states_the_live_mode(self) -> None:
+        header = inject_system_prompt.SKILL_ACTIVATION_HEADER
+
+        human = inject_system_prompt.compose_prompt("Base.", None, skill_mode="human")
+        self.assertTrue(human.startswith("Base."))
+        self.assertIn(header, human)
+        self.assertIn("Mode in this environment: human", human)
+        self.assertIn("/mkg-skill-review", human)
+        self.assertIn("skill_review_queue", human)
+        self.assertIn("project_resolve_skill", human)
+
+        auto = inject_system_prompt.compose_prompt("Base.", None, skill_mode="auto")
+        self.assertIn(header, auto)
+        self.assertIn("Mode in this environment: auto", auto)
+        self.assertIn("no human confirmation", auto)
+        self.assertNotIn("/mkg-skill-review", auto)
+
+        # No mode given: nothing is appended, so a base-only compose is unchanged.
+        self.assertEqual(inject_system_prompt.compose_prompt("Base.", None), "Base.")
+
+    def test_skill_activation_follows_the_user_adaptations(self) -> None:
+        composed = inject_system_prompt.compose_prompt(
+            "Base.", "- A bullet.", needs_revision=True, skill_mode="human"
+        )
+        self.assertLess(
+            composed.index(inject_system_prompt.USER_PROFILE_HEADER),
+            composed.index(inject_system_prompt.SKILL_ACTIVATION_HEADER),
+        )
+        self.assertLess(
+            composed.index("retracted after consolidation"),
+            composed.index(inject_system_prompt.SKILL_ACTIVATION_HEADER),
+        )
+
+    def test_unknown_mode_falls_back_to_auto(self) -> None:
+        self.assertIn(
+            "Mode in this environment: auto",
+            inject_system_prompt.skill_activation_section("whatever"),
+        )
+        self.assertEqual(inject_system_prompt.skill_activation_section(None), "")
+
 
 
 class SeedPromptTests(unittest.TestCase):
@@ -161,6 +201,19 @@ class SeedPromptTests(unittest.TestCase):
         self.assertNotIn("error pattern", prompt)
         self.assertNotIn("query failure", prompt)
         self.assertNotIn("query-tool", prompt)
+
+    def test_seed_prompt_explains_both_skill_activation_modes(self) -> None:
+        # The frozen base explains what auto and human mean and points at the
+        # appended section for the live mode, which is an environment setting.
+        prompt = inject_system_prompt.DEFAULT_PROMPT
+        self.assertIn("MKG_SKILL_ACTIVATION", prompt)
+        self.assertIn("``auto`` mode", prompt)
+        self.assertIn("``human`` mode", prompt)
+        self.assertIn("skill_review_queue", prompt)
+        self.assertIn("project_resolve_skill", prompt)
+        self.assertIn("/mkg-skill-review", prompt)
+        self.assertIn(inject_system_prompt.SKILL_ACTIVATION_HEADER, prompt)
+        self.assertIn("whether a\nskill needs their confirmation", prompt)
 
 if __name__ == "__main__":
     unittest.main()
