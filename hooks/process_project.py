@@ -39,6 +39,7 @@ from project_common import (  # noqa: E402
     has_project_work_events,
     in_extraction_subprocess,
     is_error_tool_response,
+    is_transient_failure,
     learning_id,
     learning_namespace,
     llm_complete,
@@ -346,7 +347,12 @@ def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
                 parts.append(f"{key}: {truncate(text, 1200)}")
         if _is_failed_tool_event(event):
             error_text = tool_failure_text(event.get("tool_response"), MAX_ERROR_TEXT)
-            if error_text:
+            if error_text and is_transient_failure(error_text):
+                # Timeouts, rate limits, lost connections: the prompt says
+                # never to learn from these, so the text stays out entirely
+                # and the event is not paired with a later retry.
+                parts.append("tool_error: [transient failure elided]")
+            elif error_text:
                 parts.append(f"tool_key: {tool_key(event.get('tool_name')) or 'unknown'}")
                 parts.append(f"tool_error: {error_text}")
                 retry_input = _later_success_same_tool(events, order)

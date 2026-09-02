@@ -118,6 +118,7 @@ from project_common import (  # noqa: E402
     ensure_project_schema,
     extraction_model_label,
     in_extraction_subprocess,
+    is_transient_failure,
     llm_complete,
     llm_ready,
     load_mkg_env,
@@ -573,9 +574,11 @@ def digest_raw_failures(
     """Compress raw failed tool calls into distinct (tool, error) digests.
 
     Tools that already have an error learning in the context are skipped —
-    the learning says the same thing better — and repeats of the
-    same error head collapse to one entry. Digests carry no node id, so they
-    inform the prompt but never receive provenance edges."""
+    the learning says the same thing better — transient failures (timeouts,
+    rate limits, lost connections: nothing durable to distil) are dropped,
+    and repeats of the same error head collapse to one entry. Digests carry
+    no node id, so they inform the prompt but never receive provenance
+    edges."""
     digests: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for row in rows:
@@ -586,7 +589,7 @@ def digest_raw_failures(
         if any(key and key in lowered for key in covered_tool_keys):
             continue
         excerpt = failure_excerpt(row.get("tool_response"))
-        if not excerpt:
+        if not excerpt or is_transient_failure(excerpt):
             continue
         head = (lowered, excerpt[:120].lower())
         if head in seen:

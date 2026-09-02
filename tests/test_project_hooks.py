@@ -987,6 +987,62 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("tool_error: make: *** No rule to make target 'lint'", corpus)
         self.assertNotIn("later_call_to_same_tool_succeeded", corpus)
 
+    def test_event_corpus_elides_transient_failures(self) -> None:
+        # A timeout says nothing about the tool: its text stays out of the
+        # corpus, and the identical successful retry is not offered as a fix.
+        events = [
+            {
+                "event_name": "PostToolUse",
+                "timestamp": "2026-09-02T10:00:00Z",
+                "tool_name": "Bash",
+                "tool_input": json.dumps({"command": "uv run pytest tests/"}),
+                "tool_response": "Command timed out after 2m 0.0s",
+                "tool_error": True,
+            },
+            {
+                "event_name": "PostToolUse",
+                "timestamp": "2026-09-02T10:00:05Z",
+                "tool_name": "Bash",
+                "tool_input": json.dumps({"command": "uv run pytest tests/"}),
+                "tool_response": "384 passed",
+            },
+        ]
+        corpus = process_project._event_corpus(events)
+        self.assertIn("tool_error: [transient failure elided]", corpus)
+        self.assertNotIn("timed out", corpus)
+        self.assertNotIn("later_call_to_same_tool_succeeded", corpus)
+
+    def test_transient_failure_detection_is_narrow(self) -> None:
+        transient = [
+            "Command timed out after 2m 0.0s",
+            "MCP error -32001: Request timed out",
+            "TimeoutError: timeout of 30000ms exceeded",
+            "429 Too Many Requests",
+            "Rate limit reached for model",
+            "ServiceUnavailable: Connection refused",
+            "ECONNRESET",
+            "Temporary failure in name resolution",
+            "502 Bad Gateway",
+            "fatal: out of memory",
+            "No space left on device",
+            "Permission denied (publickey).",
+            "The user doesn't want to proceed with this tool use.",
+        ]
+        durable = [
+            "Neo.ClientError.Statement.SyntaxError: Invalid input 'RETRUN'",
+            "make: *** No rule to make target 'lint'",
+            "Unknown setting: dbms.transaction.timeout",  # names a key, not a timeout
+            "ModuleNotFoundError: No module named 'pytest'",
+            "There is no procedure with the name `dbms.queryJmx` registered",
+            "",
+        ]
+        for text in transient:
+            with self.subTest(text=text):
+                self.assertTrue(project_common.is_transient_failure(text))
+        for text in durable:
+            with self.subTest(text=text):
+                self.assertFalse(project_common.is_transient_failure(text))
+
     def test_event_corpus_treats_mcp_error_envelope_as_failure(self) -> None:
         # Codex-style: no PostToolUseFailure event, the failure arrives as an
         # isError result on a plain PostToolUse with no tool_error flag.

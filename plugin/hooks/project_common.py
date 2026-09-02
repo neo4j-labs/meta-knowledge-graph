@@ -163,6 +163,64 @@ def is_error_tool_response(value: Any) -> bool:
     return isinstance(node, dict) and node.get("isError") is True
 
 
+# Failures that say nothing durable about a tool. The extraction prompt tells
+# the model to ignore them; this is the deterministic half of that rule,
+# applied before any failure text reaches a prompt (the Stop-hook corpus and
+# the skill distiller's raw tier). Kept narrow: a bare "timeout" also names
+# config keys and durable errors, so only the phrasings of an actual timeout
+# match.
+_TRANSIENT_FAILURE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        # timeouts
+        r"\btimed[ _-]?out\b",
+        r"\btimeout(error)?\b (of|after|exceeded|expired|reached|waiting)\b",
+        r"\b(read|write|connect(ion)?|request|command|operation|gateway) time-?out\b",
+        r"\betimedout\b",
+        r"deadline exceeded",
+        # rate limits
+        r"rate[ _-]?limit",
+        r"too many requests",
+        r"\b429\b",
+        r"quota (has been |was )?exceeded",
+        # connectivity
+        r"connection (refused|reset|closed|aborted|error|failed|lost)",
+        r"\becon(nrefused|nreset|naborted)\b",
+        r"\benotfound\b",
+        r"\beai_again\b",
+        r"service ?unavailable",
+        r"temporarily unavailable",
+        r"temporary failure in name resolution",
+        r"network is unreachable",
+        r"(could not|unable to|failed to) connect",
+        r"bad gateway",
+        # resource exhaustion
+        r"out of memory",
+        r"\bmemoryerror\b",
+        r"no space left on device",
+        r"too many open files",
+        r"resource temporarily unavailable",
+        # permissions (the harness's tool denials look like these too)
+        r"permission denied",
+        r"\beacces\b",
+        r"\beperm\b",
+        r"operation not permitted",
+        # user interrupts, in text form; the structured flag is ``is_interrupt``
+        r"interrupted by (the )?user",
+        r"user (doesn'?t|does not|did not) want to (proceed|take this action)",
+        r"\[request interrupted",
+    )
+)
+
+
+def is_transient_failure(text: Any) -> bool:
+    """True when a failure's text names a timeout, rate limit, connectivity or
+    resource problem, permission denial, or user interrupt: conditions of the
+    moment, not facts about the tool, so nothing durable can be learned."""
+    flat = " ".join(str(text or "").split())
+    return bool(flat) and any(pattern.search(flat) for pattern in _TRANSIENT_FAILURE_PATTERNS)
+
+
 def _non_empty_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None

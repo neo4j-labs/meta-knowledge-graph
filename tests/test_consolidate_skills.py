@@ -652,14 +652,31 @@ class ErrorContextTests(unittest.TestCase):
             {"tool_name": "Bash", "tool_response": "command not found: uvx"},
             {"tool_name": "Bash", "tool_response": "command not found: uvx"},
             {"tool_name": "WebFetch", "tool_response": ""},
-            {"tool_name": "Bash", "tool_response": "permission denied"},
+            {"tool_name": "Bash", "tool_response": "make: *** No rule to make target 'lint'"},
         ]
         digests = consolidate_skills.digest_raw_failures(rows, {"neo4j_read_cypher"})
         self.assertEqual(len(digests), 2)
         self.assertEqual(digests[0]["tool_key"], "Bash")
         self.assertEqual(digests[0]["error_signature"], "command not found: uvx")
         self.assertIsNone(digests[0]["id"])
-        self.assertEqual(digests[1]["error_signature"], "permission denied")
+        self.assertEqual(digests[1]["error_signature"], "make: *** No rule to make target 'lint'")
+
+    def test_digest_drops_transient_failures(self) -> None:
+        # The extractor is told never to learn from these; the raw tier used
+        # to hand them straight back to the distiller as stack traces.
+        rows = [
+            {"tool_name": "Bash", "tool_response": "Command timed out after 2m 0.0s"},
+            {"tool_name": "WebFetch", "tool_response": "429 Too Many Requests"},
+            {"tool_name": "mcp__x__neo4j_read_cypher", "tool_response": "ServiceUnavailable: Connection refused"},
+            {"tool_name": "Bash", "tool_response": "Permission denied (publickey)."},
+            {"tool_name": "Bash", "tool_response": "[Request interrupted by user]"},
+            {"tool_name": "Bash", "tool_response": "make: *** No rule to make target 'lint'"},
+        ]
+        digests = consolidate_skills.digest_raw_failures(rows, set())
+        self.assertEqual(
+            [item["error_signature"] for item in digests],
+            ["make: *** No rule to make target 'lint'"],
+        )
 
     def test_digest_respects_cap(self) -> None:
         rows = [
