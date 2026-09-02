@@ -672,10 +672,14 @@ class SkillConfigTests(unittest.TestCase):
                 "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD",
                 "MKG_SKILL_CATALOG_INJECT",
                 "MKG_SKILL_MAX_PROPOSALS_PER_RUN",
+                "MKG_SKILL_ACTIVATION",
             ):
                 os.environ.pop(key, None)
             self.assertTrue(project_common.skill_consolidation_enabled())
             self.assertTrue(project_common.skill_catalog_inject_enabled())
+            # Autonomous publishing is the default; human review is opt-in.
+            self.assertEqual(project_common.skill_activation_mode(), "auto")
+            self.assertFalse(project_common.skill_review_required())
             self.assertEqual(project_common.skill_consolidation_threshold(), 4)
             self.assertEqual(project_common.skill_consolidation_interval_hours(), 24.0)
             self.assertEqual(project_common.skill_min_cluster_size(), 2)
@@ -702,6 +706,18 @@ class SkillConfigTests(unittest.TestCase):
             os.environ, {"MKG_SKILL_MAX_PROPOSALS_PER_RUN": "0"}, clear=False
         ):
             self.assertEqual(project_common.skill_max_proposals_per_run(), 1)
+
+    def test_activation_mode_accepts_human_aliases(self) -> None:
+        for value in ("human", "REVIEW", " hitl ", "manual"):
+            with patch.dict(os.environ, {"MKG_SKILL_ACTIVATION": value}, clear=False):
+                self.assertEqual(project_common.skill_activation_mode(), "human", value)
+                self.assertTrue(project_common.skill_review_required(), value)
+        # Anything else — including a stray truthy value — stays autonomous,
+        # so a typo cannot silently switch publishing off.
+        for value in ("auto", "1", "yes", ""):
+            with patch.dict(os.environ, {"MKG_SKILL_ACTIVATION": value}, clear=False):
+                self.assertEqual(project_common.skill_activation_mode(), "auto", value)
+                self.assertFalse(project_common.skill_review_required(), value)
 
     def test_skill_node_id(self) -> None:
         self.assertEqual(
@@ -786,9 +802,10 @@ class SkillSafetyScreenTests(unittest.TestCase):
             consolidate_skills, "embed_texts", return_value=[[0.1]]
         ):
             counts = consolidate_skills.activate_pending_proposals(
-                driver, "neo4j", "proj", "2026-08-29T12:00:00Z"
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z", mode="auto"
             )
-        self.assertEqual(counts, {"activated": 1, "blocked": 0, "deferred": 0})
+        self.assertEqual(counts, {"activated": 1, "blocked": 0, "deferred": 0, "queued": 0}
+        )
         activation_query = driver.calls[1][0]
         self.assertIn("v.outcome = 'accepted'", activation_query)
         self.assertIn("v.decided_by = 'auto_gate'", activation_query)
@@ -802,9 +819,10 @@ class SkillSafetyScreenTests(unittest.TestCase):
             consolidate_skills, "llm_complete", return_value=SAFETY_BLOCK
         ):
             counts = consolidate_skills.activate_pending_proposals(
-                driver, "neo4j", "proj", "2026-08-29T12:00:00Z"
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z", mode="auto"
             )
-        self.assertEqual(counts, {"activated": 0, "blocked": 1, "deferred": 0})
+        self.assertEqual(counts, {"activated": 0, "blocked": 1, "deferred": 0, "queued": 0}
+        )
         block_query, block_params = driver.calls[1]
         self.assertIn("v.outcome = 'blocked'", block_query)
         self.assertIn("sk.status = 'blocked'", block_query)
@@ -820,9 +838,10 @@ class SkillSafetyScreenTests(unittest.TestCase):
             consolidate_skills, "llm_complete", return_value="not json"
         ):
             counts = consolidate_skills.activate_pending_proposals(
-                driver, "neo4j", "proj", "2026-08-29T12:00:00Z"
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z", mode="auto"
             )
-        self.assertEqual(counts, {"activated": 0, "blocked": 0, "deferred": 1})
+        self.assertEqual(counts, {"activated": 0, "blocked": 0, "deferred": 1, "queued": 0}
+        )
         # Only the fetch ran; no verdict write happened.
         self.assertEqual(len(driver.calls), 1)
 
@@ -831,6 +850,105 @@ class SkillSafetyScreenTests(unittest.TestCase):
         consolidate_skills.fetch_refused_fingerprints(driver, "neo4j", "proj")
         query = driver.calls[0][0]
         self.assertIn("v.outcome IN ['rejected', 'blocked']", query)
+
+    def test_pending_fetch_carries_safety_status(self) -> None:
+        # The sweep must be able to tell a screened-but-unpublished proposal
+        # from an unscreened one, or human mode would re-judge every turn.
+        driver = _RecordingDriver(results=[[]])
+        consolidate_skills.fetch_pending_proposals(driver, "neo4j", "proj")
+        self.assertIn("v.safety_status AS safety_status", driver.calls[0][0])
+
+
+PENDING_SCREENED = {**PENDING, "safety_status": "passed"}
+QUEUED_ONLY = {"activated": 0, "blocked": 0, "deferred": 0, "queued": 1}
+
+
+class SkillHumanReviewModeTests(unittest.TestCase):
+    """MKG_SKILL_ACTIVATION=human: the safety screen still runs, publishing
+    waits for a person, and nobody is judged twice."""
+
+    def test_passing_proposal_is_queued_not_activated(self) -> None:
+        driver = _RecordingDriver(results=[[dict(PENDING)]])
+        with patch.object(
+            consolidate_skills, "llm_complete", return_value=SAFETY_PASS
+        ) as judge, patch.object(
+            consolidate_skills, "embed_texts", return_value=[[0.1]]
+        ) as embed:
+            counts = consolidate_skills.activate_pending_proposals(
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z", mode="human"
+            )
+        self.assertEqual(counts, QUEUED_ONLY)
+        judge.assert_called_once()
+        embed.assert_not_called()  # nothing went live, nothing to index
+        screen_query, screen_params = driver.calls[1]
+        self.assertIn("v.safety_status = 'passed'", screen_query)
+        self.assertIn("v.safety_checked_at", screen_query)
+        self.assertNotIn("v.outcome = 'accepted'", screen_query)
+        self.assertNotIn("sk.status = 'approved'", screen_query)
+        self.assertEqual(screen_params["version_id"], PENDING["version_id"])
+
+    def test_screened_proposal_is_not_judged_again(self) -> None:
+        driver = _RecordingDriver(results=[[dict(PENDING_SCREENED)]])
+        with patch.object(consolidate_skills, "llm_complete") as judge:
+            counts = consolidate_skills.activate_pending_proposals(
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z", mode="human"
+            )
+        self.assertEqual(counts, QUEUED_ONLY)
+        judge.assert_not_called()
+        self.assertEqual(len(driver.calls), 1)  # only the fetch ran
+
+    def test_blocked_proposal_still_blocks_under_human_review(self) -> None:
+        driver = _RecordingDriver(results=[[dict(PENDING)]])
+        with patch.object(
+            consolidate_skills, "llm_complete", return_value=SAFETY_BLOCK
+        ):
+            counts = consolidate_skills.activate_pending_proposals(
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z", mode="human"
+            )
+        self.assertEqual(
+            counts, {"activated": 0, "blocked": 1, "deferred": 0, "queued": 0}
+        )
+        # The queue never holds an unscreened hostile payload.
+        self.assertIn("v.outcome = 'blocked'", driver.calls[1][0])
+
+    def test_unusable_verdict_defers_under_human_review(self) -> None:
+        driver = _RecordingDriver(results=[[dict(PENDING)]])
+        with patch.object(
+            consolidate_skills, "llm_complete", return_value="not json"
+        ):
+            counts = consolidate_skills.activate_pending_proposals(
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z", mode="human"
+            )
+        self.assertEqual(
+            counts, {"activated": 0, "blocked": 0, "deferred": 1, "queued": 0}
+        )
+        self.assertEqual(len(driver.calls), 1)  # left unscreened for a retry
+
+    def test_switching_back_to_auto_activates_backlog_without_rejudging(self) -> None:
+        driver = _RecordingDriver(results=[[dict(PENDING_SCREENED)]])
+        with patch.object(consolidate_skills, "llm_complete") as judge, patch.object(
+            consolidate_skills, "embed_texts", return_value=[[0.1]]
+        ):
+            counts = consolidate_skills.activate_pending_proposals(
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z", mode="auto"
+            )
+        self.assertEqual(
+            counts, {"activated": 1, "blocked": 0, "deferred": 0, "queued": 0}
+        )
+        judge.assert_not_called()
+        self.assertIn("v.outcome = 'accepted'", driver.calls[1][0])
+
+    def test_mode_defaults_to_environment(self) -> None:
+        driver = _RecordingDriver(results=[[dict(PENDING)]])
+        with patch.dict(
+            os.environ, {"MKG_SKILL_ACTIVATION": "human"}, clear=False
+        ), patch.object(
+            consolidate_skills, "llm_complete", return_value=SAFETY_PASS
+        ):
+            counts = consolidate_skills.activate_pending_proposals(
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z"
+            )
+        self.assertEqual(counts, QUEUED_ONLY)
 
 
 if __name__ == "__main__":

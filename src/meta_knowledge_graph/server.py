@@ -339,6 +339,23 @@ def _json_error(error: str, **extra: Any) -> str:
     return json.dumps({"status": "error", "error": error, **extra}, default=str)
 
 
+# Who publishes a safety-screened skill proposal. Mirrors
+# hooks/project_common.skill_activation_mode: ``auto`` (default) lets the
+# background sweep activate a screened proposal itself; ``human`` parks it in
+# ``skill_review_queue`` until a person approves it via ``project_resolve_skill``.
+SKILL_ACTIVATION_ENV_VAR = "MKG_SKILL_ACTIVATION"
+SKILL_ACTIVATION_AUTO = "auto"
+SKILL_ACTIVATION_HUMAN = "human"
+_SKILL_ACTIVATION_HUMAN_ALIASES = frozenset({"human", "review", "hitl", "manual"})
+
+
+def _skill_activation_mode() -> str:
+    raw = os.environ.get(SKILL_ACTIVATION_ENV_VAR, SKILL_ACTIVATION_AUTO).strip().lower()
+    if raw in _SKILL_ACTIVATION_HUMAN_ALIASES:
+        return SKILL_ACTIVATION_HUMAN
+    return SKILL_ACTIVATION_AUTO
+
+
 def _diffbot_payload_error_message(payload: Any) -> Optional[str]:
     if not isinstance(payload, dict):
         return None
@@ -1753,7 +1770,10 @@ def create_mcp_server(
         """The visible record of the autonomous memory gate — what it blocked
         and what it could not fully settle. Nothing here awaits a decision; the
         gate resolves everything itself, and this tool exists so that autonomy
-        never becomes unaccountability.
+        never becomes unaccountability. The one opt-in exception is skill
+        publishing: with ``MKG_SKILL_ACTIVATION=human`` screened skill
+        proposals wait for a person, and ``pending_skills`` reports how many —
+        the queue itself lives in ``skill_review_queue``.
 
         Sections, newest first:
         - ``blocked_learnings`` — candidates the safety screen refused
@@ -1872,6 +1892,17 @@ def create_mcp_server(
         )
         stale_skills = [{**dict(r), "kind": "stale_skill"} for r in stale_records]
 
+        pending_record = await _execute_query_single(
+            """
+            MATCH (sk:Skill {project_id: $project_id})-[:HAS_VERSION]->
+                  (v:SkillVersion {outcome: 'pending'})
+            WHERE sk.status IN ['candidate', 'approved']
+            RETURN count(v) AS pending
+            """,
+            project_id=resolved_pid,
+        )
+        pending_skills = int(pending_record["pending"]) if pending_record else 0
+
         return json.dumps(
             {
                 "project_id": resolved_pid,
@@ -1881,6 +1912,8 @@ def create_mcp_server(
                 "blocked_skills": blocked_skills,
                 "kept_conflicts": kept_conflicts,
                 "stale_skills": stale_skills,
+                "skill_activation_mode": _skill_activation_mode(),
+                "pending_skills": pending_skills,
             },
             default=str,
         )
@@ -2345,6 +2378,151 @@ def create_mcp_server(
             )
         return json.dumps(payload, default=str)
 
+    @mcp.tool(name="skill_review_queue")
+    async def skill_review_queue(
+        project_id: Optional[str] = Field(
+            None,
+            description="Project id (slug). Defaults to the MCP server's CWD folder name.",
+        ),
+        slug: Optional[str] = Field(
+            None, description="Restrict the queue to one skill slug."
+        ),
+        limit: int = Field(20, description="Max proposals to return, oldest first."),
+    ) -> str:
+        """List distilled skill proposals still pending — the human-in-the-loop
+        publishing queue when ``MKG_SKILL_ACTIVATION=human``.
+
+        Each entry carries what a reviewer needs to decide whether an agent
+        should follow the procedure: the proposed ``name`` / ``description`` /
+        ``proposed_content``; for an ``update``, the live skill's
+        ``current_content`` and ``current_description`` to diff against; the
+        proposer's ``rationale``; the source learnings it was distilled from
+        (``derived_from``, each with its text and *current* status, so every
+        step can be traced back to approved memory and stale sources stand
+        out); the tool-error patterns folded into its pitfalls
+        (``informed_by``); and the safety screen's verdict — ``safety_status``
+        is ``passed`` when the LLM judge screened it, or ``unscreened`` when
+        the judge was unavailable and the reviewer is the only screen. Blocked
+        proposals never appear here; they are tombstones in
+        ``project_gate_audit``.
+
+        Publish with ``project_resolve_skill`` (``approve`` /
+        ``edit_approve``) or drop with ``reject``. In ``auto`` mode the queue
+        is normally empty — the background sweep activates screened proposals
+        itself — and anything listed is only waiting for the judge.
+        """
+        resolved_pid = _resolve_project_id(project_id)
+        clean_slug = (slug or "").strip() or None
+        records = await _execute_query(
+            """
+            MATCH (sk:Skill {project_id: $project_id})-[:HAS_VERSION]->
+                  (v:SkillVersion {outcome: 'pending'})
+            WHERE sk.status IN ['candidate', 'approved']
+              AND ($slug IS NULL OR sk.slug = $slug)
+            RETURN sk.id AS skill_id,
+                   sk.slug AS slug,
+                   sk.status AS skill_status,
+                   coalesce(sk.version, 0) AS current_version,
+                   sk.description AS current_description,
+                   sk.content AS current_content,
+                   coalesce(sk.needs_revision, false) AS needs_revision,
+                   sk.revision_reason AS revision_reason,
+                   v.id AS version_id,
+                   v.version AS proposed_version,
+                   v.proposal_action AS action,
+                   v.name AS name,
+                   v.description AS description,
+                   v.content AS proposed_content,
+                   v.rationale AS rationale,
+                   v.model AS proposed_by_model,
+                   coalesce(v.safety_status, 'unscreened') AS safety_status,
+                   toString(v.safety_checked_at) AS safety_checked_at,
+                   coalesce(v.derived_from, []) AS derived_from_ids,
+                   coalesce(v.informed_by, []) AS informed_by_ids,
+                   toString(v.created_at) AS created_at
+            ORDER BY created_at ASC
+            LIMIT $limit
+            """,
+            project_id=resolved_pid,
+            slug=clean_slug,
+            limit=limit,
+        )
+        proposals = [dict(r) for r in records]
+
+        derived_ids = sorted(
+            {
+                str(lid)
+                for proposal in proposals
+                for lid in proposal.get("derived_from_ids") or []
+            }
+        )
+        derived: dict[str, dict[str, Any]] = {}
+        if derived_ids:
+            learning_records = await _execute_query(
+                "UNWIND $ids AS lid MATCH (l:Learning {id: lid}) "
+                "RETURN l.id AS id, l.text AS text, l.status AS status, "
+                "l.task_pattern AS task_pattern",
+                ids=derived_ids,
+            )
+            derived = {str(r["id"]): dict(r) for r in learning_records}
+
+        informed_ids = sorted(
+            {
+                str(eid)
+                for proposal in proposals
+                for eid in proposal.get("informed_by_ids") or []
+            }
+        )
+        informed: dict[str, dict[str, Any]] = {}
+        if informed_ids:
+            pattern_records = await _execute_query(
+                "UNWIND $ids AS eid MATCH (e:QueryErrorPattern {id: eid}) "
+                "RETURN e.id AS id, e.title AS title, e.resolution AS resolution",
+                ids=informed_ids,
+            )
+            informed = {str(r["id"]): dict(r) for r in pattern_records}
+
+        for proposal in proposals:
+            proposal["kind"] = "skill_proposal"
+            proposal["derived_from"] = [
+                derived.get(
+                    str(lid), {"id": str(lid), "text": "", "status": "missing"}
+                )
+                for lid in proposal.pop("derived_from_ids") or []
+            ]
+            proposal["informed_by"] = [
+                informed.get(str(eid), {"id": str(eid), "title": "", "resolution": ""})
+                for eid in proposal.pop("informed_by_ids") or []
+            ]
+            # The live content only matters when reviewing a patch.
+            if proposal.get("action") != "update":
+                proposal["current_content"] = None
+                proposal["current_description"] = None
+
+        mode = _skill_activation_mode()
+        if mode == SKILL_ACTIVATION_HUMAN:
+            next_step = (
+                "Human review is on: nothing here goes live until "
+                "project_resolve_skill approves it (approve / edit_approve) "
+                "or drops it (reject)."
+            )
+        else:
+            next_step = (
+                "Automatic activation is on: the background sweep activates "
+                "screened proposals itself; anything listed is waiting for the "
+                "safety judge. project_resolve_skill can settle one now."
+            )
+        return json.dumps(
+            {
+                "project_id": resolved_pid,
+                "activation_mode": mode,
+                "count": len(proposals),
+                "proposals": proposals,
+                "next": next_step,
+            },
+            default=str,
+        )
+
     @mcp.tool(name="project_resolve_skill")
     async def project_resolve_skill(
         skill_id: str = Field(
@@ -2358,12 +2536,14 @@ def create_mcp_server(
             ...,
             description=(
                 "approve | reject | edit_approve | retire. retire takes a live "
-                "skill out of search ('retire this skill'). approve activates a "
-                "pending proposal the automatic screen has not settled yet; "
-                "edit_approve does so with edited content and/or description; "
-                "reject discards a pending proposal (a rejected create frees "
-                "its learnings for future clustering; a rejected patch leaves "
-                "the live skill untouched)."
+                "skill out of search ('retire this skill'). approve publishes a "
+                "pending proposal — the reviewer's decision from "
+                "skill_review_queue when MKG_SKILL_ACTIVATION=human, or a "
+                "settle-it-now for the rare proposal the automatic screen has "
+                "not reached; edit_approve does so with edited content and/or "
+                "description; reject discards a pending proposal (a rejected "
+                "create frees its learnings for future clustering; a rejected "
+                "patch leaves the live skill untouched)."
             ),
         ),
         edited_content: Optional[str] = Field(
@@ -2373,13 +2553,16 @@ def create_mcp_server(
             None, description="Replacement description for edit_approve."
         ),
     ) -> str:
-        """Apply a human override to a skill. Skills are distilled, safety-
-        screened, and activated autonomously; this tool is how a person
-        overrides the machinery — most commonly ``retire`` for a live skill
-        that is misfiring or unwanted. The approve/reject actions remain for
-        the rare proposal still pending (the safety screen defers when its
-        judge is unavailable) so a human can settle it without waiting for the
-        next background cycle.
+        """Apply a human decision to a skill. With the default
+        ``MKG_SKILL_ACTIVATION=auto`` skills are distilled, safety-screened,
+        and activated autonomously, and this tool is how a person overrides
+        the machinery — most commonly ``retire`` for a live skill that is
+        misfiring or unwanted, or approve/reject for the rare proposal still
+        pending because the judge was unavailable. With
+        ``MKG_SKILL_ACTIVATION=human`` this tool *is* the publishing step: the
+        sweep screens each proposal and parks it in ``skill_review_queue``, and
+        nothing enters ``skill_search`` until a person approves it here
+        (``/mkg-skill-review`` walks the reviewer through the queue).
 
         Approval applies the pending ``:SkillVersion``'s content to the skill,
         stamps the version ``accepted``, creates the ``DERIVED_FROM``

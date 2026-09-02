@@ -17,6 +17,7 @@ if str(HOOK_DIR) not in sys.path:
 
 from project_common import (  # noqa: E402
     count_gate_blocked,
+    count_pending_skill_proposals,
     count_project_observations,
     ensure_project_schema,
     embed_text,
@@ -34,6 +35,7 @@ from project_common import (  # noqa: E402
     resolve_project,
     resolve_user,
     skill_catalog_inject_enabled,
+    skill_review_required,
 )
 
 
@@ -78,6 +80,7 @@ def main() -> int:
     observations: list[dict] = []
     observation_total = 0
     gate_blocked = 0
+    pending_skills = 0
     skill_slugs: list[str] = []
 
     try:
@@ -125,6 +128,13 @@ def main() -> int:
                         skill_slugs = fetch_approved_skill_slugs(
                             driver, database, project_id=project.id
                         )
+                    # Human-in-the-loop publishing: the one place a person is
+                    # a dependency, so session start says how long the queue
+                    # is and where to review it. Silent in auto mode.
+                    if skill_review_required():
+                        pending_skills = count_pending_skill_proposals(
+                            driver, database, project_id=project.id
+                        )
                 else:
                     # Relevance-gated: only memory clearing the cosine floor
                     # (MKG_INJECT_MIN_SIMILARITY) rides along with a prompt.
@@ -167,6 +177,7 @@ def main() -> int:
         gate_blocked=gate_blocked,
         observation_total=observation_total,
         user_id=user.id,
+        pending_skills=pending_skills,
     )
     if not context:
         return 0

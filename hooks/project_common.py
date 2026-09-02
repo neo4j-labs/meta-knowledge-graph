@@ -1584,10 +1584,13 @@ def inject_min_similarity() -> float:
 # --- Skill distillation ------------------------------------------------------
 #
 # A rate-limited service (hooks/consolidate_skills.py) compiles groups of
-# human-approved, procedural learnings (``task_pattern`` set) into executable
+# gate-approved, procedural learnings (``task_pattern`` set) into executable
 # skills served straight from the graph (``skill_search`` / ``skill_fetch`` MCP
-# tools). Skills never touch disk. Like the system prompt, nothing becomes a
-# live skill without a human decision through the review queue.
+# tools). Skills never touch disk. Every proposal passes an LLM safety screen;
+# who then publishes it is ``MKG_SKILL_ACTIVATION``: ``auto`` (default) lets
+# the service activate a screened proposal in the same run, ``human`` parks it
+# in the review queue (``skill_review_queue`` / ``/mkg-skill-review``) until a
+# person approves it through ``project_resolve_skill``.
 #
 # Grouping is procedural, not thematic: every learning's ``task_pattern``
 # resolves to a first-class ``(:TaskPattern)`` node (exact normalized match,
@@ -1619,6 +1622,32 @@ def skill_consolidation_enabled() -> bool:
 def skill_catalog_inject_enabled() -> bool:
     """Whether context injection lists the approved-skill slug catalog."""
     return os.environ.get("MKG_SKILL_CATALOG_INJECT", "1").strip().lower() not in _FALSEY_ENV
+
+
+# Who publishes a safety-screened skill proposal. ``auto`` is today's default:
+# the background service activates it in the run that screened it. ``human``
+# requires a person to approve each proposal before it can be served — the
+# opt-in human-in-the-loop mode for teams that want to read a procedure before
+# an agent starts following it.
+SKILL_ACTIVATION_ENV_VAR = "MKG_SKILL_ACTIVATION"
+SKILL_ACTIVATION_AUTO = "auto"
+SKILL_ACTIVATION_HUMAN = "human"
+_SKILL_ACTIVATION_HUMAN_ALIASES = frozenset({"human", "review", "hitl", "manual"})
+
+
+def skill_activation_mode() -> str:
+    """``auto`` or ``human`` — see ``SKILL_ACTIVATION_ENV_VAR``. The human mode
+    answers to ``human``, ``review``, ``hitl``, or ``manual``; anything else
+    (including unset) is the autonomous default."""
+    raw = os.environ.get(SKILL_ACTIVATION_ENV_VAR, SKILL_ACTIVATION_AUTO).strip().lower()
+    if raw in _SKILL_ACTIVATION_HUMAN_ALIASES:
+        return SKILL_ACTIVATION_HUMAN
+    return SKILL_ACTIVATION_AUTO
+
+
+def skill_review_required() -> bool:
+    """True when a person, not the background service, publishes skills."""
+    return skill_activation_mode() == SKILL_ACTIVATION_HUMAN
 
 
 def skill_consolidation_threshold() -> int:
@@ -1794,6 +1823,30 @@ def count_gate_blocked(
         user_id=user_id,
     )
     return int(record["blocked"]) if record else 0
+
+
+def count_pending_skill_proposals(driver, database: str, project_id: str) -> int:
+    """Count this project's skill proposals still ``pending`` — the review
+    backlog when ``MKG_SKILL_ACTIVATION=human``.
+
+    Counted regardless of ``safety_status``: a screened proposal waits for the
+    reviewer, and an unscreened one (judge outage) is still theirs to decide
+    since the human is the override. The session-start line reports the number
+    and points at ``/mkg-skill-review`` / ``skill_review_queue``; in auto mode
+    nothing is counted because the sweep drains the backlog itself.
+    """
+    record = _execute_query_single(
+        driver,
+        database,
+        """
+        MATCH (sk:Skill {project_id: $project_id})-[:HAS_VERSION]->
+              (v:SkillVersion {outcome: 'pending'})
+        WHERE sk.status IN ['candidate', 'approved']
+        RETURN count(v) AS pending
+        """,
+        project_id=project_id,
+    )
+    return int(record["pending"]) if record else 0
 
 
 def read_system_prompt_state(driver, database: str, name: str) -> dict[str, Any]:
@@ -2755,6 +2808,7 @@ def format_learning_context(
     gate_blocked: int = 0,
     observation_total: int = 0,
     user_id: str | None = None,
+    pending_skills: int = 0,
 ) -> str:
     user_learnings = user_learnings or []
     observations = observations or []
@@ -2765,6 +2819,7 @@ def format_learning_context(
         and not observations
         and not skill_slugs
         and not gate_blocked
+        and not pending_skills
     ):
         return ""
 
@@ -2836,6 +2891,18 @@ def format_learning_context(
                 "secrets) — recorded, not learned. Inspect the record with "
                 "project_gate_audit; a wrongly blocked fact can be reinstated "
                 "with project_resolve_learning.",
+            ]
+        )
+    if pending_skills:
+        plural = "proposal is" if pending_skills == 1 else "proposals are"
+        lines.extend(
+            [
+                "",
+                f"{pending_skills} distilled skill {plural} waiting for a "
+                "human to publish (MKG_SKILL_ACTIVATION=human): nothing goes "
+                "live in skill_search until a person approves it. Run "
+                "/mkg-skill-review to walk through the queue, or list it with "
+                "skill_review_queue.",
             ]
         )
     lines.extend(

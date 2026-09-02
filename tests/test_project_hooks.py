@@ -1691,6 +1691,50 @@ class ProjectHookTests(unittest.TestCase):
         )
         self.assertIn("blocked 1 unsafe item", only_record)
 
+    def test_learning_context_reports_pending_skill_reviews(self) -> None:
+        project = project_common.ProjectRef(id="mkg", name="MKG")
+        context = project_common.format_learning_context(
+            project, [], [], pending_skills=2
+        )
+        # Human-in-the-loop publishing: how long the queue is, that nothing
+        # goes live without a person, and where to review it.
+        self.assertIn("2 distilled skill proposals are waiting", context)
+        self.assertIn("MKG_SKILL_ACTIVATION=human", context)
+        self.assertIn("/mkg-skill-review", context)
+        self.assertIn("skill_review_queue", context)
+        single = project_common.format_learning_context(
+            project, [], [], pending_skills=1
+        )
+        self.assertIn("1 distilled skill proposal is waiting", single)
+        # Silent when nothing is queued — the auto-mode default.
+        quiet = project_common.format_learning_context(
+            project, [{"text": "A fact.", "status": "approved"}]
+        )
+        self.assertNotIn("skill_review_queue", quiet)
+
+    def test_pending_skill_proposal_count_query(self) -> None:
+        captured: dict = {}
+
+        class FakeDriver:
+            def execute_query(self, query, **kwargs):
+                captured["query"] = query
+                captured["params"] = kwargs
+                return [{"pending": 2}]
+
+        count = project_common.count_pending_skill_proposals(FakeDriver(), "neo4j", "mkg")
+        self.assertEqual(count, 2)
+        self.assertIn("SkillVersion {outcome: 'pending'}", captured["query"])
+        self.assertIn("sk.status IN ['candidate', 'approved']", captured["query"])
+        self.assertEqual(captured["params"]["project_id"], "mkg")
+
+    def test_session_start_counts_pending_skills_only_under_human_review(self) -> None:
+        # The count is a session-start nudge for the human publisher; in auto
+        # mode the sweep drains the queue itself, so no query runs.
+        source = (ROOT / "hooks" / "inject_project_context.py").read_text()
+        self.assertIn("if skill_review_required():", source)
+        self.assertIn("count_pending_skill_proposals(", source)
+        self.assertIn("pending_skills=pending_skills", source)
+
     def test_fetch_learnings_excludes_injected_and_in_session_memory(self) -> None:
         captured: list[tuple[str, dict]] = []
 
@@ -2292,6 +2336,21 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("SessionStart", plugin_config["hooks"])
         self.assertIn("Stop", plugin_config["hooks"])
         self.assertNotIn("SessionEnd", plugin_config["hooks"])
+
+    def test_skill_review_command_ships_for_both_hosts(self) -> None:
+        # The human-in-the-loop publishing walk is a Claude Code command
+        # mirrored into the plugin payload, with a thin Codex adapter that
+        # points at the packaged copy.
+        command = (ROOT / "commands" / "mkg-skill-review.md").read_text()
+        self.assertIn("skill_review_queue", command)
+        self.assertIn("project_resolve_skill", command)
+        self.assertIn("MKG_SKILL_ACTIVATION", command)
+        self.assertTrue((ROOT / "plugin" / "commands" / "mkg-skill-review.md").exists())
+        adapter = (
+            ROOT / "plugin" / "codex-skills" / "mkg-skill-review" / "SKILL.md"
+        ).read_text()
+        self.assertIn("name: mkg-skill-review", adapter)
+        self.assertIn("../../commands/mkg-skill-review.md", adapter)
 
     def test_codex_plugin_hooks_resolve_from_installed_plugin_root(self) -> None:
         config = json.loads((ROOT / "plugin" / "hooks" / "codex-hooks.json").read_text())

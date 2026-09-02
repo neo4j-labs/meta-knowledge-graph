@@ -135,7 +135,9 @@ def test_project_get_context_has_no_decision_surface() -> None:
 
 
 def test_gate_audit_replaces_the_review_queue() -> None:
-    # The gate is autonomous: no tool lists items "awaiting a decision".
+    # The gate is autonomous: no learning ever waits on a person, and the
+    # retired project_review_queue stays gone. (Skill publishing is the one
+    # opt-in exception — MKG_SKILL_ACTIVATION=human — covered below.)
     # project_gate_audit is the accountability record — blocked learnings and
     # skill proposals with reasons, kept-both conflicts, stale skills — and the
     # resolver tools remain as the human override surface.
@@ -145,6 +147,32 @@ def test_gate_audit_replaces_the_review_queue() -> None:
     assert "blocked_learnings" in source
     assert "kept_conflicts" in source
     assert "ambiguous_kept_both" in source
+
+
+def test_skill_review_queue_is_the_opt_in_publishing_gate() -> None:
+    # MKG_SKILL_ACTIVATION=human is the one place a person becomes a
+    # dependency: screened skill proposals wait in skill_review_queue until
+    # project_resolve_skill publishes them. The queue carries the reviewer's
+    # evidence — sources with their current status, the live content to diff
+    # a patch against, the safety verdict — and the audit reports the length.
+    source = Path(server.__file__).read_text()
+    assert 'name="skill_review_queue"' in source
+    assert 'SKILL_ACTIVATION_ENV_VAR = "MKG_SKILL_ACTIVATION"' in source
+    assert "coalesce(v.safety_status, 'unscreened') AS safety_status" in source
+    assert "sk.content AS current_content" in source
+    assert "RETURN l.id AS id, l.text AS text, l.status AS status, " in source
+    assert '"pending_skills": pending_skills' in source
+    assert '"activation_mode": mode' in source
+
+
+def test_skill_activation_mode_mirrors_hooks(monkeypatch) -> None:
+    monkeypatch.delenv("MKG_SKILL_ACTIVATION", raising=False)
+    assert server._skill_activation_mode() == "auto"
+    for value in ("human", "REVIEW", " hitl ", "manual"):
+        monkeypatch.setenv("MKG_SKILL_ACTIVATION", value)
+        assert server._skill_activation_mode() == "human"
+    monkeypatch.setenv("MKG_SKILL_ACTIVATION", "yes")
+    assert server._skill_activation_mode() == "auto"
 
 
 def test_resolve_learning_restores_embedding_on_reinstate() -> None:

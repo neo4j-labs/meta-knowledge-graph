@@ -50,18 +50,27 @@ rarely:
    proposal is mechanically validated — action, provenance labels, required
    content sections — then written as a ``:Skill`` candidate (create) or a
    pending ``:SkillVersion`` on the live skill (update).
-6. Activate. Every pending proposal is then screened by an LLM **safety
-   judge** — does the procedure stay within its stated task, or does it carry
-   a hostile payload (data/secret exfiltration, weakened safeguards, embedded
-   credentials, fetch-and-obey-remote-content steps) laundered in through the
-   session corpus it was distilled from? A proposal that passes goes live in
-   the same run: the version is stamped ``accepted`` (``decided_by =
-   'auto_gate'``), the skill becomes ``approved``, embedded, and searchable. A
-   proposal that fails is stamped ``blocked`` with the judge's reason — a
-   visible record, surfaced by ``project_gate_audit`` — and a blocked *create*
-   tombstones its candidate skill. No human sits between distillation and
-   activation; ``project_resolve_skill`` remains as the override ("retire this
-   skill").
+6. Screen, then publish. Every pending proposal is screened by an LLM
+   **safety judge** — does the procedure stay within its stated task, or does
+   it carry a hostile payload (data/secret exfiltration, weakened safeguards,
+   embedded credentials, fetch-and-obey-remote-content steps) laundered in
+   through the session corpus it was distilled from? A proposal that fails is
+   stamped ``blocked`` with the judge's reason — a visible record, surfaced by
+   ``project_gate_audit`` — and a blocked *create* tombstones its candidate
+   skill. What happens to a proposal that passes is ``MKG_SKILL_ACTIVATION``:
+   - ``auto`` (default): it goes live in the same run — the version is
+     stamped ``accepted`` (``decided_by = 'auto_gate'``), the skill becomes
+     ``approved``, embedded, and searchable. No human sits between
+     distillation and activation; ``project_resolve_skill`` remains as the
+     override ("retire this skill").
+   - ``human``: it stays ``pending`` with ``safety_status = 'passed'`` and
+     waits in the review queue (``skill_review_queue``) until a person
+     publishes it through ``project_resolve_skill`` — ``/mkg-skill-review``
+     walks the reviewer through each proposal. The screen still runs first,
+     so the queue never holds an unscreened payload, and it runs once per
+     proposal: a screened proposal is not re-judged by later sweeps.
+     Switching back to ``auto`` activates the screened backlog on the next
+     sweep without a second judgement.
 7. Converge. Every proposal carries a fingerprint (hash of the sorted
    ``derived_from`` ids). Groups matching a previously ignored, rejected, or
    blocked fingerprint are skipped until their membership changes, so the same
@@ -69,8 +78,8 @@ rarely:
 
 The activation sweep runs at the start of every invocation too — before the
 threshold/cooldown gate — so proposals stranded pending by an earlier safety
-outage (or by the retired human-review queue) activate or block promptly
-instead of waiting for the next proposal cycle.
+outage (or screened while human review was on and then handed back to auto)
+activate or block promptly instead of waiting for the next proposal cycle.
 
 Skills age as memory moves on: when a learning a live skill was derived from
 is later rejected or superseded (by the gate or by a human override), the
@@ -116,6 +125,8 @@ from project_common import (  # noqa: E402
     project_git_root,
     resolve_project,
     resolve_user,
+    SKILL_ACTIVATION_HUMAN,
+    skill_activation_mode,
     skill_consolidation_enabled,
     skill_consolidation_interval_hours,
     skill_consolidation_threshold,
@@ -1295,7 +1306,8 @@ def write_update_proposal(
     now: str,
 ) -> None:
     """A pending version on the live skill. The skill's own content and status
-    are untouched — approval in the review queue is what applies it."""
+    are untouched — activation is what applies it: the safety sweep in auto
+    mode, a reviewer through ``project_resolve_skill`` in human mode."""
     _execute_query(
         driver,
         database,
@@ -1373,9 +1385,10 @@ def write_ignore_audit(
 def fetch_pending_proposals(
     driver, database: str, project_id: str
 ) -> list[dict[str, Any]]:
-    """Pending versions awaiting the safety screen, oldest first — this run's
-    fresh proposals plus any stranded by an earlier outage (or by the retired
-    human-review queue)."""
+    """Pending versions, oldest first — this run's fresh proposals, any
+    stranded unscreened by an earlier judge outage, and (in human mode) the
+    screened ones still waiting for a reviewer; ``safety_status`` tells the
+    last group apart so it is never judged twice."""
     records = _execute_query(
         driver,
         database,
@@ -1391,6 +1404,7 @@ def fetch_pending_proposals(
                v.name AS name,
                v.description AS description,
                v.content AS content,
+               v.safety_status AS safety_status,
                toString(v.created_at) AS created_at
         ORDER BY created_at ASC
         """,
@@ -1464,6 +1478,30 @@ def apply_skill_activation(
     )
 
 
+def apply_skill_screen_pass(
+    driver, database: str, proposal: dict[str, Any], now: str
+) -> None:
+    """Record a passed safety screen without activating — the human-review
+    half of the split. The version stays ``pending`` but carries
+    ``safety_status = 'passed'`` and ``safety_checked_at``, so the reviewer
+    (``skill_review_queue`` / ``/mkg-skill-review``) can see it was screened
+    and later sweeps do not judge it again. ``project_resolve_skill`` is what
+    turns it into a live skill."""
+    _execute_query(
+        driver,
+        database,
+        """
+        MATCH (sk:Skill {id: $skill_id})-[:HAS_VERSION]->
+              (v:SkillVersion {id: $version_id})
+        SET v.safety_status = 'passed',
+            v.safety_checked_at = datetime($now)
+        """,
+        skill_id=proposal["skill_id"],
+        version_id=proposal["version_id"],
+        now=now,
+    )
+
+
 def apply_skill_block(
     driver, database: str, proposal: dict[str, Any], reason: str, now: str
 ) -> None:
@@ -1502,15 +1540,24 @@ def apply_skill_block(
 
 
 def activate_pending_proposals(
-    driver, database: str, project_id: str, now: str
+    driver, database: str, project_id: str, now: str, mode: str | None = None
 ) -> dict[str, int]:
-    """Safety-screen every pending proposal and activate or block it.
+    """Safety-screen every pending proposal, then activate, block, or queue it.
 
-    Returns counts of activated / blocked / deferred proposals. A safety-judge
-    failure (or an unparseable verdict) leaves that proposal pending for the
-    next invocation — activation is deferred, never guessed.
+    ``mode`` is the ``MKG_SKILL_ACTIVATION`` value (``auto`` / ``human``) and
+    defaults to the environment. Returns counts of activated / blocked /
+    deferred / queued proposals. A safety-judge failure (or an unparseable
+    verdict) leaves that proposal pending and unscreened for the next
+    invocation — activation is deferred, never guessed. In human mode a
+    passing proposal is stamped screened and left for the reviewer
+    (``queued``). A proposal screened on an earlier sweep is never judged
+    twice: human mode leaves it queued without an LLM call, auto mode
+    activates it outright — which is also how the backlog drains when the
+    mode is switched back to auto.
     """
-    counts = {"activated": 0, "blocked": 0, "deferred": 0}
+    mode = mode or skill_activation_mode()
+    human_review = mode == SKILL_ACTIVATION_HUMAN
+    counts = {"activated": 0, "blocked": 0, "deferred": 0, "queued": 0}
     try:
         pending = fetch_pending_proposals(driver, database, project_id)
     except Exception as exc:
@@ -1520,6 +1567,26 @@ def activate_pending_proposals(
         )
         return counts
     for proposal in pending:
+        if proposal.get("safety_status") == "passed":
+            if human_review:
+                counts["queued"] += 1
+                continue
+            try:
+                apply_skill_activation(driver, database, proposal, now)
+                counts["activated"] += 1
+                print(
+                    f"[consolidate_skills] activated previously screened skill "
+                    f"{proposal['slug']!r} ({proposal['action']}); now live in "
+                    "skill_search"
+                )
+            except Exception as exc:
+                counts["deferred"] += 1
+                print(
+                    f"[consolidate_skills] activating screened proposal failed "
+                    f"for {proposal['slug']!r}: {exc}",
+                    file=sys.stderr,
+                )
+            continue
         prompt = build_skill_safety_prompt(
             str(proposal.get("name") or proposal.get("slug") or ""),
             str(proposal.get("description") or ""),
@@ -1560,6 +1627,14 @@ def activate_pending_proposals(
                     f"[consolidate_skills] blocked skill proposal "
                     f"{proposal['slug']!r} ({reason}); recorded for audit"
                 )
+            elif human_review:
+                apply_skill_screen_pass(driver, database, proposal, now)
+                counts["queued"] += 1
+                print(
+                    f"[consolidate_skills] skill proposal {proposal['slug']!r} "
+                    f"({proposal['action']}) passed the safety screen; awaiting "
+                    "human review"
+                )
             else:
                 apply_skill_activation(driver, database, proposal, now)
                 counts["activated"] += 1
@@ -1574,6 +1649,12 @@ def activate_pending_proposals(
                 f"{proposal['slug']!r}: {exc}",
                 file=sys.stderr,
             )
+    if counts["queued"]:
+        print(
+            f"[consolidate_skills] {counts['queued']} screened proposal(s) await "
+            "human review (MKG_SKILL_ACTIVATION=human); publish them with "
+            "/mkg-skill-review"
+        )
     return counts
 
 
@@ -1608,8 +1689,9 @@ def consolidate(payload: dict[str, Any]) -> None:
         ensure_memory_vector_indexes(driver, database)
 
         # Finish before proposing: proposals stranded pending by an earlier
-        # safety-screen outage (or by the retired human-review queue) activate
-        # or block now, regardless of the threshold and cooldown below.
+        # safety-screen outage activate or block now, regardless of the
+        # threshold and cooldown below. In human mode the sweep screens the
+        # unscreened and leaves the screened backlog to the reviewer.
         if llm_ready():
             activate_pending_proposals(driver, database, project.id, timestamp)
 
@@ -1803,8 +1885,9 @@ def consolidate(payload: dict[str, Any]) -> None:
         if spent == 0:
             print("[consolidate_skills] no actionable group this cycle")
         else:
-            # Screen and activate what this run just proposed: a skill goes
-            # live in the same Stop run that distilled it.
+            # Screen what this run just proposed: in auto mode a skill goes
+            # live in the same Stop run that distilled it; in human mode it is
+            # screened here and published by a reviewer later.
             activate_pending_proposals(driver, database, project.id, timestamp)
         mark_skill_run(driver, database, project.id, timestamp)
 
