@@ -26,14 +26,18 @@ It ships as two halves that form a closed capture-and-recall loop:
 
 The hooks write to the same graph the MCP tools read from, so each new session
 starts with the most relevant prior learnings already injected — both
-project-scoped memory and durable facts about the user. The persisted **system
-prompt** is frozen: only the seed scripts write it, and it is never rewritten by
-consolidation. What adapts instead is a separate `(:UserProfile)` node — a
-compact "user adaptations" section a rate-limited Stop/SessionEnd hook distills
-from accumulated **gate-approved** user-profile memory, which the injection
-hook appends to the frozen base at session start (keeping every superseded
-section as version history). The **memory extraction prompt** is a fixed code
-constant — there is no Neo4j-backed self-improvement loop.
+project-scoped memory and durable facts about the user. Everything is tagged
+with a **user id** (see [User identity](#user-identity)): sessions, learnings,
+observations, and the profile all carry the email of the person driving the
+harness, user-scoped memory is recalled per user, and each user gets their own
+`(:UserProfile)`. The persisted **system prompt** is frozen: only the seed
+scripts write it, and it is never rewritten by consolidation. What adapts
+instead is that per-user `(:UserProfile)` node — a compact "user adaptations"
+section a rate-limited Stop/SessionEnd hook distills from accumulated
+**gate-approved** user-profile memory, which the injection hook appends to the
+frozen base at session start (keeping every superseded section as version
+history). The **memory extraction prompt** is a fixed code constant — there is
+no Neo4j-backed self-improvement loop.
 
 A complete end-to-end demo — a B2B sales / customer-success assistant for an
 enterprise car-rental provider — ships in the repo; see
@@ -111,6 +115,9 @@ NEO4J_URI=neo4j+s://xxxx.databases.neo4j.io
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=change-me
 NEO4J_DATABASE=neo4j
+# Who you are to MKG (optional; defaults to your signed-in Claude Code / Codex
+# account email, then git config user.email). Set it explicitly on shared machines.
+MKG_USER_ID=you@example.com
 # LLM for memory extraction (all optional; Claude Code prefers your subscription):
 CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # preferred: `claude setup-token`
 OPENAI_API_KEY=sk-...                      # litellm fallback (any provider) + embeddings
@@ -186,6 +193,7 @@ Stop-time extraction events:
 [mcp_servers.meta-knowledge-graph]
 command = "uv"
 args = ["run", "--no-sync", "meta-knowledge-graph"]
+env = { MKG_CLIENT = "codex" }   # read the user id from the Codex account
 
 [mcp_servers.meta-knowledge-graph.tools.bigquery_execute_query]
 approval_mode = "approve"
@@ -305,8 +313,52 @@ For installed Claude Code plugins, the scripts resolve project memory from the
 user's active worktree first (`cwd` / `CLAUDE_PROJECT_DIR`, with a git-root
 walk-up) and treat the plugin cache path as the hook implementation root only.
 Detached background processors carry that resolved project through
-`MKG_PROJECT_ROOT` / `MKG_PROJECT_ID` so Stop-time extraction does not fall back
-to the plugin directory.
+`MKG_PROJECT_ROOT` / `MKG_PROJECT_ID` — and the resolved user through
+`MKG_USER_ID` / `MKG_USER_ID_SOURCE` — so Stop-time extraction does not fall
+back to the plugin directory or re-derive a different identity.
+
+### User identity
+
+Every session, learning, observation, and profile is tagged with the id of the
+person driving the harness, and user-scoped memory is recalled **per user**, so
+one graph can serve several people without one person's facts or persona
+surfacing in another's session. The id is an email wherever one can be found.
+Both halves — the hooks and the MCP server — resolve it the same way, first hit
+wins:
+
+1. `MKG_USER_ID` — explicit, from the MKG `.env` or the shell. Recommended on
+   shared or CI machines. Background workers are respawned with it pinned.
+2. The signed-in harness account: Claude Code's `~/.claude.json`
+   (`oauthAccount.emailAddress`) or Codex's `~/.codex/auth.json` (the `email`
+   claim of its id token, decoded, never verified or stored). The active
+   harness goes first — `log_event.py --client`, `MKG_CLIENT`, or the
+   `CLAUDE_*` / `CODEX_*` env markers say which one that is.
+3. `git config user.email`, as seen from the project checkout.
+4. The OS account name — never empty, so every write carries *some* id.
+
+What the id does in the graph:
+
+- `(:User {id})` is the anchor: `(:User)-[:HAS_SESSION]->(:Session)`,
+  `(:User)-[:HAS_LEARNING]->(:Learning {scope: 'user'})` (a user fact hangs
+  off its person the way a project fact hangs off its `(:Project)`), and
+  `(:User)-[:HAS_PROFILE]->(:UserProfile)`.
+- `user_id` is stamped on `:Session`, `:SessionEvent`, `:Learning` (every
+  scope — for a project fact it is authorship, plus `last_user_id` for the
+  last writer), `:Observation`, `:ProjectProcessing`, `:SystemPromptInjection`,
+  `:QueryExecution`, `:EventEnrichment`, and `:UserProfileVersion`; human
+  overrides through `project_resolve_learning` add `reviewed_by_user_id`.
+- User facts are keyed per person: `learning:user:<user_id>:<digest>`, so the
+  same sentence about two people never collides on one node.
+- Recall of user-scoped memory (`inject_project_context.py`,
+  `project_get_context`, the extractor's dedup shortlist, the gate's neighbour
+  search for a user fact, the gate audit's user-scoped half, and profile
+  consolidation) filters on the id. Project memory, the episodic timeline, and
+  skills stay shared by the project; observations carry the id as provenance.
+- There is one `(:UserProfile)` per user (`user_id` is unique). The injection
+  hook composes the frozen base prompt with the calling user's section.
+
+Memory written before the user tag existed has no `user_id` and is not
+served by user-scoped recall.
 
 | Hook event | Script | Behavior |
 |---|---|---|
@@ -322,6 +374,11 @@ to the plugin directory.
 ### Graph model
 
 ```
+(:User {id})                                    # the person; id is an email where one exists
+   ├─[:HAS_SESSION]→ (:Session {user_id})
+   ├─[:HAS_LEARNING]→ (:Learning {scope: 'user', user_id})   # facts about this person
+   └─[:HAS_PROFILE]→ (:UserProfile {user_id})                # this person's adaptations
+
 (:Project {id})
    ├─[:HAS_SESSION]→ (:Session)─[:HAS_EVENT]→ (:SessionEvent)─[:NEXT]→ ...
    │                            ─[:INJECTED]→ (:SystemPromptInjection {content_sha})─[:OF_PROMPT]→ (:SystemPrompt)
@@ -330,9 +387,9 @@ to the plugin directory.
    │                                  ├─[:TRIGGERED_BY]→ (:SessionEvent)  # parent spawn_agent result
    │                                  ├─[:STARTED_AT]→ (:SessionEvent)    # SubagentStart
    │                                  └─[:ENDED_AT]→ (:SessionEvent)      # SubagentStop
-   ├─[:HAS_LEARNING]→ (:Learning {scope, status, confidence, created_by_model, last_llm_model})
+   ├─[:HAS_LEARNING]→ (:Learning {scope, status, confidence, user_id, created_by_model, last_llm_model})
    │                      ─[:INJECTED_IN]→ (:Session)   ─[:FROM_SESSION]→ (:Session)
-   ├─[:HAS_OBSERVATION]→ (:Observation {type, title, facts, narrative, started_at, ended_at})─[:NEXT]→ ...
+   ├─[:HAS_OBSERVATION]→ (:Observation {type, title, facts, narrative, user_id, started_at, ended_at})─[:NEXT]→ ...
    │                      ─[:FROM_SESSION]→ (:Session)   # episodic timeline: append-only, never gated
    ├─[:LATEST_OBSERVATION]→ (:Observation)               # tail of the per-project timeline
    └─[:HAS_PROCESSING]→ (:ProjectProcessing {llm_model, llm_status, llm_skip_reason, llm_error})
@@ -345,8 +402,8 @@ to the plugin directory.
 (:SystemPrompt {name, version, content})
    ─[:HAS_VERSION]→ (:SystemPromptVersion {name, version, content, is_current})  # prompt history
 
-# Consolidated user-adaptations section, appended to the base prompt at injection:
-(:UserProfile {name, version, content, last_consolidated_at, needs_revision})
+# Consolidated user-adaptations section, one per user, appended to the base prompt at injection:
+(:UserProfile {user_id, name, version, content, last_consolidated_at, needs_revision})
    ─[:HAS_VERSION]→ (:UserProfileVersion {name, version, content, is_current})  # section history
    │                 ─[:FOLDED_LEARNING]→ (:Learning {scope: 'user'})           # facts folded in
    │                 ─[:UNFOLDED_LEARNING]→ (:Learning {scope: 'user'})         # retracted facts removed
@@ -485,6 +542,11 @@ NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=<your-password>
 NEO4J_DATABASE=neo4j
 
+# Optional: who you are to MKG (defaults to the signed-in Claude Code / Codex
+# account email, then git config user.email). Tags every session, learning,
+# observation, and profile; user-scoped memory is recalled per user.
+# MKG_USER_ID=you@example.com
+
 # Required: LLM calls for memory extraction. Calls route through litellm.
 # Codex/dev runs default to OpenAI's model (litellm), so set OPENAI_API_KEY.
 # Claude Code hook batches default to a Claude model and PREFER the logged-in
@@ -613,6 +675,8 @@ injected.
 | `NEO4J_PASSWORD` | `--password` | `password` | |
 | `NEO4J_DATABASE` | `--database` | `neo4j` | |
 | `NEO4J_TRANSPORT` | `--transport` | `stdio` | |
+| `MKG_USER_ID` | — | detected | Who you are to MKG: the id every session, learning, observation, and profile is tagged with, and that user-scoped recall filters on. Use an email. When unset, the signed-in Claude Code / Codex account email is used, then `git config user.email`, then the OS user name (see [User identity](#user-identity)). Set it explicitly on shared or CI machines. |
+| `MKG_CLIENT` | — | — | Optional harness hint (`claude_code` / `codex`) telling identity resolution which signed-in account to read first when `MKG_USER_ID` is unset. The Codex hook and MCP wiring set it; Claude Code is detected from its own env markers. |
 | `OPENAI_API_KEY` | — | — | Default provider key for Codex/dev runs: the hooks call `LLM_MODEL` and Neocarta embeds with `EMBEDDING_MODEL`, both via litellm, and both default to OpenAI models outside Claude Code. Claude Code hook batches can default to Claude subscription OAuth when `LLM_MODEL` is unset. For other providers, set the relevant model var and supply that provider's key. |
 | `DIFFBOT_TOKEN` | — | — | Enables `search_news` and `enhance_entity` when set. |
 | `LLM_MODEL` | — | client-aware | The single model knob for every LLM call (memory extraction), resolved through litellm. Explicit values always win. When unset, Codex/dev runs use `gpt-5.4-mini`; Claude Code hook batches use `anthropic/claude-haiku-4-5`. Any litellm model string works (e.g. `anthropic/claude-haiku-4-5`, `gemini/gemini-2.5-flash`). For Anthropic/Claude models, explicit `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `ANTHROPIC_BASE_URL` wins; otherwise MKG tries the Claude Code platform credential store, then `CLAUDE_CODE_OAUTH_TOKEN` as a headless fallback. |

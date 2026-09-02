@@ -28,6 +28,7 @@ if str(HOOK_DIR) not in sys.path:
 
 from project_common import (  # noqa: E402
     ProjectRef,
+    UserRef,
     dialog_entry,
     ensure_project_schema,
     embed_text,
@@ -48,8 +49,10 @@ from project_common import (  # noqa: E402
     normalize_scope,
     observation_id,
     project_env,
+    project_git_root,
     resolve_llm_model,
     resolve_project,
+    resolve_user,
     transcript_records,
     truncate,
 )
@@ -452,7 +455,13 @@ def _memory_rows_from_actions(
     mode: str,
     actions: dict[str, Any],
     llm_model: str | None = None,
+    *,
+    user_id: str,
 ) -> list[dict[str, Any]]:
+    """Rows for the graph write. ``user_id`` is the person this window belongs
+    to: it keys user-scoped ids (``learning:user:<user_id>:...``) so the same
+    sentence about two people never collides, and it is stamped on every row
+    as provenance."""
     learning_rows: list[dict[str, Any]] = []
     for item in actions.get("learnings") or []:
         if not isinstance(item, dict):
@@ -470,7 +479,7 @@ def _memory_rows_from_actions(
         row_id = (
             existing_id
             if action == "update"
-            else learning_id(learning_namespace(project.id, scope), text)
+            else learning_id(learning_namespace(project.id, scope, user_id), text)
         )
         learning_rows.append(
             {
@@ -485,6 +494,7 @@ def _memory_rows_from_actions(
                 "summary": text or item.get("reason"),
                 "reason": item.get("reason"),
                 "llm_model": llm_model,
+                "user_id": user_id,
             }
         )
     return learning_rows[:3]
@@ -555,6 +565,8 @@ def _observation_rows_from_items(
     events: list[dict[str, Any]],
     items: list[dict[str, Any]],
     llm_model: str | None = None,
+    *,
+    user_id: str,
 ) -> list[dict[str, Any]]:
     digest = _window_digest(events)
     started_at, ended_at = _window_bounds(events)
@@ -584,6 +596,7 @@ def _observation_rows_from_items(
                 "llm_model": llm_model,
                 "started_at": started_at,
                 "ended_at": ended_at,
+                "user_id": user_id,
             }
         )
         if len(rows) >= MAX_OBSERVATIONS_PER_WINDOW:
@@ -661,6 +674,8 @@ def _write_processing(
     llm_error: str | None,
     timestamp: str,
     observation_rows: list[dict[str, Any]] | None = None,
+    *,
+    user_id: str,
 ) -> None:
     observation_rows = observation_rows or []
     event_ids = [event["event_id"] for event in events if event.get("event_id")]
@@ -680,11 +695,13 @@ def _write_processing(
             p.last_activity_at = datetime($timestamp)
         MERGE (s:Session {session_id: $session_id})
         ON CREATE SET s.created_at = datetime($timestamp)
+        SET s.user_id = coalesce(s.user_id, $user_id)
         MERGE (p)-[:HAS_SESSION]->(s)
         MERGE (pp:ProjectProcessing {id: $processing_id})
         ON CREATE SET pp.created_at = datetime($timestamp)
         SET pp.project_id = $project_id,
             pp.session_id = $session_id,
+            pp.user_id = $user_id,
             pp.mode = $mode,
             pp.status = 'ok',
             pp.type = 'processing',
@@ -699,6 +716,10 @@ def _write_processing(
             pp.updated_at = datetime($timestamp)
         MERGE (p)-[:HAS_PROCESSING]->(pp)
         MERGE (s)-[:HAS_PROCESSING]->(pp)
+        MERGE (u:User {id: $user_id})
+        ON CREATE SET u.created_at = datetime($timestamp)
+        SET u.last_seen_at = datetime($timestamp)
+        MERGE (u)-[:HAS_SESSION]->(s)
         WITH pp
         UNWIND $event_ids AS event_id
         MATCH (e:SessionEvent {event_id: event_id})
@@ -706,6 +727,7 @@ def _write_processing(
         """,
         project_id=project.id,
         session_id=session_id,
+        user_id=user_id,
         processing_id=processing_id,
         mode=mode,
         event_count=len(event_ids),
@@ -739,6 +761,7 @@ def _write_processing(
                           l.created_by_model = row.llm_model,
                           l.status = row.status,
                           l.scope = row.scope,
+                          l.user_id = row.user_id,
                           l.use_count = 0,
                           l.support_count = 0
             SET l.text = row.text,
@@ -747,6 +770,7 @@ def _write_processing(
                 l.embedding = coalesce(row.embedding, l.embedding),
                 l.last_source = row.source,
                 l.last_source_session_id = $session_id,
+                l.last_user_id = coalesce(row.user_id, l.last_user_id),
                 l.last_reason = row.reason,
                 l.last_llm_model = coalesce(row.llm_model, l.last_llm_model),
                 l.project_id = $project_id,
@@ -761,6 +785,13 @@ def _write_processing(
             MERGE (pp)-[produced:PRODUCED_LEARNING]->(l)
             SET produced.llm_model = row.llm_model,
                 produced.created_at = datetime($timestamp)
+            // A user fact belongs to the person it describes: hang it off
+            // their (:User) the way a project fact hangs off its (:Project).
+            FOREACH (_ IN CASE WHEN row.scope = 'user' THEN [1] ELSE [] END |
+                MERGE (u:User {id: row.user_id})
+                ON CREATE SET u.created_at = datetime($timestamp)
+                MERGE (u)-[:HAS_LEARNING]->(l)
+            )
             """,
             project_id=project.id,
             session_id=session_id,
@@ -795,6 +826,7 @@ def _write_processing(
                 l.summary = coalesce(row.summary, l.summary),
                 l.last_source = row.source,
                 l.last_source_session_id = $session_id,
+                l.last_user_id = coalesce(row.user_id, l.last_user_id),
                 l.last_reason = row.reason,
                 l.last_llm_model = coalesce(row.llm_model, l.last_llm_model),
                 l.project_id = coalesce(l.project_id, $project_id),
@@ -845,6 +877,7 @@ def _write_processing(
                 o.embedding = coalesce(row.embedding, o.embedding),
                 o.project_id = $project_id,
                 o.session_id = $session_id,
+                o.user_id = coalesce(row.user_id, o.user_id),
                 o.scope = 'project',
                 o.status = 'recorded',
                 o.source = row.source,
@@ -992,10 +1025,13 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
 
     from neo4j import GraphDatabase
 
+    # The person this window belongs to. Background runs get it pinned in
+    # MKG_USER_ID by the foreground hook; a direct run resolves it here.
+    user = resolve_user(project_git_root(project))
     timestamp = datetime.now(timezone.utc).isoformat()
-    uri, user, password, database = neo4j_config()
+    uri, db_user, password, database = neo4j_config()
 
-    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+    with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(ensure_project_schema)
             ensure_memory_vector_indexes(driver, database)
@@ -1009,7 +1045,9 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
             )
             if not events or not has_project_work_events(events):
                 return
-            session.execute_write(merge_project_and_session, project, session_id, timestamp)
+            session.execute_write(
+                merge_project_and_session, project, session_id, timestamp, user.id
+            )
             llm_model_used: str | None = None
             llm_status: str | None = None
             llm_skip_reason: str | None = None
@@ -1040,6 +1078,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     limit=5,
                     query_vector=query_vector,
                     include_consolidated=True,
+                    user_id=user.id,
                 )
                 prompt = build_memory_extraction_prompt(
                     project,
@@ -1061,6 +1100,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     mode,
                     actions,
                     llm_model=llm_model_used,
+                    user_id=user.id,
                 )
                 # Embed candidates before the write so each is stored searchable
                 # and the consistency gate can retrieve prior approved neighbours.
@@ -1079,6 +1119,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                         events,
                         observation_items,
                         llm_model=llm_model_used,
+                        user_id=user.id,
                     )
                     attach_observation_embeddings(observation_rows)
                 except Exception as observation_exc:
@@ -1100,6 +1141,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     llm_error,
                     timestamp,
                     observation_rows=observation_rows,
+                    user_id=user.id,
                 )
                 # Autonomous gate: safety-screen each candidate (blocking
                 # laundered instructions, privilege grabs, and secrets as
@@ -1170,6 +1212,7 @@ def _spawn_background(
     limit: int,
     session_id: str,
     project: ProjectRef | None = None,
+    user: UserRef | None = None,
 ) -> None:
     if not session_id or session_id == "unknown":
         return
@@ -1189,7 +1232,7 @@ def _spawn_background(
         subprocess.Popen(
             command,
             cwd=str(project_root),
-            env=project_env(project),
+            env=project_env(project, user),
             stdin=stdin,
             stdout=output,
             stderr=output,
@@ -1254,6 +1297,7 @@ def main() -> int:
             limit=args.limit,
             session_id=str(payload.get("session_id") or "unknown"),
             project=project,
+            user=resolve_user(project_git_root(project)),
         )
         return 0
 

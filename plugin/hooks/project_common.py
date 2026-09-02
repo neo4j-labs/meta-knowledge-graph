@@ -971,6 +971,176 @@ def neo4j_config() -> tuple[str, str, str, str]:
     return uri, user, password, database
 
 
+# --------------------------------------------------------------------------- #
+# User identity
+#
+# Every session, learning, observation, and profile the hooks write is tagged
+# with the id of the person driving the harness, so one graph can keep each
+# user's facts and persona apart from everyone else's. The id is an email
+# address wherever one is discoverable. The same resolution lives in
+# src/meta_knowledge_graph/server.py for the MCP tools; the identity
+# functions below are kept textually identical there and a test guards the
+# drift, so a change here must be mirrored.
+# --------------------------------------------------------------------------- #
+USER_ID_ENV_VAR = "MKG_USER_ID"
+USER_ID_SOURCE_ENV_VAR = "MKG_USER_ID_SOURCE"
+CLIENT_HINT_ENV_VAR = "MKG_CLIENT"
+USER_ID_SOURCE_ENV = "env"
+USER_ID_SOURCE_CLAUDE = "claude_code"
+USER_ID_SOURCE_CODEX = "codex"
+USER_ID_SOURCE_GIT = "git"
+USER_ID_SOURCE_OS = "os"
+USER_ID_MAX_CHARS = 254
+IDENTITY_LOOKUP_TIMEOUT_SECONDS = 3
+CLAUDE_HARNESS_ENV_VARS = ("CLAUDE_PLUGIN_ROOT", "CLAUDE_PROJECT_DIR")
+CODEX_HARNESS_ENV_VARS = ("CODEX_PLUGIN_ROOT", "CODEX_WORKSPACE_ROOT")
+
+
+@dataclass(frozen=True)
+class UserRef:
+    id: str
+    source: str
+
+
+def normalize_user_id(value: object) -> str | None:
+    """Canonical user id: trimmed, lower-cased, whitespace-free, bounded."""
+    text = str(value or "").strip().lower()
+    if not text or any(ch.isspace() for ch in text):
+        return None
+    return text[:USER_ID_MAX_CHARS]
+
+
+def _claude_account_email() -> str | None:
+    """Email of the Claude Code account signed in on this machine."""
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(override).expanduser() if override else Path.home()
+    try:
+        payload = json.loads((base / ".claude.json").read_text())
+    except (OSError, ValueError):
+        return None
+    account = payload.get("oauthAccount") if isinstance(payload, dict) else None
+    if not isinstance(account, dict):
+        return None
+    return normalize_user_id(account.get("emailAddress"))
+
+
+def _jwt_claims(token: str) -> dict[str, Any] | None:
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    segment = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(segment))
+    except (ValueError, binascii.Error):
+        return None
+    return claims if isinstance(claims, dict) else None
+
+
+def _codex_account_email() -> str | None:
+    """Email of the Codex (ChatGPT) account signed in on this machine, read
+    from the ``email`` claim of its OpenID id_token. The token is decoded,
+    never verified or kept: it names the local account and grants nothing."""
+    override = os.environ.get("CODEX_HOME")
+    base = Path(override).expanduser() if override else Path.home() / ".codex"
+    try:
+        payload = json.loads((base / "auth.json").read_text())
+    except (OSError, ValueError):
+        return None
+    tokens = payload.get("tokens") if isinstance(payload, dict) else None
+    id_token = tokens.get("id_token") if isinstance(tokens, dict) else None
+    if not isinstance(id_token, str) or not id_token:
+        return None
+    claims = _jwt_claims(id_token)
+    return normalize_user_id(claims.get("email")) if claims else None
+
+
+def _git_user_email(cwd: Path | None) -> str | None:
+    """``git config user.email`` as seen from ``cwd`` (repo-local first, then
+    the global config); ``None`` outside git or when unset."""
+    if not shutil.which("git"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--get", "user.email"],
+            capture_output=True,
+            text=True,
+            timeout=IDENTITY_LOOKUP_TIMEOUT_SECONDS,
+            check=False,
+            cwd=str(cwd) if cwd is not None and cwd.is_dir() else None,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return normalize_user_id(proc.stdout)
+
+
+def _active_harness(client: str | None = None) -> str | None:
+    """Which harness is driving this process, when it can be told: an explicit
+    client hint (``--client`` / ``MKG_CLIENT``) wins, else the harness env
+    markers each host sets for its hooks and MCP servers."""
+    hint = str(client or os.environ.get(CLIENT_HINT_ENV_VAR) or "").strip().lower()
+    if hint in {USER_ID_SOURCE_CLAUDE, USER_ID_SOURCE_CODEX}:
+        return hint
+    if any(os.environ.get(var) for var in CODEX_HARNESS_ENV_VARS):
+        return USER_ID_SOURCE_CODEX
+    if any(os.environ.get(var) for var in CLAUDE_HARNESS_ENV_VARS):
+        return USER_ID_SOURCE_CLAUDE
+    return None
+
+
+def _harness_account_lookups(client: str | None = None) -> list[tuple[str, Any]]:
+    """Signed-in harness accounts to try, the active harness first."""
+    claude = (USER_ID_SOURCE_CLAUDE, _claude_account_email)
+    codex = (USER_ID_SOURCE_CODEX, _codex_account_email)
+    if _active_harness(client) == USER_ID_SOURCE_CODEX:
+        return [codex, claude]
+    return [claude, codex]
+
+
+def resolve_user(project_root: Path | None = None, client: str | None = None) -> UserRef:
+    """Identify the person behind this session. First hit wins:
+
+    1. ``MKG_USER_ID`` — explicit, from the MKG ``.env`` or the shell. The
+       recommended setting for shared graphs and CI; background workers are
+       respawned with it pinned so they never re-derive a different id.
+    2. The signed-in harness account: Claude Code's ``~/.claude.json``
+       (``oauthAccount.emailAddress``) or Codex's ``~/.codex/auth.json``
+       (id_token ``email`` claim), the active harness first.
+    3. ``git config user.email`` as seen from the project.
+    4. The OS account name — never empty, so every write carries *some* id.
+
+    ``MKG_USER_ID_SOURCE`` rides along with a pinned id so a respawned worker
+    reports where the id originally came from instead of just ``env``.
+    """
+    explicit = normalize_user_id(os.environ.get(USER_ID_ENV_VAR))
+    if explicit:
+        pinned_source = str(os.environ.get(USER_ID_SOURCE_ENV_VAR) or "").strip().lower()
+        return UserRef(explicit, pinned_source or USER_ID_SOURCE_ENV)
+    for source, lookup in _harness_account_lookups(client):
+        email = lookup()
+        if email:
+            return UserRef(email, source)
+    email = _git_user_email(project_root)
+    if email:
+        return UserRef(email, USER_ID_SOURCE_GIT)
+    return UserRef(normalize_user_id(getpass.getuser()) or "unknown", USER_ID_SOURCE_OS)
+
+
+def resolve_user_id(project_root: Path | None = None, client: str | None = None) -> str:
+    return resolve_user(project_root, client).id
+
+
+def user_env(user: UserRef | None, env: dict[str, str] | None = None) -> dict[str, str]:
+    """Pin a resolved user into ``env`` (a copy of ``os.environ`` by default)
+    so detached workers inherit the exact identity the foreground hook used."""
+    pinned = dict(env) if env is not None else os.environ.copy()
+    if user:
+        pinned[USER_ID_ENV_VAR] = user.id
+        pinned[USER_ID_SOURCE_ENV_VAR] = user.source
+    return pinned
+
+
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "default"
@@ -1052,13 +1222,18 @@ def _project_from_root(path: Path, source: str) -> ProjectRef:
     )
 
 
-def project_env(project: ProjectRef | None) -> dict[str, str]:
-    """Return the current environment with the resolved MKG project pinned.
+def project_env(
+    project: ProjectRef | None, user: UserRef | None = None
+) -> dict[str, str]:
+    """Return the current environment with the resolved MKG project (and
+    user) pinned.
 
     Foreground hooks receive the harness payload, but background processors are
     respawned with only a session id. Carry the resolved project in explicit MKG
     env vars so detached work stays scoped to the user's active project instead
-    of the installed hook/plugin directory.
+    of the installed hook/plugin directory, and pin the resolved user id the
+    same way so the worker tags its writes with the identity the foreground
+    hook already settled on.
     """
     env = os.environ.copy()
     if project:
@@ -1066,7 +1241,14 @@ def project_env(project: ProjectRef | None) -> dict[str, str]:
         env["MKG_PROJECT_NAME"] = project.name
         if project.repo_root:
             env["MKG_PROJECT_ROOT"] = project.repo_root
-    return env
+    return user_env(user, env)
+
+
+def project_git_root(project: ProjectRef | None) -> Path | None:
+    """The project's checkout, for repo-local identity lookups."""
+    if project and project.repo_root:
+        return Path(project.repo_root)
+    return None
 
 
 def resolve_project(payload: dict[str, Any], project_root: Path) -> ProjectRef | None:
@@ -1158,6 +1340,19 @@ def ensure_project_schema(tx) -> None:
         "CREATE CONSTRAINT IF NOT EXISTS FOR (a:SkillProposalAudit) "
         "REQUIRE a.id IS UNIQUE"
     )
+    # One (:User) per person driving a harness; user-scoped memory, sessions,
+    # and the consolidated profile hang off it. The profile is keyed per user.
+    tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE")
+    tx.run(
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (up:UserProfile) "
+        "REQUIRE up.user_id IS UNIQUE"
+    )
+    tx.run(
+        "CREATE INDEX learning_user_id IF NOT EXISTS FOR (l:Learning) ON (l.user_id)"
+    )
+    tx.run(
+        "CREATE INDEX session_user_id IF NOT EXISTS FOR (s:Session) ON (s.user_id)"
+    )
     tx.run(
         "CREATE FULLTEXT INDEX project_learning_fulltext IF NOT EXISTS "
         "FOR (l:Learning) ON EACH [l.text, l.task_pattern, l.summary]"
@@ -1177,6 +1372,7 @@ def merge_project_and_session(
     project: ProjectRef,
     session_id: str,
     timestamp: str,
+    user_id: str,
 ) -> None:
     tx.run(
         """
@@ -1190,13 +1386,54 @@ def merge_project_and_session(
             p.last_activity_at = datetime($timestamp)
         MERGE (s:Session {session_id: $session_id})
         ON CREATE SET s.created_at = datetime($timestamp)
+        SET s.user_id = coalesce(s.user_id, $user_id)
         MERGE (p)-[:HAS_SESSION]->(s)
+        MERGE (u:User {id: $user_id})
+        ON CREATE SET u.created_at = datetime($timestamp)
+        SET u.last_seen_at = datetime($timestamp)
+        MERGE (u)-[:HAS_SESSION]->(s)
         """,
         project_id=project.id,
         project_props=project_props(project),
         project_update_props=project_update_props(project),
         project_source=project.source,
         session_id=session_id,
+        timestamp=timestamp,
+        user_id=user_id,
+    )
+
+
+def merge_user_sessions(
+    tx,
+    user: UserRef,
+    session_ids: list[str],
+    timestamp: str,
+) -> None:
+    """Own ``session_ids`` by ``user``: ``(:User)-[:HAS_SESSION]->(:Session)``
+    plus a ``user_id`` stamp on each session. The first owner sticks — a
+    session is one person's conversation, so a later hook firing under a
+    different resolved id never re-homes it."""
+    ids = [sid for sid in dict.fromkeys(session_ids) if sid and sid != "unknown"]
+    if not ids:
+        return
+    tx.run(
+        """
+        MERGE (u:User {id: $user_id})
+        ON CREATE SET u.created_at = datetime($timestamp),
+                      u.source = $source
+        SET u.last_seen_at = datetime($timestamp),
+            u.last_source = $source
+        WITH u
+        UNWIND $session_ids AS sid
+        MERGE (s:Session {session_id: sid})
+        ON CREATE SET s.created_at = datetime($timestamp)
+        SET s.user_id = coalesce(s.user_id, $user_id)
+        MERGE (u)-[r:HAS_SESSION]->(s)
+        ON CREATE SET r.created_at = datetime($timestamp)
+        """,
+        user_id=user.id,
+        source=user.source,
+        session_ids=ids,
         timestamp=timestamp,
     )
 
@@ -1231,9 +1468,11 @@ def link_event_to_project(
     )
 
 
-# User-scoped learnings live above any single project, so they are keyed on this
-# fixed namespace instead of a project id. The same durable fact about the person
-# then collapses to one node no matter which project surfaced it.
+# User-scoped learnings live above any single project, so they are keyed on the
+# user instead of a project id: ``user:<user_id>``. The same durable fact about
+# a person then collapses to one node no matter which project surfaced it,
+# while the identical sentence about a *different* person stays a separate
+# node.
 USER_LEARNING_NAMESPACE = "user"
 LEARNING_SCOPES = ("project", "user")
 
@@ -1243,8 +1482,10 @@ def normalize_scope(value: object) -> str:
     return scope if scope in LEARNING_SCOPES else "project"
 
 
-def learning_namespace(project_id: str, scope: str) -> str:
-    return USER_LEARNING_NAMESPACE if normalize_scope(scope) == "user" else project_id
+def learning_namespace(project_id: str, scope: str, user_id: str) -> str:
+    if normalize_scope(scope) != "user":
+        return project_id
+    return f"{USER_LEARNING_NAMESPACE}:{user_id}"
 
 
 def learning_id(namespace: str, text: str) -> str:
@@ -1443,8 +1684,9 @@ def fetch_approved_skill_slugs(
     return [str(record["slug"]) for record in records if record["slug"]]
 
 
-def count_user_profile_memories_pending(driver, database: str) -> int:
-    """Count gate-approved user-scoped learnings still awaiting consolidation.
+def count_user_profile_memories_pending(driver, database: str, user_id: str) -> int:
+    """Count this user's gate-approved user-scoped learnings still awaiting
+    consolidation into their profile.
 
     Only ``approved`` user facts are folded into the cross-project persona.
     Approval comes from the autonomous consistency + safety gate, whose safety
@@ -1452,17 +1694,20 @@ def count_user_profile_memories_pending(driver, database: str) -> int:
     they can be approved — a raw candidate never rewrites the persona. A
     learning counts as pending when it has been approved but never folded into
     the prompt (``consolidated_at`` unset) or has been edited since it last was,
-    so a fact that changes after consolidation re-enters the backlog.
+    so a fact that changes after consolidation re-enters the backlog. The
+    profile is per user, so only that person's facts count.
     """
     record = _execute_query_single(
         driver,
         database,
         """
         MATCH (l:Learning {scope: 'user', status: 'approved'})
-        WHERE l.consolidated_at IS NULL
-           OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
+        WHERE l.user_id = $user_id
+          AND (l.consolidated_at IS NULL
+               OR coalesce(l.updated_at, l.created_at) > l.consolidated_at)
         RETURN count(l) AS pending
-        """
+        """,
+        user_id=user_id,
     )
     return int(record["pending"]) if record else 0
 
@@ -1470,9 +1715,11 @@ def count_user_profile_memories_pending(driver, database: str) -> int:
 def fetch_user_profile_memories_pending(
     driver,
     database: str,
+    user_id: str,
     limit: int = 40,
 ) -> list[dict[str, Any]]:
-    """Fetch the gate-approved user-scoped learnings the consolidation folds in.
+    """Fetch this user's gate-approved user-scoped learnings the consolidation
+    folds into their profile.
 
     Approved-only: candidates and blocked items are excluded, so an ungated
     (and possibly poisoned) user fact cannot reach the persona — the gate's
@@ -1483,8 +1730,9 @@ def fetch_user_profile_memories_pending(
         database,
         """
         MATCH (l:Learning {scope: 'user', status: 'approved'})
-        WHERE l.consolidated_at IS NULL
-           OR coalesce(l.updated_at, l.created_at) > l.consolidated_at
+        WHERE l.user_id = $user_id
+          AND (l.consolidated_at IS NULL
+               OR coalesce(l.updated_at, l.created_at) > l.consolidated_at)
         RETURN l.id AS id,
                l.text AS text,
                l.confidence AS confidence,
@@ -1495,6 +1743,7 @@ def fetch_user_profile_memories_pending(
         LIMIT $limit
         """,
         limit=limit,
+        user_id=user_id,
     )
     return [dict(record) for record in records]
 
@@ -1503,18 +1752,22 @@ GATE_BLOCKED_WINDOW_DAYS = 7
 
 
 def count_gate_blocked(
-    driver, database: str, project_id: str, days: int = GATE_BLOCKED_WINDOW_DAYS
+    driver,
+    database: str,
+    project_id: str,
+    user_id: str,
+    days: int = GATE_BLOCKED_WINDOW_DAYS,
 ) -> int:
     """Count what the autonomous gate blocked recently — the session-start
     accountability signal.
 
     The gate resolves everything itself; the one thing it must not do is drop
     content silently. Blocked learnings (laundered instructions, privilege
-    grabs, secrets — user-scoped anywhere, project-scoped in this project) and
-    blocked skill proposals inside the window are counted here so the injected
-    context can point at ``project_gate_audit``, where the full record lives.
-    The window keeps the nudge about recent activity instead of nagging about
-    all history forever.
+    grabs, secrets — this user's user-scoped ones anywhere, project-scoped in
+    this project) and blocked skill proposals inside the window are counted
+    here so the injected context can point at ``project_gate_audit``, where
+    the full record lives. The window keeps the nudge about recent activity
+    instead of nagging about all history forever.
     """
     record = _execute_query_single(
         driver,
@@ -1523,7 +1776,7 @@ def count_gate_blocked(
         RETURN
           COUNT {
             MATCH (l:Learning {status: 'blocked'})
-            WHERE (l.scope = 'user'
+            WHERE ((l.scope = 'user' AND l.user_id = $user_id)
                    OR (l.scope = 'project' AND l.project_id = $project_id))
               AND l.blocked_at >= datetime() - duration({days: $days})
             RETURN l
@@ -1538,6 +1791,7 @@ def count_gate_blocked(
         """,
         project_id=project_id,
         days=days,
+        user_id=user_id,
     )
     return int(record["blocked"]) if record else 0
 
@@ -1659,29 +1913,32 @@ def snapshot_and_update_system_prompt(
     return {"old_version": old_version, "new_version": new_version}
 
 
-def read_user_profile_state(driver, database: str, name: str) -> dict[str, Any]:
-    """Read the consolidated user-adaptations section kept beside the frozen
-    base prompt.
+def read_user_profile_state(driver, database: str, user_id: str) -> dict[str, Any]:
+    """Read this user's consolidated user-adaptations section kept beside the
+    frozen base prompt.
 
-    The ``:UserProfile`` node is the only consolidation target: the base
-    ``:SystemPrompt`` stays as seeded, and injection composes the two at
-    session start. ``needs_revision`` is set by the learning resolver when a
-    fact folded into this section is later rejected or superseded."""
+    There is one ``:UserProfile`` per user (keyed ``user_id``), and it is the
+    only consolidation target: the base ``:SystemPrompt`` stays as seeded,
+    and injection composes the two at session start. ``needs_revision`` is
+    set by the learning resolver when a fact folded into this section is
+    later rejected or superseded."""
     record = _execute_query_single(
         driver,
         database,
         """
-        MATCH (up:UserProfile {name: $name})
-        RETURN up.content AS content,
+        MATCH (up:UserProfile {user_id: $user_id})
+        RETURN up.name AS name,
+               up.content AS content,
                coalesce(up.version, 1) AS version,
                up.last_consolidated_at AS last_consolidated_at,
                coalesce(up.needs_revision, false) AS needs_revision,
                up.revision_reason AS revision_reason
         """,
-        name=name,
+        user_id=user_id,
     )
     if not record:
         return {
+            "name": None,
             "content": None,
             "version": 0,
             "last_consolidated_at": None,
@@ -1689,6 +1946,7 @@ def read_user_profile_state(driver, database: str, name: str) -> dict[str, Any]:
             "revision_reason": None,
         }
     return {
+        "name": record["name"],
         "content": record["content"],
         "version": int(record["version"]),
         "last_consolidated_at": record["last_consolidated_at"],
@@ -1700,9 +1958,10 @@ def read_user_profile_state(driver, database: str, name: str) -> dict[str, Any]:
 def fetch_user_profile_stale_facts(
     driver,
     database: str,
+    user_id: str,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """User facts folded into the profile that were later rejected or
+    """This user's facts folded into the profile that were later rejected or
     superseded — by the gate or by a human override.
 
     These must be *removed* from the section on the next consolidation run;
@@ -1713,7 +1972,8 @@ def fetch_user_profile_stale_facts(
         database,
         """
         MATCH (l:Learning {scope: 'user'})
-        WHERE l.status IN ['rejected', 'superseded']
+        WHERE l.user_id = $user_id
+          AND l.status IN ['rejected', 'superseded']
           AND l.consolidated_at IS NOT NULL
           AND l.unfolded_at IS NULL
         RETURN l.id AS id,
@@ -1723,13 +1983,14 @@ def fetch_user_profile_stale_facts(
         LIMIT $limit
         """,
         limit=limit,
+        user_id=user_id,
     )
     return [dict(record) for record in records]
 
 
 def snapshot_and_update_user_profile(
     tx,
-    name: str,
+    user_id: str,
     new_content: str,
     folded_learning_ids: list[str],
     unfolded_learning_ids: list[str],
@@ -1738,22 +1999,27 @@ def snapshot_and_update_user_profile(
     now: str,
 ) -> dict[str, Any]:
     """Archive the outgoing profile section as a ``:UserProfileVersion`` and
-    write the new one.
+    write the new one, for one user's profile.
 
     Mirrors :func:`snapshot_and_update_system_prompt` for the user-adaptations
-    section. Folded learnings are stamped ``consolidated_at`` (the same
-    property the injection paths already exclude on, so a folded fact drops
-    out of per-session user-learning lists); retracted learnings the revision
-    removed are stamped ``unfolded_at`` so they leave the stale backlog. Any
-    ``needs_revision`` flag is cleared: the new version *is* the repair."""
+    section. The profile is keyed by ``user_id`` (its ``name`` is the same
+    id) and hangs off the ``(:User)`` node. Folded learnings are stamped
+    ``consolidated_at`` (the same property the injection paths already
+    exclude on, so a folded fact drops out of per-session user-learning
+    lists); retracted learnings the revision removed are stamped
+    ``unfolded_at`` so they leave the stale backlog. Any ``needs_revision``
+    flag is cleared: the new version *is* the repair."""
     record = tx.run(
         """
-        MERGE (up:UserProfile {name: $name})
-        ON CREATE SET up.created_at = datetime($now), up.version = 0
+        MERGE (up:UserProfile {user_id: $user_id})
+        ON CREATE SET up.created_at = datetime($now),
+                      up.version = 0,
+                      up.name = $user_id
         WITH up, up.content AS old_content, coalesce(up.version, 0) AS old_version
         FOREACH (_ IN CASE WHEN old_content IS NULL THEN [] ELSE [1] END |
-            MERGE (ov:UserProfileVersion {id: $name + ':v' + toString(old_version)})
-            ON CREATE SET ov.name = $name,
+            MERGE (ov:UserProfileVersion {id: $user_id + ':v' + toString(old_version)})
+            ON CREATE SET ov.name = $user_id,
+                          ov.user_id = $user_id,
                           ov.version = old_version,
                           ov.content = old_content,
                           ov.created_at = coalesce(up.updated_at, up.created_at, datetime($now))
@@ -1769,9 +2035,10 @@ def snapshot_and_update_user_profile(
             up.last_consolidation_model = $model,
             up.needs_revision = false,
             up.revision_reason = null
-        MERGE (nv:UserProfileVersion {id: $name + ':v' + toString(old_version + 1)})
+        MERGE (nv:UserProfileVersion {id: $user_id + ':v' + toString(old_version + 1)})
         ON CREATE SET nv.created_at = datetime($now)
-        SET nv.name = $name,
+        SET nv.name = $user_id,
+            nv.user_id = $user_id,
             nv.version = old_version + 1,
             nv.content = $new_content,
             nv.model = $model,
@@ -1781,9 +2048,13 @@ def snapshot_and_update_user_profile(
             nv.supersedes_version = old_version,
             nv.is_current = true
         MERGE (up)-[:HAS_VERSION]->(nv)
+        MERGE (u:User {id: $user_id})
+        ON CREATE SET u.created_at = datetime($now)
+        SET u.last_seen_at = datetime($now)
+        MERGE (u)-[:HAS_PROFILE]->(up)
         RETURN old_version AS old_version, old_version + 1 AS new_version
         """,
-        name=name,
+        user_id=user_id,
         new_content=new_content,
         model=model,
         session_id=session_id,
@@ -1798,8 +2069,8 @@ def snapshot_and_update_user_profile(
     if folded_learning_ids:
         tx.run(
             """
-            MATCH (up:UserProfile {name: $name})
-            MATCH (nv:UserProfileVersion {id: $name + ':v' + toString($new_version)})
+            MATCH (up:UserProfile {user_id: $user_id})
+            MATCH (nv:UserProfileVersion {id: $user_id + ':v' + toString($new_version)})
             UNWIND $folded_ids AS lid
             MATCH (l:Learning {id: lid})
             SET l.consolidated_at = datetime($now),
@@ -1808,7 +2079,7 @@ def snapshot_and_update_user_profile(
             MERGE (nv)-[:FOLDED_LEARNING]->(l)
             MERGE (up)-[:CONSOLIDATED]->(l)
             """,
-            name=name,
+            user_id=user_id,
             new_version=new_version,
             folded_ids=folded_learning_ids,
             model=model,
@@ -1817,14 +2088,14 @@ def snapshot_and_update_user_profile(
     if unfolded_learning_ids:
         tx.run(
             """
-            MATCH (nv:UserProfileVersion {id: $name + ':v' + toString($new_version)})
+            MATCH (nv:UserProfileVersion {id: $user_id + ':v' + toString($new_version)})
             UNWIND $unfolded_ids AS lid
             MATCH (l:Learning {id: lid})
             SET l.unfolded_at = datetime($now),
                 l.unfolded_profile_version = $new_version
             MERGE (nv)-[:UNFOLDED_LEARNING]->(l)
             """,
-            name=name,
+            user_id=user_id,
             new_version=new_version,
             unfolded_ids=unfolded_learning_ids,
             now=now,
@@ -1959,12 +2230,17 @@ def _fetch_memory_hybrid(
     exclude_session_id: str | None = None,
     exclude_consolidated_user_facts: bool = False,
     min_similarity: float | None = None,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]] | None:
     """Hybrid (vector + keyword RRF) retrieval over one memory label.
 
     ``min_similarity`` is a raw-cosine floor applied to the vector branch only;
     the keyword branch stays ungated because a lexical hit on the prompt's own
     terms is its own relevance signal.
+
+    A user-scoped search is restricted to ``user_id``'s own facts. The filter
+    is applied after the index walk (the vector index pre-filters only on
+    ``project_id`` / ``scope``), so it never leaks another user's memory.
 
     Returns ``None`` when no retrieval query could run — no usable signal, or
     the hybrid queries failed (older databases without the indexes) — and a
@@ -1994,6 +2270,8 @@ def _fetch_memory_hybrid(
             "(node.consolidated_at IS NULL "
             "OR coalesce(node.updated_at, node.created_at) > node.consolidated_at)"
         )
+    if scope == "user":
+        filters.append("node.user_id = $user_id")
     post_filter = "\n          AND ".join(filters)
     rank_limit = max(1, limit)
 
@@ -2005,6 +2283,7 @@ def _fetch_memory_hybrid(
         "rank_limit": rank_limit,
         "rrf_k": HYBRID_RRF_K,
         "session_id": exclude_session_id,
+        "user_id": user_id,
         "search_query": keyword_query,
         "query_vector": query_vector,
         # The index reports cosine scores normalized to (1 + cos) / 2.
@@ -2196,11 +2475,15 @@ def fetch_user_learnings(
     query_vector: list[float] | None = None,
     include_consolidated: bool = False,
     min_similarity: float | None = None,
+    *,
+    user_id: str,
 ) -> list[dict[str, Any]]:
     """Fetch durable, cross-project facts about the user (``scope = 'user'``).
 
     Unlike project learnings these are not bound to a single ``(:Project)``: a
-    user fact applies in every project, so the query spans all of them. Dedup
+    user fact applies in every project, so the query spans all of them — but
+    only *this* user's facts: ``user_id`` filters every path, so on a shared
+    graph one person's memory never surfaces in another's session. Dedup
     still skips anything already injected into or first produced during the
     active session.
 
@@ -2228,6 +2511,7 @@ def fetch_user_learnings(
             exclude_session_id=exclude_session_id,
             exclude_consolidated_user_facts=not include_consolidated,
             min_similarity=min_similarity,
+            user_id=user_id,
         )
         if rows:
             return rows
@@ -2243,6 +2527,7 @@ def fetch_user_learnings(
                 CALL db.index.fulltext.queryNodes('project_learning_fulltext', $search_query)
                 YIELD node, score
                 WHERE node.scope = 'user'
+                  AND node.user_id = $user_id
                   AND node.status IN $statuses
                   AND ($include_consolidated
                        OR node.consolidated_at IS NULL
@@ -2267,6 +2552,7 @@ def fetch_user_learnings(
                 limit=limit,
                 session_id=exclude_session_id,
                 include_consolidated=include_consolidated,
+                user_id=user_id,
             )
             rows = [dict(record) for record in records]
             if rows:
@@ -2282,7 +2568,8 @@ def fetch_user_learnings(
         database,
         """
         MATCH (l:Learning {scope: 'user'})
-        WHERE l.status IN $statuses
+        WHERE l.user_id = $user_id
+          AND l.status IN $statuses
           AND ($include_consolidated
                OR l.consolidated_at IS NULL
                OR coalesce(l.updated_at, l.created_at) > l.consolidated_at)
@@ -2304,6 +2591,7 @@ def fetch_user_learnings(
         limit=limit,
         session_id=exclude_session_id,
         include_consolidated=include_consolidated,
+        user_id=user_id,
     )
     return [dict(record) for record in records]
 
@@ -2466,6 +2754,7 @@ def format_learning_context(
     skill_slugs: list[str] | None = None,
     gate_blocked: int = 0,
     observation_total: int = 0,
+    user_id: str | None = None,
 ) -> str:
     user_learnings = user_learnings or []
     observations = observations or []
@@ -2483,7 +2772,8 @@ def format_learning_context(
         f"Project context for {project.name} ({project.id}):",
     ]
     if user_learnings:
-        lines.extend(["", "What we know about the user:"])
+        who = f" ({user_id})" if user_id else ""
+        lines.extend(["", f"What we know about the user{who}:"])
         for learning in user_learnings:
             status = learning.get("status") or "candidate"
             confidence = learning.get("confidence")

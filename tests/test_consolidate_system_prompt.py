@@ -294,7 +294,7 @@ class UserProfileSnapshotTests(unittest.TestCase):
 
         result = project_common.snapshot_and_update_user_profile(
             FakeTx(),
-            name="default",
+            user_id="tomaz@example.com",
             new_content="- Prefers terse answers.",
             folded_learning_ids=["learning:user:abc"],
             unfolded_learning_ids=["learning:user:old"],
@@ -335,7 +335,7 @@ class UserProfileSnapshotTests(unittest.TestCase):
 
         project_common.snapshot_and_update_user_profile(
             FakeTx(),
-            name="default",
+            user_id="tomaz@example.com",
             new_content="- A bullet.",
             folded_learning_ids=[],
             unfolded_learning_ids=[],
@@ -353,7 +353,7 @@ class UserProfileSnapshotTests(unittest.TestCase):
                 captured["query"] = query
                 return []
 
-        project_common.fetch_user_profile_stale_facts(FakeDriver(), "neo4j")
+        project_common.fetch_user_profile_stale_facts(FakeDriver(), "neo4j", user_id="tomaz@example.com")
         query = captured["query"]
         self.assertIn("l.status IN ['rejected', 'superseded']", query)
         self.assertIn("l.consolidated_at IS NOT NULL", query)
@@ -371,7 +371,7 @@ class PendingCountQueryTests(unittest.TestCase):
                 captured["params"] = kwargs
                 return [{"pending": 7}]
 
-        count = project_common.count_user_profile_memories_pending(FakeDriver(), "neo4j")
+        count = project_common.count_user_profile_memories_pending(FakeDriver(), "neo4j", user_id="tomaz@example.com")
         self.assertEqual(count, 7)
         # Only gate-approved user facts are folded into the persona; ungated
         # candidates must not reach it on their own.
@@ -388,7 +388,7 @@ class PendingCountQueryTests(unittest.TestCase):
                 captured["query"] = query
                 return []
 
-        project_common.fetch_user_profile_memories_pending(FakeDriver(), "neo4j")
+        project_common.fetch_user_profile_memories_pending(FakeDriver(), "neo4j", user_id="tomaz@example.com")
         self.assertIn("scope: 'user', status: 'approved'", captured["query"])
         self.assertNotIn("status: 'candidate'", captured["query"])
 

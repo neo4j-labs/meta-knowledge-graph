@@ -38,6 +38,9 @@ from project_common import (  # noqa: E402
     load_mkg_env,
     neo4j_config,
     normalize_tool_failure_payload,
+    project_git_root,
+    resolve_project,
+    resolve_user,
 )
 
 LEARNING_TOOL_SUFFIX = "project_add_learning"
@@ -86,21 +89,38 @@ def extract_learning_ids(tool_response: Any) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
-def write_session_links(tx, session_id: str, learning_ids: list[str], timestamp: str) -> None:
+def write_session_links(
+    tx,
+    session_id: str,
+    learning_ids: list[str],
+    timestamp: str,
+    user_id: str,
+) -> None:
+    """Link the learnings to the session and own both by the user.
+
+    The MCP server stamps ``user_id`` on the learning itself at write time;
+    this hook adds the session side (the server never sees the session)."""
     tx.run(
         """
         MERGE (s:Session {session_id: $session_id})
         ON CREATE SET s.created_at = datetime($timestamp)
+        SET s.user_id = coalesce(s.user_id, $user_id)
+        MERGE (u:User {id: $user_id})
+        ON CREATE SET u.created_at = datetime($timestamp)
+        SET u.last_seen_at = datetime($timestamp)
+        MERGE (u)-[:HAS_SESSION]->(s)
         WITH s
         UNWIND $learning_ids AS learning_id
         MATCH (l:Learning {id: learning_id})
         MERGE (l)-[r:FROM_SESSION]->(s)
         ON CREATE SET r.created_at = datetime($timestamp)
-        SET l.last_source_session_id = $session_id
+        SET l.last_source_session_id = $session_id,
+            l.user_id = coalesce(l.user_id, $user_id)
         """,
         session_id=session_id,
         learning_ids=learning_ids,
         timestamp=timestamp,
+        user_id=user_id,
     )
 
 
@@ -122,12 +142,16 @@ def link(payload: dict[str, Any]) -> int:
 
     from neo4j import GraphDatabase
 
+    project_root = Path(__file__).resolve().parents[1]
+    user = resolve_user(project_git_root(resolve_project(payload, project_root)))
     timestamp = datetime.now(timezone.utc).isoformat()
-    uri, user, password, database = neo4j_config()
-    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+    uri, db_user, password, database = neo4j_config()
+    with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(ensure_project_schema)
-            session.execute_write(write_session_links, session_id, learning_ids, timestamp)
+            session.execute_write(
+                write_session_links, session_id, learning_ids, timestamp, user.id
+            )
     return len(learning_ids)
 
 

@@ -83,6 +83,7 @@ class InjectSystemPromptTests(unittest.TestCase):
                     prompt_name="default",
                     content=content,
                     source="neo4j",
+                    user_id="tomaz@example.com",
                 )
 
     def test_injection_links_prompt_instead_of_copying_content(self) -> None:

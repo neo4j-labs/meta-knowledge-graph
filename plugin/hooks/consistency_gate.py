@@ -217,12 +217,15 @@ def _fetch_neighbours_vector(
     vector: list[float],
     topk: int,
     candidate_id: str,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     # In-index pre-filter (Neo4j 2026.02+): the WHERE lives inside the SEARCH so
     # the walk only visits live memory in this project/scope. The candidate
     # finds itself (its embedding is already written), so it is dropped by id
     # after the search; the index LIMIT is one higher to keep topk real
-    # neighbours.
+    # neighbours. A user-scoped candidate is judged only against the same
+    # person's facts (``user_id``), applied after the walk because the index
+    # metadata predates the user tag.
     query = f"""
         MATCH (node:{label})
         SEARCH node IN (
@@ -235,6 +238,7 @@ def _fetch_neighbours_vector(
         WITH node, score
         WHERE node.id <> $candidate_id
           AND node.status IN ['approved', 'candidate']
+          AND ($user_id IS NULL OR node.user_id = $user_id)
         {_NEIGHBOUR_RETURN}
         ORDER BY score DESC
     """
@@ -246,6 +250,7 @@ def _fetch_neighbours_vector(
             scope=scope,
             limit=topk + 1,
             candidate_id=candidate_id,
+            user_id=user_id,
         )
         return [dict(record) for record in result]
 
@@ -263,6 +268,7 @@ def _fetch_neighbours_hybrid_vector_keyword(
     text: str,
     topk: int,
     candidate_id: str,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     lucene = _lucene_query(text)
     if not lucene:
@@ -276,6 +282,7 @@ def _fetch_neighbours_hybrid_vector_keyword(
             vector=vector,
             topk=topk,
             candidate_id=candidate_id,
+            user_id=user_id,
         )
     query = f"""
         CALL () {{
@@ -290,6 +297,7 @@ def _fetch_neighbours_hybrid_vector_keyword(
             WITH node, raw_score
             WHERE node.id <> $candidate_id
               AND node.status IN ['approved', 'candidate']
+              AND ($user_id IS NULL OR node.user_id = $user_id)
             ORDER BY raw_score DESC
             WITH collect({{node: node, raw_score: raw_score}}) AS rows
             UNWIND range(0, size(rows) - 1) AS idx
@@ -308,6 +316,7 @@ def _fetch_neighbours_hybrid_vector_keyword(
               AND node.scope = $scope
               AND node.status IN ['approved', 'candidate']
               AND node.id <> $candidate_id
+              AND ($user_id IS NULL OR node.user_id = $user_id)
             WITH node, raw_score
             ORDER BY raw_score DESC
             LIMIT $keyword_limit
@@ -339,6 +348,7 @@ def _fetch_neighbours_hybrid_vector_keyword(
             limit=topk,
             rrf_k=_HYBRID_RRF_K,
             candidate_id=candidate_id,
+            user_id=user_id,
         )
         return [dict(record) for record in result]
 
@@ -354,6 +364,7 @@ def _fetch_neighbours_fulltext(
     text: str,
     topk: int,
     candidate_id: str,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     lucene = _lucene_query(text)
     if not lucene:
@@ -365,6 +376,7 @@ def _fetch_neighbours_fulltext(
           AND node.scope = $scope
           AND node.status IN ['approved', 'candidate']
           AND node.id <> $candidate_id
+          AND ($user_id IS NULL OR node.user_id = $user_id)
         {_NEIGHBOUR_RETURN}
         ORDER BY score DESC
         LIMIT $limit
@@ -378,6 +390,7 @@ def _fetch_neighbours_fulltext(
             scope=scope,
             limit=topk,
             candidate_id=candidate_id,
+            user_id=user_id,
         )
         return [dict(record) for record in result]
 
@@ -395,6 +408,7 @@ def _fetch_neighbours_hybrid(
     text: str,
     topk: int,
     candidate_id: str,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if vector:
         try:
@@ -410,6 +424,7 @@ def _fetch_neighbours_hybrid(
                 text=text,
                 topk=topk,
                 candidate_id=candidate_id,
+                user_id=user_id,
             )
         except Exception:
             pass
@@ -423,6 +438,7 @@ def _fetch_neighbours_hybrid(
         text=text,
         topk=topk,
         candidate_id=candidate_id,
+        user_id=user_id,
     )
 
 
@@ -909,6 +925,9 @@ def _gate_one_label(
             )
             applied += 1
             continue
+        # A user fact is judged against that same person's memory only; a
+        # project fact is shared, so no user filter applies.
+        row_user_id = str(row.get("user_id") or "") if scope == "user" else None
         try:
             neighbours = _fetch_neighbours_hybrid(
                 driver,
@@ -922,6 +941,7 @@ def _gate_one_label(
                 text=row.get("text") or "",
                 topk=topk,
                 candidate_id=candidate_id,
+                user_id=row_user_id,
             )
         except Exception as exc:
             print(
@@ -1088,6 +1108,7 @@ def _fetch_ungated_candidates(
                n.text AS text,
                n.confidence AS confidence,
                n.scope AS scope,
+               n.user_id AS user_id,
                n.embedding AS embedding
         ORDER BY coalesce(n.updated_at, n.created_at)
         LIMIT $limit

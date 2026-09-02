@@ -233,7 +233,7 @@ class QueryFailureCaptureTests(unittest.TestCase):
         tx = FakeTx()
 
         capture_query_failures.write_failure_projection(
-            tx, project, "session-1", projection, "2026-06-12T00:00:00+00:00"
+            tx, project, "session-1", projection, "2026-06-12T00:00:00+00:00", user_id="tomaz@example.com"
         )
 
         write_params = tx.calls[-1][1]

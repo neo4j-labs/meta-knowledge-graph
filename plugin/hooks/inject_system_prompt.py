@@ -31,7 +31,7 @@ HOOK_DIR = Path(__file__).resolve().parent
 if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
-from project_common import load_mkg_env, neo4j_config  # noqa: E402
+from project_common import load_mkg_env, neo4j_config, resolve_user  # noqa: E402
 
 DEFAULT_PROMPT = """You are a general-purpose AI assistant with persistent memory.
 
@@ -110,7 +110,6 @@ in project context):
 """
 
 
-USER_PROFILE_NAME = "default"
 USER_PROFILE_HEADER = "## User adaptations"
 
 
@@ -121,14 +120,17 @@ def _first_record(result):
 
 def fetch_prompt_bundle_from_neo4j(
     name: str,
-    profile_name: str = USER_PROFILE_NAME,
+    user_id: str,
 ) -> tuple[str | None, str | None, bool]:
     """Fetch the base prompt and the consolidated user-profile section in one
     connection.
 
-    Returns ``(base, profile, profile_needs_revision)``; each part is ``None``
-    when its node is missing or empty, and the whole bundle degrades to
-    ``(None, None, False)`` when Neo4j is unreachable.
+    The base prompt is shared; the profile section is the one consolidated
+    for ``user_id`` (each person has their own ``:UserProfile``), so two
+    people on the same graph get the same persona with their own
+    adaptations. Returns ``(base, profile, profile_needs_revision)``; each
+    part is ``None`` when its node is missing or empty, and the whole bundle
+    degrades to ``(None, None, False)`` when Neo4j is unreachable.
     """
     try:
         from neo4j import GraphDatabase
@@ -149,10 +151,10 @@ def fetch_prompt_bundle_from_neo4j(
             )
             profile_record = _first_record(
                 driver.execute_query(
-                    "MATCH (up:UserProfile {name: $name}) "
+                    "MATCH (up:UserProfile {user_id: $user_id}) "
                     "RETURN up.content AS content, "
                     "coalesce(up.needs_revision, false) AS needs_revision LIMIT 1",
-                    name=profile_name,
+                    user_id=user_id,
                     database_=database,
                 )
             )
@@ -233,12 +235,14 @@ def record_injection(
     prompt_name: str,
     content: str,
     source: str,
+    user_id: str,
 ) -> bool:
     """Record the injection in the graph and report whether to inject.
 
     The prompt text is not copied onto the ``:SystemPromptInjection`` node; the
     node keeps a content hash plus summary, and links to the ``(:SystemPrompt)``
-    it came from.
+    it came from. The session and the injection are stamped with ``user_id``
+    and the session is owned by that ``(:User)``.
     Returns ``False`` when this exact prompt content was already injected into
     this session (the conversation already has it in context), ``True`` when the
     injection is new or dedup state is unavailable.
@@ -260,6 +264,7 @@ def record_injection(
                     """
                     MERGE (s:Session {session_id: $session_id})
                     ON CREATE SET s.created_at = datetime($timestamp)
+                    SET s.user_id = coalesce(s.user_id, $user_id)
                     MERGE (s)-[:INJECTED]->(i:SystemPromptInjection {
                         prompt_name: $prompt_name,
                         content_sha: $content_sha,
@@ -268,6 +273,7 @@ def record_injection(
                     ON CREATE SET i.injection_id = $injection_id,
                                   i.hook_event = $hook_event,
                                   i.source = $source,
+                                  i.user_id = $user_id,
                                   i.content_summary = $content_summary,
                                   i.char_count = $char_count,
                                   i.summary_char_count = $summary_char_count,
@@ -275,11 +281,15 @@ def record_injection(
                                   i.injection_count = 1
                     ON MATCH SET i.last_seen_at = datetime($timestamp),
                                  i.injection_count = i.injection_count + 1
-                    WITH i, i.timestamp = datetime($timestamp) AS created
+                    WITH s, i, i.timestamp = datetime($timestamp) AS created
                     FOREACH (_ IN CASE WHEN created AND $source = 'neo4j' THEN [1] ELSE [] END |
                         MERGE (sp:SystemPrompt {name: $prompt_name})
                         MERGE (i)-[:OF_PROMPT]->(sp)
                     )
+                    MERGE (u:User {id: $user_id})
+                    ON CREATE SET u.created_at = datetime($timestamp)
+                    SET u.last_seen_at = datetime($timestamp)
+                    MERGE (u)-[:HAS_SESSION]->(s)
                     RETURN created
                     """,
                     session_id=session_id,
@@ -288,6 +298,7 @@ def record_injection(
                     target=target,
                     prompt_name=prompt_name,
                     source=source,
+                    user_id=user_id,
                     content_sha=content_sha(content),
                     content_summary=content_summary,
                     char_count=len(content),
@@ -320,7 +331,11 @@ def main() -> int:
     context_wiped = payload.get("source") in {"clear", "compact"}
 
     prompt_name = "default"
-    fetched, profile, profile_needs_revision = fetch_prompt_bundle_from_neo4j(prompt_name)
+    # The base persona is shared; the adaptations section is this user's.
+    user = resolve_user()
+    fetched, profile, profile_needs_revision = fetch_prompt_bundle_from_neo4j(
+        prompt_name, user.id
+    )
     base = fetched or FALLBACK_BOOTSTRAP_PROMPT
     prompt = compose_prompt(base, profile, profile_needs_revision)
     source = "neo4j" if fetched else "default"
@@ -332,6 +347,7 @@ def main() -> int:
         prompt_name=prompt_name,
         content=prompt,
         source=source,
+        user_id=user.id,
     )
 
     if not is_new_injection and not context_wiped:

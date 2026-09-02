@@ -51,8 +51,11 @@ from project_common import (  # noqa: E402
     injection_window_start,
     link_event_to_project,
     load_mkg_env,
+    merge_user_sessions,
     normalize_tool_failure_payload,
+    project_git_root,
     resolve_project,
+    resolve_user,
 )
 
 MAX_RESPONSE_CHARS = 4000
@@ -116,6 +119,7 @@ def _session_props(
 ) -> dict:
     props = {
         "client": client,
+        "user_id": event_props.get("user_id"),
         "agent_kind": event_props.get("agent_kind"),
         "agent_id": event_props.get("agent_id") or event_session_id,
         "agent_transcript_id": event_props.get("agent_transcript_id"),
@@ -173,7 +177,11 @@ def _append_event(tx, session_id: str, client: str, event_props: dict) -> None:
         # subagent's actor identity (agent_kind=subagent, agent_id, ...) onto the
         # parent Session node. The subagent session is described by
         # _link_subagent_session instead.
-        session_props = {"client": client}
+        session_props = {
+            k: v
+            for k, v in {"client": client, "user_id": event_props.get("user_id")}.items()
+            if v is not None
+        }
     else:
         session_props = _session_props(event_session_id, session_id, client, event_props)
     tx.run(
@@ -387,11 +395,16 @@ def log_event(data: dict, client: str) -> None:
     event_id = f"{client}:{session_id}:{event_name}:{payload_sig}"
     project_root = Path(__file__).resolve().parents[1]
     project = resolve_project(data, project_root)
+    # Who is driving this session. Stamped on the event and the session so
+    # every downstream artifact (learnings, observations, profile) can be
+    # traced to a person; resolved once per firing, never from the payload.
+    user = resolve_user(project_git_root(project), client)
 
     event_props = {
         "event_id": event_id,
         "event_name": event_name,
         "client": client,
+        "user_id": user.id,
         "timestamp": timestamp,
         "project_id": _event_project_id(project, event_name),
         "cwd": data.get("cwd"),
@@ -422,11 +435,34 @@ def log_event(data: dict, client: str) -> None:
     event_props = {k: v for k, v in event_props.items() if v is not None}
     event_session_id = _event_session_id(session_id, event_props)
 
-    uri, user, password, database = _neo4j_config()
-    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+    # SubagentStart/Stop are owned by the parent, so the subagent session they
+    # describe still needs its own project and user links.
+    lifecycle_subagent_id = (
+        str(event_props.get("agent_id"))
+        if event_name in SUBAGENT_HOOK_EVENTS and event_props.get("agent_id")
+        else None
+    )
+
+    uri, db_user, password, database = _neo4j_config()
+    with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(_ensure_constraints)
             session.execute_write(_append_event, session_id, client, event_props)
+            session.execute_write(
+                merge_user_sessions,
+                user,
+                [
+                    sid
+                    for sid in (
+                        session_id,
+                        event_session_id,
+                        lifecycle_subagent_id,
+                        spawned_subagent_id,
+                    )
+                    if sid
+                ],
+                timestamp,
+            )
             if event_name in INJECTION_CONTEXT_EVENTS and session_id != "unknown":
                 session.execute_write(
                     _link_injected_memory, event_session_id, event_id, event_name
@@ -451,13 +487,6 @@ def log_event(data: dict, client: str) -> None:
                         event_id,
                         timestamp,
                     )
-                # SubagentStart/Stop are owned by the parent, so the subagent
-                # session they describe still needs its own project link.
-                lifecycle_subagent_id = (
-                    str(event_props.get("agent_id"))
-                    if event_name in SUBAGENT_HOOK_EVENTS and event_props.get("agent_id")
-                    else None
-                )
                 if lifecycle_subagent_id and lifecycle_subagent_id != session_id:
                     session.execute_write(
                         link_event_to_project,

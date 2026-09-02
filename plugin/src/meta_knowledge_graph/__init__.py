@@ -10,18 +10,28 @@ from meta_knowledge_graph import server
 
 # Credentials/config the setup wizard prompts for. Mirrors the keys the hooks
 # consume (hooks/project_common.CREDENTIAL_ENV_VARS) so both read the same .env.
-# Each entry is (env var, is_secret, default).
+# Each entry is (env var, is_secret, default). MKG_USER_ID's default is
+# detected at prompt time from the signed-in harness account / git identity.
 SETUP_FIELDS = (
     ("NEO4J_URI", False, "bolt://localhost:7687"),
     ("NEO4J_USERNAME", False, "neo4j"),
     ("NEO4J_PASSWORD", True, None),
     ("NEO4J_DATABASE", False, "neo4j"),
+    ("MKG_USER_ID", False, None),
     ("OPENAI_API_KEY", True, None),
     ("ANTHROPIC_API_KEY", True, None),
     ("GEMINI_API_KEY", True, None),
     ("OPENROUTER_API_KEY", True, None),
     ("DIFFBOT_TOKEN", True, None),
 )
+
+
+def _detected_user_id() -> str | None:
+    """Best-effort default for MKG_USER_ID: the email MKG would resolve on
+    its own (harness account, then git); blank when only the OS name is
+    left, so the wizard never bakes a non-email fallback into the file."""
+    user = server.resolve_user(Path.cwd())
+    return user.id if user.source != server.USER_ID_SOURCE_OS else None
 
 
 def _mkg_config_dir() -> Path:
@@ -52,6 +62,8 @@ def _run_setup() -> int:
     print("Press Enter to keep the current value; leave blank to skip a field.\n")
     values: dict[str, str] = {}
     for key, secret, default in SETUP_FIELDS:
+        if key == server.USER_ID_ENV_VAR and not default:
+            default = _detected_user_id()
         current = existing.get(key, "")
         hint = ("set" if current else (default or "")) if secret else (current or default or "")
         suffix = f" [{hint}]" if hint else ""

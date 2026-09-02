@@ -39,7 +39,9 @@ from project_common import (  # noqa: E402
     merge_project_and_session,
     neo4j_config,
     normalize_tool_failure_payload,
+    project_git_root,
     resolve_project,
+    resolve_user,
 )
 
 MAX_TEXT = 4000
@@ -586,8 +588,9 @@ def write_failure_projection(
     session_id: str,
     projection: dict[str, Any],
     timestamp: str,
+    user_id: str,
 ) -> None:
-    merge_project_and_session(tx, project, session_id, timestamp)
+    merge_project_and_session(tx, project, session_id, timestamp, user_id)
     tx.run(
         """
         MATCH (p:Project {id: $project_id})
@@ -597,6 +600,7 @@ def write_failure_projection(
         SET q += $query_row,
             q.project_id = $project_id,
             q.session_id = $session_id,
+            q.user_id = coalesce(q.user_id, $user_id),
             q.updated_at = datetime($timestamp),
             q.last_seen_at = datetime($timestamp)
         MERGE (p)-[:HAS_QUERY_EXECUTION]->(q)
@@ -620,6 +624,7 @@ def write_failure_projection(
         query_row=projection["query"],
         issues=projection["issues"],
         timestamp=timestamp,
+        user_id=user_id,
     )
 
 
@@ -641,9 +646,10 @@ def capture(payload: dict[str, Any]) -> int:
         return 0
 
     session_id = str(payload.get("session_id") or "unknown")
+    user = resolve_user(project_git_root(project))
     timestamp = datetime.now(timezone.utc).isoformat()
-    uri, user, password, database = neo4j_config()
-    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+    uri, db_user, password, database = neo4j_config()
+    with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(ensure_query_failure_schema)
             session.execute_write(
@@ -652,6 +658,7 @@ def capture(payload: dict[str, Any]) -> int:
                 session_id,
                 projection,
                 timestamp,
+                user.id,
             )
     return len(projection["issues"])
 
@@ -837,9 +844,10 @@ def capture_transcript(
     if project is None:
         return 0
 
+    user = resolve_user(project_git_root(project))
     timestamp = datetime.now(timezone.utc).isoformat()
-    uri, user, password, database = neo4j_config()
-    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+    uri, db_user, password, database = neo4j_config()
+    with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
         with driver.session(database=database) as session:
             session.execute_write(ensure_query_failure_schema)
             for projection in projections:
@@ -849,6 +857,7 @@ def capture_transcript(
                     session_id,
                     projection,
                     timestamp,
+                    user.id,
                 )
     return len(projections)
 

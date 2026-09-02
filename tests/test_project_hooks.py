@@ -1292,6 +1292,7 @@ class ProjectHookTests(unittest.TestCase):
                     },
                 ],
             },
+            user_id="tomaz@example.com",
         )
 
         self.assertEqual(len(rows), 1)
@@ -1310,6 +1311,7 @@ class ProjectHookTests(unittest.TestCase):
                     },
                 ],
             },
+            user_id="tomaz@example.com",
         )
 
         self.assertEqual(rows[0]["task_pattern"], "hook pipeline debugging")
@@ -1328,6 +1330,7 @@ class ProjectHookTests(unittest.TestCase):
                     },
                 ],
             },
+            user_id="tomaz@example.com",
         )
 
         self.assertIsNone(rows[0]["task_pattern"])
@@ -1354,7 +1357,7 @@ class ProjectHookTests(unittest.TestCase):
         }
 
         learning_rows = process_project._memory_rows_from_actions(
-            project, "turn", actions
+            project, "turn", actions, user_id="tomaz@example.com"
         )
 
         self.assertEqual(len(learning_rows), 2)
@@ -1381,6 +1384,7 @@ class ProjectHookTests(unittest.TestCase):
             "turn",
             actions,
             llm_model="anthropic/claude-haiku-4-5",
+            user_id="tomaz@example.com",
         )
 
         self.assertEqual(learning_rows[0]["llm_model"], "anthropic/claude-haiku-4-5")
@@ -1395,7 +1399,7 @@ class ProjectHookTests(unittest.TestCase):
         # hook-written memory is always identifiable as `hooks-stop`.
         for mode in ("turn", "session"):
             learning_rows = process_project._memory_rows_from_actions(
-                project, mode, actions
+                project, mode, actions, user_id="tomaz@example.com"
             )
             self.assertEqual(learning_rows[0]["source"], "hooks-stop")
 
@@ -1456,6 +1460,7 @@ class ProjectHookTests(unittest.TestCase):
             None,
             None,
             "2026-06-17T12:00:00+00:00",
+            user_id="tomaz@example.com",
         )
 
         joined = "\n".join(queries)
@@ -1494,6 +1499,7 @@ class ProjectHookTests(unittest.TestCase):
             "Claude OAuth token unavailable",
             None,
             "2026-06-17T12:00:00+00:00",
+            user_id="tomaz@example.com",
         )
 
         self.assertEqual(params[0]["llm_status"], "skipped")
@@ -1535,6 +1541,7 @@ class ProjectHookTests(unittest.TestCase):
             None,
             None,
             "2026-06-17T12:00:00+00:00",
+            user_id="tomaz@example.com",
         )
         update_query = next(q for q in queries if "UPDATED_LEARNING" in q)
         # Ownership guard: user-scoped OR owned by this project — blocks a
@@ -1557,7 +1564,7 @@ class ProjectHookTests(unittest.TestCase):
                 captured["params"] = kwargs
                 return [{"blocked": 3}]
 
-        count = project_common.count_gate_blocked(FakeDriver(), "neo4j", "mkg")
+        count = project_common.count_gate_blocked(FakeDriver(), "neo4j", "mkg", user_id="tomaz@example.com")
         self.assertEqual(count, 3)
         # Blocked user learnings (any project), this project's blocked project
         # learnings, and this project's blocked skill proposals — windowed so
@@ -1591,7 +1598,7 @@ class ProjectHookTests(unittest.TestCase):
         }
 
         learning_rows = process_project._memory_rows_from_actions(
-            project, "turn", actions
+            project, "turn", actions, user_id="tomaz@example.com"
         )
 
         by_scope = {row["scope"]: row for row in learning_rows}
@@ -1619,7 +1626,7 @@ class ProjectHookTests(unittest.TestCase):
         }
 
         learning_rows = process_project._memory_rows_from_actions(
-            project, "turn", actions
+            project, "turn", actions, user_id="tomaz@example.com"
         )
 
         self.assertEqual(learning_rows[0]["status"], "candidate")
@@ -1828,6 +1835,7 @@ class ProjectHookTests(unittest.TestCase):
             query="Unrelated prompt.",
             query_vector=[0.1, 0.2],
             min_similarity=0.7,
+            user_id="tomaz@example.com",
         )
 
         self.assertEqual(rows, [])
@@ -1835,7 +1843,7 @@ class ProjectHookTests(unittest.TestCase):
         # The no-query SessionStart path stays recency-based and ungated.
         captured.clear()
         project_common.fetch_user_learnings(
-            FakeDriver(), "neo4j", query=None, min_similarity=0.7
+            FakeDriver(), "neo4j", query=None, min_similarity=0.7, user_id="tomaz@example.com"
         )
         self.assertEqual(len(captured), 1)
         self.assertIn("last_used_at", captured[0][0])
@@ -1861,7 +1869,7 @@ class ProjectHookTests(unittest.TestCase):
                 return []
 
         project_common.fetch_user_learnings(
-            FakeDriver(), "neo4j", query=None, exclude_session_id="session-1"
+            FakeDriver(), "neo4j", query=None, exclude_session_id="session-1", user_id="tomaz@example.com"
         )
 
         self.assertTrue(captured)
@@ -1890,8 +1898,8 @@ class ProjectHookTests(unittest.TestCase):
                     ]
                 return []
 
-        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query="Tomaz")
-        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query=None)
+        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query="Tomaz", user_id="tomaz@example.com")
+        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query=None, user_id="tomaz@example.com")
 
         self.assertEqual(len(captured), 2)
         for query, _ in captured:
@@ -1911,10 +1919,10 @@ class ProjectHookTests(unittest.TestCase):
                 return []
 
         project_common.fetch_user_learnings(
-            FakeDriver(), "neo4j", query="Tomaz", include_consolidated=True
+            FakeDriver(), "neo4j", query="Tomaz", include_consolidated=True, user_id="tomaz@example.com"
         )
         project_common.fetch_user_learnings(
-            FakeDriver(), "neo4j", query=None, include_consolidated=True
+            FakeDriver(), "neo4j", query=None, include_consolidated=True, user_id="tomaz@example.com"
         )
 
         self.assertTrue(captured)
@@ -1936,8 +1944,8 @@ class ProjectHookTests(unittest.TestCase):
                 captured.append((query, params))
                 return []
 
-        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query="Tomaz")
-        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query=None)
+        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query="Tomaz", user_id="tomaz@example.com")
+        project_common.fetch_user_learnings(FakeDriver(), "neo4j", query=None, user_id="tomaz@example.com")
 
         for query, _ in captured:
             self.assertIn("scope AS scope", query)
@@ -2104,6 +2112,7 @@ class ProjectHookTests(unittest.TestCase):
             project,
             "session-1",
             "2026-06-18T08:52:24+00:00",
+            user_id="tomaz@example.com",
         )
 
         query, params = captured[0]
@@ -2413,7 +2422,7 @@ class ObservationTests(unittest.TestCase):
         ]
 
         rows = process_project._observation_rows_from_items(
-            project, "session-1", self.EVENTS, items, llm_model="model-x"
+            project, "session-1", self.EVENTS, items, llm_model="model-x", user_id="tomaz@example.com"
         )
 
         self.assertEqual(len(rows), process_project.MAX_OBSERVATIONS_PER_WINDOW)
@@ -2432,10 +2441,10 @@ class ObservationTests(unittest.TestCase):
         items = [{"type": "change", "title": "Only"}]
 
         first = process_project._observation_rows_from_items(
-            project, "session-1", self.EVENTS, items
+            project, "session-1", self.EVENTS, items, user_id="tomaz@example.com"
         )
         second = process_project._observation_rows_from_items(
-            project, "session-1", self.EVENTS, items
+            project, "session-1", self.EVENTS, items, user_id="tomaz@example.com"
         )
 
         self.assertEqual(first[0]["id"], second[0]["id"])
@@ -2500,6 +2509,7 @@ class ObservationTests(unittest.TestCase):
             None,
             "2026-07-02T10:06:00+00:00",
             observation_rows=observation_rows,
+            user_id="tomaz@example.com",
         )
 
         joined = "\n".join(queries)
@@ -2549,6 +2559,7 @@ class ObservationTests(unittest.TestCase):
             "no key",
             None,
             "2026-07-02T10:06:00+00:00",
+            user_id="tomaz@example.com",
         )
 
         joined = "\n".join(queries)
