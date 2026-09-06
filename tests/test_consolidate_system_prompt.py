@@ -315,10 +315,16 @@ class UserProfileSnapshotTests(unittest.TestCase):
         self.assertIn("l.consolidated_at = datetime($now)", fold_query)
         self.assertIn("FOLDED_LEARNING", fold_query)
         self.assertNotIn("l.status", fold_query)
+        # The profile serves the fact now: recall pre-filters the flag
+        # in-index. The embedding is kept so the extractor and the gate
+        # still deduplicate against the folded fact.
+        self.assertIn("l.consolidated = true", fold_query)
+        self.assertNotIn("l.embedding", fold_query)
         unfold_query = queries[2]
         self.assertIn("l.unfolded_at = datetime($now)", unfold_query)
         self.assertIn("UNFOLDED_LEARNING", unfold_query)
         self.assertNotIn("l.status", unfold_query)
+        self.assertNotIn("consolidated = true", unfold_query)
         self.assertEqual(params[2]["unfolded_ids"], ["learning:user:old"])
 
     def test_no_folded_or_unfolded_ids_runs_single_query(self) -> None:

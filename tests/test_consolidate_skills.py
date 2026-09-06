@@ -927,6 +927,37 @@ class SkillSafetyScreenTests(unittest.TestCase):
         self.assertIn("DERIVED_FROM", activation_query)
         self.assertIn("INFORMED_BY", activation_query)
 
+    def test_activation_takes_the_source_learnings_out_of_recall(self) -> None:
+        # The live skill serves the derived learnings from now on, so they are
+        # flagged consolidated (recall pre-filters it in-index); the embedding
+        # stays so dedup still sees them. Error learnings only cited in
+        # Pitfalls (INFORMED_BY) stay live.
+        driver = _RecordingDriver(results=[[dict(PENDING)]])
+        with patch.object(
+            consolidate_skills, "llm_complete", return_value=SAFETY_PASS
+        ), patch.object(
+            consolidate_skills, "embed_texts", return_value=[[0.1]]
+        ):
+            consolidate_skills.activate_pending_proposals(
+                driver, "neo4j", "proj", "2026-08-29T12:00:00Z", mode="auto"
+            )
+        activation_query = driver.calls[1][0]
+        derived_block = activation_query.split("UNWIND coalesce(v.derived_from, [])")[1]
+        derived_block = derived_block.split("UNWIND coalesce(v.informed_by, [])")[0]
+        self.assertIn("l.consolidated = true", derived_block)
+        self.assertNotIn("l.embedding", derived_block)
+        self.assertIn("l.compiled_at = coalesce(l.compiled_at, datetime($now))", derived_block)
+        self.assertIn("l.compiled_skill_id = sk.id", derived_block)
+        informed_block = activation_query.split("UNWIND coalesce(v.informed_by, [])")[1]
+        self.assertNotIn("consolidated", informed_block)
+        # A proposal that is only recorded (create / screen-pass / block)
+        # must not flag a learning: nothing serves it yet.
+        import inspect
+
+        for name in ("write_create_proposal", "write_update_proposal", "apply_skill_screen_pass", "apply_skill_block"):
+            with self.subTest(fn=name):
+                self.assertNotIn("l.consolidated", inspect.getsource(getattr(consolidate_skills, name)))
+
     def test_blocked_create_tombstones_the_candidate_skill(self) -> None:
         driver = _RecordingDriver(results=[[dict(PENDING)]])
         with patch.object(

@@ -779,7 +779,7 @@ def create_mcp_server(
         statuses: list[str],
         limit: int,
         project_id: Optional[str] = None,
-        exclude_consolidated_user_facts: bool = False,
+        exclude_consolidated: bool = False,
         user_id: Optional[str] = None,
     ) -> list[dict]:
         keyword_query = _hybrid_keyword_query(query_text)
@@ -796,17 +796,24 @@ def create_mcp_server(
             else ""
         )
         filters = ["true"]
-        if exclude_consolidated_user_facts:
-            filters.append(
-                "(node.consolidated_at IS NULL "
-                "OR coalesce(node.updated_at, node.created_at) > node.consolidated_at)"
-            )
         # User facts are one person's: filter after the index walk (the
-        # vector index pre-filters only project_id / scope) so another
-        # user's memory never rides along.
+        # vector index pre-filters only project_id / scope / consolidated)
+        # so another user's memory never rides along.
         if scope == "user":
             filters.append("node.user_id = $user_id")
         post_filter = "\n          AND ".join(filters)
+        # Memory something higher-order already serves — a user fact folded
+        # into the profile, a learning compiled into a live skill — carries
+        # consolidated = true. The vector branch pre-filters it in-index
+        # (Neo4j filtered vector search); the fulltext branch, which has no
+        # pre-filter, applies the same predicate afterwards. The embedding
+        # stays on the node for the extractor's and the gate's dedup.
+        consolidated_filter = "AND node.consolidated = false" if exclude_consolidated else ""
+        fulltext_post_filter = post_filter
+        if exclude_consolidated:
+            fulltext_post_filter = (
+                post_filter + "\n          AND coalesce(node.consolidated, false) = false"
+            )
         rank_limit = max(1, int(limit))
         params = {
             "project_id": project_id,
@@ -829,6 +836,7 @@ def create_mcp_server(
                     FOR $query_vector
                     WHERE node.scope = $scope
                       {project_filter}
+                      {consolidated_filter}
                     LIMIT $rank_limit
                 ) SCORE AS raw_score
                 WHERE node.status IN $statuses
@@ -853,7 +861,7 @@ def create_mcp_server(
                     WHERE node:Learning
                       AND node.scope = $scope
                       AND node.status IN $statuses
-                      AND {post_filter}
+                      AND {fulltext_post_filter}
                     WITH node, raw_score
                     ORDER BY raw_score DESC
                     LIMIT $rank_limit
@@ -893,7 +901,7 @@ def create_mcp_server(
             WHERE node:Learning
               AND node.scope = $scope
               AND node.status IN $statuses
-              AND {post_filter}
+              AND {fulltext_post_filter}
             WITH node, raw_score
             ORDER BY raw_score DESC
             LIMIT $rank_limit
@@ -1234,6 +1242,7 @@ def create_mcp_server(
                     statuses=resolved_statuses,
                     limit=limit,
                     project_id=resolved_pid,
+                    exclude_consolidated=True,
                 )
 
             if not learnings:
@@ -1242,6 +1251,7 @@ def create_mcp_server(
                     MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
                     WHERE l.status IN $statuses
                       AND l.scope = 'project'
+                      AND coalesce(l.consolidated, false) = false
                     RETURN l.id AS id, l.text AS text, l.status AS status,
                            l.confidence AS confidence, l.task_pattern AS task_pattern,
                            0.0 AS score
@@ -1265,7 +1275,7 @@ def create_mcp_server(
                     scope="user",
                     statuses=resolved_statuses,
                     limit=limit,
-                    exclude_consolidated_user_facts=True,
+                    exclude_consolidated=True,
                     user_id=user_id,
                 )
 
@@ -1274,8 +1284,7 @@ def create_mcp_server(
                     """
                     MATCH (l:Learning {scope: 'user', user_id: $user_id})
                     WHERE l.status IN $statuses
-                      AND (l.consolidated_at IS NULL
-                           OR coalesce(l.updated_at, l.created_at) > l.consolidated_at)
+                      AND coalesce(l.consolidated, false) = false
                     RETURN l.id AS id, l.text AS text, l.status AS status,
                            l.confidence AS confidence, l.task_pattern AS task_pattern,
                            0.0 AS score
@@ -1295,12 +1304,17 @@ def create_mcp_server(
                 if item.get("id")
             ]
             if ids:
+                # An on-demand pull by the agent: retrieval_count is this
+                # tool's own tally, inject_count belongs to the hooks, and
+                # use_count stays the combined count both paths bump.
                 timestamp = _now_iso()
                 await _execute_query(
                     """
                     MATCH (l:Learning) WHERE l.id IN $ids
                     SET l.last_used_at = datetime($timestamp),
-                        l.use_count = coalesce(l.use_count, 0) + 1
+                        l.use_count = coalesce(l.use_count, 0) + 1,
+                        l.last_retrieved_at = datetime($timestamp),
+                        l.retrieval_count = coalesce(l.retrieval_count, 0) + 1
                     """,
                     ids=ids,
                     timestamp=timestamp,
@@ -1769,6 +1783,9 @@ def create_mcp_server(
                 MERGE (l:Learning {id: $row_id})
                 ON CREATE SET l.created_at = datetime($timestamp),
                               l.use_count = 0,
+                              l.inject_count = 0,
+                              l.retrieval_count = 0,
+                              l.consolidated = false,
                               l.support_count = 0
                 SET l.text = $text,
                     l.summary = $text,
@@ -1792,6 +1809,10 @@ def create_mcp_server(
                     l.last_source = $source,
                     l.project_id = $project_id,
                     l.updated_at = datetime($timestamp),
+                    // A write that bumps updated_at re-derives the recall
+                    // flag: compiled stays served by its skill, a folded
+                    // user fact re-enters recall and the profile backlog.
+                    l.consolidated = (l.compiled_at IS NOT NULL),
                     l.support_count = coalesce(l.support_count, 0) + 1,
                     l.confidence = CASE
                         WHEN coalesce(l.confidence, 0.0) < $confidence THEN $confidence
@@ -2075,6 +2096,7 @@ def create_mcp_server(
                     l.reviewed_by = 'human', l.reviewed_at = datetime($ts),
                     l.reviewed_by_user_id = $user_id,
                     l.consistency_status = 'human_reviewed',
+                    l.consolidated = (l.compiled_at IS NOT NULL),
                     l.updated_at = datetime($ts)
                 WITH l OPTIONAL MATCH (l)-[r:CONTRADICTS]->() DELETE r
                 """,
@@ -2094,6 +2116,7 @@ def create_mcp_server(
                     l.reviewed_by = 'human', l.reviewed_at = datetime($ts),
                     l.reviewed_by_user_id = $user_id,
                     l.consistency_status = 'human_reviewed',
+                    l.consolidated = (l.compiled_at IS NOT NULL),
                     l.updated_at = datetime($ts)
                 WITH l OPTIONAL MATCH (l)-[r:CONTRADICTS]->() DELETE r
                 """,
@@ -2124,6 +2147,7 @@ def create_mcp_server(
                     c.reviewed_by = 'human', c.reviewed_at = datetime($ts),
                     c.reviewed_by_user_id = $user_id,
                     c.consistency_status = 'human_reviewed',
+                    c.consolidated = (c.compiled_at IS NOT NULL),
                     c.updated_at = datetime($ts)
                 WITH c
                 OPTIONAL MATCH (c)-[r:CONTRADICTS]->(old:Learning)
@@ -2639,8 +2663,13 @@ def create_mcp_server(
         stamps the version ``accepted``, creates the ``DERIVED_FROM``
         (learnings) and ``INFORMED_BY`` (error learnings) provenance edges,
         clears any ``needs_revision`` flag, and embeds the skill so it enters
-        ``skill_search``. Rejection stamps the version ``rejected`` and never
-        touches a learning — the knowledge layer only ever grows.
+        ``skill_search``. The ``DERIVED_FROM`` learnings are stamped
+        ``compiled_at`` and flagged ``consolidated = true``: the skill serves
+        that knowledge now, so recall pre-filters them out in-index while
+        their embedding stays for deduplication. Retiring a skill clears the
+        flag on the learnings no other live skill derives from. Rejection
+        stamps the version ``rejected`` and never touches a learning — the
+        knowledge layer only ever grows.
         """
         action = (action or "").strip().lower()
         allowed = {"approve", "reject", "edit_approve", "retire"}
@@ -2678,6 +2707,22 @@ def create_mcp_server(
                 """,
                 id=clean_id,
                 ts=timestamp,
+            )
+            # Nothing serves the retired skill's knowledge any more: every
+            # source learning no other live skill also derives from returns
+            # to recall (the flag comes off; the embedding was never removed).
+            await _execute_query(
+                """
+                MATCH (sk:Skill {id: $id})-[:DERIVED_FROM]->(l:Learning)
+                WHERE NOT EXISTS {
+                    MATCH (other:Skill {status: 'approved'})-[:DERIVED_FROM]->(l)
+                    WHERE other.id <> sk.id
+                  }
+                SET l.consolidated = false,
+                    l.compiled_at = null,
+                    l.compiled_skill_id = null
+                """,
+                id=clean_id,
             )
         else:
             pending = await _execute_query_single(
@@ -2772,6 +2817,11 @@ def create_mcp_server(
                         MATCH (l:Learning {id: lid})
                         MERGE (sk)-[d:DERIVED_FROM]->(l)
                         ON CREATE SET d.created_at = datetime($ts)
+                        // The skill serves this knowledge now: recall
+                        // pre-filters the flag in-index (embedding kept).
+                        SET l.consolidated = true,
+                            l.compiled_at = coalesce(l.compiled_at, datetime($ts)),
+                            l.compiled_skill_id = sk.id
                     }
                     CALL (sk, v) {
                         UNWIND coalesce(v.informed_by, []) AS eid

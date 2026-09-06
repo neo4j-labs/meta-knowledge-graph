@@ -104,6 +104,15 @@ def main() -> int:
     prompt = payload.get("prompt") or payload.get("last_assistant_message") or ""
     query_vector = embed_text(prompt) if prompt else None
     context_scope = context_scope_for_hook(hook_event)
+    if prompt and query_vector is None:
+        # Prompt-time recall is vector-only and gated on cosine similarity,
+        # so with no embedding there is nothing to rank against the floor.
+        # Say so on stderr instead of silently degrading to a keyword match.
+        print(
+            "[inject_project_context] prompt embedding unavailable; "
+            "relevance-gated recall skipped for this prompt",
+            file=sys.stderr,
+        )
     user_learnings: list[dict] = []
     learnings: list[dict] = []
     observations: list[dict] = []
@@ -165,8 +174,9 @@ def main() -> int:
                             driver, database, project_id=project.id
                         )
                 else:
-                    # Relevance-gated: only memory clearing the cosine floor
-                    # (MKG_INJECT_MIN_SIMILARITY) rides along with a prompt.
+                    # Relevance-gated and vector-only: only memory clearing the
+                    # cosine floor (MKG_INJECT_MIN_SIMILARITY) rides along with
+                    # a prompt; no keyword or recency padding.
                     learnings = fetch_project_learnings(
                         driver,
                         database,

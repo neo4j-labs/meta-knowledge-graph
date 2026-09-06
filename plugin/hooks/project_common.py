@@ -22,11 +22,23 @@ MAX_LEARNING_TEXT = 500
 HYBRID_RRF_K = 60.0
 HYBRID_KEYWORD_TERMS = 16
 # Relevance floor for prompt-time injection, in raw cosine units (matching
-# MKG_TASK_PATTERN_SIMILARITY_THRESHOLD). Only the vector branch is gated — the
-# keyword branch is a lexical match on the prompt's own terms, and Lucene
-# scores have no comparable scale. The Neo4j cosine index reports scores as
-# (1 + cos) / 2, so the floor is converted at query-build time.
-INJECT_MIN_SIMILARITY = 0.7
+# MKG_TASK_PATTERN_SIMILARITY_THRESHOLD). Gated recall is vector-only: a
+# keyword hit carries a Lucene score with no cosine scale, so it can neither
+# clear nor fail the floor and is not consulted at all. Without a prompt
+# embedding there is nothing to gate, so nothing is injected. Learnings that
+# have been folded into the user profile or compiled into a skill keep their
+# embedding (the extractor and the gate still deduplicate against them) but
+# carry ``consolidated = true``, which the vector index pre-filters out
+# in-index, so they cannot come back through this path. The Neo4j cosine
+# index reports scores as (1 + cos) / 2, so the floor is converted at
+# query-build time.
+INJECT_MIN_SIMILARITY = 0.75
+# Filter properties declared on the :Learning vector index (``WITH [...]`` at
+# CREATE time). Neo4j's filtered vector search (SEARCH ... WHERE) accepts only
+# declared properties in its predicate, so adding one here means recreating
+# the index — consistency_gate.ensure_memory_vector_indexes does that. The
+# ``consolidated`` flag is what keeps served-elsewhere memory out of recall.
+LEARNING_VECTOR_FILTER_PROPERTIES = ("project_id", "scope", "status", "consolidated")
 DEFAULT_LLM_MODEL = "gpt-5.4-mini"
 DEFAULT_CLAUDE_LLM_MODEL = "anthropic/claude-haiku-4-5"
 ANTHROPIC_OAUTH_TOKEN_PREFIX = "sk-ant-oat"
@@ -1432,6 +1444,47 @@ def _execute_query_single(driver, database: str, query: str, **params):
     return records[0] if records else None
 
 
+def ensure_learning_recall_flags(driver, database: str) -> None:
+    """Backfill ``consolidated`` onto learnings written before the flag existed.
+
+    ``consolidated`` is the recall gate: ``true`` while a learning's knowledge
+    is served by something higher-order — a user fact folded into the profile
+    and unchanged since, or a learning compiled into a live skill. The vector
+    index pre-filters on it in-index, and a node where the property is
+    missing fails that predicate and silently drops out of recall, so every
+    learning must carry a value. New learnings are born ``false``; the fold
+    and activation paths set ``true``; every write that bumps ``updated_at``
+    re-derives it as ``compiled_at IS NOT NULL`` (a compiled learning stays
+    served by its skill, a folded user fact re-enters the profile backlog and
+    recall). This derives the same value once for rows that predate the flag
+    and is a no-op afterwards.
+    """
+    _execute_query(
+        driver,
+        database,
+        """
+        MATCH (l:Learning)
+        WHERE l.consolidated IS NULL
+        OPTIONAL MATCH (sk:Skill {status: 'approved'})-[d:DERIVED_FROM]->(l)
+        WITH l, collect(sk.id) AS skill_ids, min(d.created_at) AS compiled_since
+        SET l.compiled_at = CASE
+                WHEN size(skill_ids) = 0 THEN l.compiled_at
+                ELSE coalesce(l.compiled_at, compiled_since, datetime())
+            END,
+            l.compiled_skill_id = CASE
+                WHEN size(skill_ids) = 0 THEN l.compiled_skill_id
+                ELSE coalesce(l.compiled_skill_id, skill_ids[0])
+            END,
+            l.consolidated = size(skill_ids) > 0
+                OR coalesce(
+                    l.consolidated_at IS NOT NULL
+                    AND coalesce(l.updated_at, l.created_at) <= l.consolidated_at,
+                    false
+                )
+        """,
+    )
+
+
 def ensure_project_schema(tx) -> None:
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE")
     tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:Session) REQUIRE s.session_id IS UNIQUE")
@@ -2086,7 +2139,8 @@ def snapshot_and_update_system_prompt(
             MATCH (l:Learning {id: lid})
             SET l.consolidated_at = datetime($now),
                 l.consolidated_prompt_version = $new_version,
-                l.last_consolidated_model = $model
+                l.last_consolidated_model = $model,
+                l.consolidated = true
             MERGE (nv)-[:FOLDED_LEARNING]->(l)
             MERGE (sp)-[:CONSOLIDATED]->(l)
             """,
@@ -2193,7 +2247,11 @@ def snapshot_and_update_user_profile(
     id) and hangs off the ``(:User)`` node. Folded learnings are stamped
     ``consolidated_at`` (the same property the injection paths already
     exclude on, so a folded fact drops out of per-session user-learning
-    lists); retracted learnings the revision removed are stamped
+    lists) and flagged ``consolidated = true``: the profile now carries the
+    fact in every session, so recall pre-filters the learning out in-index —
+    the embedding stays, so the extractor and the gate keep deduplicating
+    against it, and an update to the fact resets the flag and re-enters the
+    backlog. Retracted learnings the revision removed are stamped
     ``unfolded_at`` so they leave the stale backlog. Any ``needs_revision``
     flag is cleared: the new version *is* the repair."""
     record = tx.run(
@@ -2262,7 +2320,10 @@ def snapshot_and_update_user_profile(
             MATCH (l:Learning {id: lid})
             SET l.consolidated_at = datetime($now),
                 l.consolidated_profile_version = $new_version,
-                l.last_consolidated_model = $model
+                l.last_consolidated_model = $model,
+                // Served by the profile from now on: recall pre-filters the
+                // flag in-index; the embedding stays so dedup still sees it.
+                l.consolidated = true
             MERGE (nv)-[:FOLDED_LEARNING]->(l)
             MERGE (up)-[:CONSOLIDATED]->(l)
             """,
@@ -2353,6 +2414,7 @@ def _ranked_vector_branch(
     label: str,
     vector_index: str,
     project_filter: str,
+    consolidated_filter: str,
     post_filter: str,
 ) -> str:
     return f"""
@@ -2362,6 +2424,7 @@ def _ranked_vector_branch(
             FOR $query_vector
             WHERE node.scope = $scope
               {project_filter}
+              {consolidated_filter}
             LIMIT $rank_limit
         ) SCORE AS raw_score
         WHERE node.status IN $statuses
@@ -2419,26 +2482,38 @@ def _fetch_memory_hybrid(
     limit: int,
     project_id: str | None = None,
     exclude_session_id: str | None = None,
-    exclude_consolidated_user_facts: bool = False,
+    exclude_consolidated: bool = False,
     min_similarity: float | None = None,
     user_id: str | None = None,
 ) -> list[dict[str, Any]] | None:
     """Hybrid (vector + keyword RRF) retrieval over one memory label.
 
-    ``min_similarity`` is a raw-cosine floor applied to the vector branch only;
-    the keyword branch stays ungated because a lexical hit on the prompt's own
-    terms is its own relevance signal.
+    ``min_similarity`` (raw cosine) turns the search vector-only and gated: a
+    keyword hit has no cosine score to measure against the floor, so the
+    fulltext branch is skipped entirely, and without a query embedding there
+    is no retrieval at all (``None``). Ungated callers — the extractor's
+    dedup shortlist, ``project_get_context`` — keep the full hybrid.
+
+    ``exclude_consolidated`` drops memory something higher-order already
+    serves — a user fact folded into the profile, a learning compiled into a
+    live skill (``consolidated = true``). On the vector branch that is an
+    in-index pre-filter (Neo4j filtered vector search), so the walk skips
+    such nodes instead of spending the short top-k on them; the fulltext
+    branch, which has no pre-filter, applies the same predicate afterwards.
+    The embedding stays on the node either way: the extractor and the gate
+    pass ``False`` and keep deduplicating against consolidated memory.
 
     A user-scoped search is restricted to ``user_id``'s own facts. The filter
     is applied after the index walk (the vector index pre-filters only on
-    ``project_id`` / ``scope``), so it never leaks another user's memory.
+    ``project_id`` / ``scope`` / ``consolidated``), so it never leaks another
+    user's memory.
 
     Returns ``None`` when no retrieval query could run — no usable signal, or
     the hybrid queries failed (older databases without the indexes) — and a
     list, possibly empty, when a query actually executed. Callers use the
     difference to tell "searched and found nothing" from "could not search".
     """
-    keyword_query = _hybrid_keyword_query(query)
+    keyword_query = "" if min_similarity is not None else _hybrid_keyword_query(query)
     if not query_vector and not keyword_query:
         return None
 
@@ -2456,14 +2531,17 @@ def _fetch_memory_hybrid(
         "NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id}) "
         "AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))"
     ]
-    if exclude_consolidated_user_facts:
-        filters.append(
-            "(node.consolidated_at IS NULL "
-            "OR coalesce(node.updated_at, node.created_at) > node.consolidated_at)"
-        )
     if scope == "user":
         filters.append("node.user_id = $user_id")
     post_filter = "\n          AND ".join(filters)
+    consolidated_filter = "AND node.consolidated = false" if exclude_consolidated else ""
+    fulltext_post_filter = post_filter
+    if exclude_consolidated:
+        # No pre-filter on a fulltext index; coalesce keeps a row written
+        # before the flag existed from vanishing on a null comparison.
+        fulltext_post_filter = (
+            post_filter + "\n          AND coalesce(node.consolidated, false) = false"
+        )
     rank_limit = max(1, limit)
 
     params = {
@@ -2489,6 +2567,7 @@ def _fetch_memory_hybrid(
                 label=label,
                 vector_index=vector_index,
                 project_filter=project_filter,
+                consolidated_filter=consolidated_filter,
                 post_filter=post_filter,
             )
         ]
@@ -2498,7 +2577,7 @@ def _fetch_memory_hybrid(
                     label=label,
                     fulltext_index=fulltext_index,
                     project_match=project_match,
-                    post_filter=post_filter,
+                    post_filter=fulltext_post_filter,
                 )
             )
         query_text = f"""
@@ -2529,7 +2608,7 @@ def _fetch_memory_hybrid(
                     label=label,
                     fulltext_index=fulltext_index,
                     project_match=project_match,
-                    post_filter=post_filter,
+                    post_filter=fulltext_post_filter,
                 )}
             }}
             WITH node,
@@ -2562,13 +2641,42 @@ def fetch_project_learnings(
     exclude_session_id: str | None = None,
     query_vector: list[float] | None = None,
     min_similarity: float | None = None,
+    include_consolidated: bool = False,
 ) -> list[dict[str, Any]]:
-    """``min_similarity`` (raw cosine) makes recall relevance-gated: below-floor
-    vector hits are dropped, and when retrieval ran but nothing survived, the
-    result is empty instead of falling back to recency padding. Callers that
-    deduplicate against this list (the extractor) leave it ``None``."""
+    """``include_consolidated`` keeps learnings already compiled into a live
+    skill (``consolidated = true``) in the result. Injection leaves it
+    ``False`` — the skill serves that knowledge — while the extractor passes
+    ``True`` because this list is what it deduplicates against.
+
+    ``min_similarity`` (raw cosine) makes recall relevance-gated and
+    vector-only: below-floor hits are dropped, the fulltext and recency
+    fallbacks are never consulted, and without a query embedding nothing is
+    returned at all. Callers that deduplicate against this list (the
+    extractor) leave it ``None`` and get the full hybrid with fallbacks."""
     statuses = statuses or ["approved", "candidate"]
     if query and query.strip():
+        if min_similarity is not None:
+            if not query_vector:
+                # No embedding, no floor to clear: inject nothing rather
+                # than an ungated keyword match.
+                return []
+            rows = _fetch_memory_hybrid(
+                driver,
+                database,
+                label="Learning",
+                query=query,
+                query_vector=query_vector,
+                scope="project",
+                statuses=statuses,
+                limit=limit,
+                project_id=project_id,
+                exclude_session_id=exclude_session_id,
+                exclude_consolidated=not include_consolidated,
+                min_similarity=min_similarity,
+            )
+            # Nothing cleared the bar, or the vector index is unavailable:
+            # inject nothing rather than padding from the fallbacks.
+            return rows or []
         rows = _fetch_memory_hybrid(
             driver,
             database,
@@ -2580,14 +2688,10 @@ def fetch_project_learnings(
             limit=limit,
             project_id=project_id,
             exclude_session_id=exclude_session_id,
-            min_similarity=min_similarity,
+            exclude_consolidated=not include_consolidated,
         )
         if rows:
             return rows
-        if rows is not None and min_similarity is not None:
-            # Retrieval ran and nothing cleared the relevance bar: inject
-            # nothing rather than padding the context from the fallbacks.
-            return []
         # Legacy fulltext fallback for older databases or invalid vector indexes.
         try:
             records = _execute_query(
@@ -2599,6 +2703,7 @@ def fetch_project_learnings(
                 MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(node)
                 WHERE node.status IN $statuses
                   AND node.scope = 'project'
+                  AND ($include_consolidated OR coalesce(node.consolidated, false) = false)
                   AND ($session_id IS NULL OR (
                        NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                        AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -2623,15 +2728,13 @@ def fetch_project_learnings(
                 statuses=statuses,
                 limit=limit,
                 session_id=exclude_session_id,
+                include_consolidated=include_consolidated,
             )
             rows = [dict(record) for record in records]
             if rows:
                 return rows
         except Exception:
             pass
-        if min_similarity is not None:
-            # Relevance-gated recall never degrades to the recency tail.
-            return []
 
     records = _execute_query(
         driver,
@@ -2640,6 +2743,7 @@ def fetch_project_learnings(
         MATCH (:Project {id: $project_id})-[:HAS_LEARNING]->(l:Learning)
         WHERE l.status IN $statuses
           AND l.scope = 'project'
+          AND ($include_consolidated OR coalesce(l.consolidated, false) = false)
           AND ($session_id IS NULL OR (
                NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                AND NOT (l)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -2662,6 +2766,7 @@ def fetch_project_learnings(
         statuses=statuses,
         limit=limit,
         session_id=exclude_session_id,
+        include_consolidated=include_consolidated,
     )
     return [dict(record) for record in records]
 
@@ -2689,17 +2794,38 @@ def fetch_user_learnings(
     active session.
 
     ``include_consolidated`` selects between the two consumers. Context
-    injection leaves it ``False``: a fact already folded into the persona is
+    injection leaves it ``False``: a fact already folded into the persona
+    (``consolidated = true``, pre-filtered in-index on the vector branch) is
     live in the system prompt, so re-injecting it only burns context. The
     memory extractor passes ``True``, because its copy of this list is what it
     deduplicates *against* — hiding a consolidated fact there would make it
     look brand new and get it re-created on the next mention.
 
-    ``min_similarity`` (raw cosine) makes recall relevance-gated, exactly as in
-    ``fetch_project_learnings``: injection passes it, the extractor never does.
+    ``min_similarity`` (raw cosine) makes recall relevance-gated and
+    vector-only, exactly as in ``fetch_project_learnings``: injection passes
+    it, the extractor never does. The no-query ``SessionStart`` path is not a
+    search and stays recency-based regardless.
     """
     statuses = statuses or ["approved", "candidate"]
     if query and query.strip():
+        if min_similarity is not None:
+            if not query_vector:
+                return []
+            rows = _fetch_memory_hybrid(
+                driver,
+                database,
+                label="Learning",
+                query=query,
+                query_vector=query_vector,
+                scope="user",
+                statuses=statuses,
+                limit=limit,
+                exclude_session_id=exclude_session_id,
+                exclude_consolidated=not include_consolidated,
+                min_similarity=min_similarity,
+                user_id=user_id,
+            )
+            return rows or []
         rows = _fetch_memory_hybrid(
             driver,
             database,
@@ -2710,16 +2836,11 @@ def fetch_user_learnings(
             statuses=statuses,
             limit=limit,
             exclude_session_id=exclude_session_id,
-            exclude_consolidated_user_facts=not include_consolidated,
-            min_similarity=min_similarity,
+            exclude_consolidated=not include_consolidated,
             user_id=user_id,
         )
         if rows:
             return rows
-        if rows is not None and min_similarity is not None:
-            # Retrieval ran and nothing cleared the relevance bar: inject
-            # nothing rather than padding the context from the fallbacks.
-            return []
         try:
             records = _execute_query(
                 driver,
@@ -2730,9 +2851,7 @@ def fetch_user_learnings(
                 WHERE node.scope = 'user'
                   AND node.user_id = $user_id
                   AND node.status IN $statuses
-                  AND ($include_consolidated
-                       OR node.consolidated_at IS NULL
-                       OR coalesce(node.updated_at, node.created_at) > node.consolidated_at)
+                  AND ($include_consolidated OR coalesce(node.consolidated, false) = false)
                   AND ($session_id IS NULL OR (
                        NOT (node)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                        AND NOT (node)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -2760,9 +2879,6 @@ def fetch_user_learnings(
                 return rows
         except Exception:
             pass
-        if min_similarity is not None:
-            # Relevance-gated recall never degrades to the recency tail.
-            return []
 
     records = _execute_query(
         driver,
@@ -2771,9 +2887,7 @@ def fetch_user_learnings(
         MATCH (l:Learning {scope: 'user'})
         WHERE l.user_id = $user_id
           AND l.status IN $statuses
-          AND ($include_consolidated
-               OR l.consolidated_at IS NULL
-               OR coalesce(l.updated_at, l.created_at) > l.consolidated_at)
+          AND ($include_consolidated OR coalesce(l.consolidated, false) = false)
           AND ($session_id IS NULL OR (
                NOT (l)-[:INJECTED_IN]->(:Session {session_id: $session_id})
                AND NOT (l)-[:FROM_SESSION]->(:Session {session_id: $session_id})))
@@ -2930,6 +3044,14 @@ def mark_injected_in_session(
 
 
 def mark_learnings_used(driver, database: str, learning_ids: list[str]) -> None:
+    """Count a hook injection on each served learning.
+
+    ``inject_count`` / ``last_injected_at`` record how often a learning rode
+    into context through the SessionStart or UserPromptSubmit hook;
+    ``retrieval_count`` / ``last_retrieved_at`` (written by the MCP
+    ``project_get_context`` tool) count on-demand pulls by an agent; and
+    ``use_count`` / ``last_used_at`` remain the combined tally both paths
+    bump, which the recency fallbacks order on."""
     if not learning_ids:
         return
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -2940,7 +3062,9 @@ def mark_learnings_used(driver, database: str, learning_ids: list[str]) -> None:
         MATCH (l:Learning)
         WHERE l.id IN $learning_ids
         SET l.last_used_at = datetime($timestamp),
-            l.use_count = coalesce(l.use_count, 0) + 1
+            l.use_count = coalesce(l.use_count, 0) + 1,
+            l.last_injected_at = datetime($timestamp),
+            l.inject_count = coalesce(l.inject_count, 0) + 1
         """,
         learning_ids=learning_ids,
         timestamp=timestamp,

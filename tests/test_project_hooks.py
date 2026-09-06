@@ -2137,7 +2137,7 @@ class ProjectHookTests(unittest.TestCase):
         self.assertEqual(params["query_vector"], [0.1, 0.2])
         self.assertEqual(params["search_query"], "use rest for the api and keep graph schema stable")
 
-    def test_prompt_injection_gates_vector_branch_on_cosine_floor(self) -> None:
+    def test_prompt_injection_is_vector_only_and_gated_on_cosine_floor(self) -> None:
         captured: list[tuple[str, dict]] = []
 
         class FakeDriver:
@@ -2151,16 +2151,153 @@ class ProjectHookTests(unittest.TestCase):
             project_id="mkg",
             query="How do we deploy the graph schema?",
             query_vector=[0.1, 0.2],
-            min_similarity=0.7,
+            min_similarity=0.75,
         )
 
-        self.assertTrue(captured)
+        self.assertEqual(len(captured), 1)
         query, params = captured[0]
-        # The floor gates only the vector branch; the keyword branch is a
-        # lexical match with no comparable score scale.
+        # A keyword hit has no cosine score to measure against the floor, so
+        # gated recall never consults the fulltext branch at all.
+        self.assertIn("VECTOR INDEX project_learning_vector", query)
         self.assertEqual(query.count("raw_score >= $min_vector_score"), 1)
+        self.assertNotIn("db.index.fulltext.queryNodes", query)
+        self.assertNotIn("UNION ALL", query)
         # Env knob is raw cosine; the index reports (1 + cos) / 2.
-        self.assertAlmostEqual(params["min_vector_score"], 0.85)
+        self.assertAlmostEqual(params["min_vector_score"], 0.875)
+        # Memory a skill or the profile already serves is excluded inside the
+        # index walk (filtered vector search), not post-filtered out of a
+        # short top-k.
+        search_clause = query.split("SCORE AS raw_score")[0]
+        self.assertIn("AND node.consolidated = false", search_clause)
+
+    def test_extractor_recall_keeps_consolidated_learnings_for_dedup(self) -> None:
+        # The extractor deduplicates against this list, so a learning a skill
+        # already serves must stay visible — hidden, a restatement looks new.
+        # The embedding is never removed; only the flag gates recall.
+        captured: list[tuple[str, dict]] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        project_common.fetch_project_learnings(
+            FakeDriver(),
+            "neo4j",
+            project_id="mkg",
+            query="How do we deploy the graph schema?",
+            query_vector=[0.1, 0.2],
+            include_consolidated=True,
+        )
+        hybrid, *fallbacks = captured
+        self.assertNotIn("consolidated", hybrid[0])
+        for query, params in fallbacks:
+            self.assertIn("$include_consolidated OR coalesce(", query)
+            self.assertIs(params["include_consolidated"], True)
+
+        captured.clear()
+        project_common.fetch_project_learnings(
+            FakeDriver(),
+            "neo4j",
+            project_id="mkg",
+            query="How do we deploy the graph schema?",
+            query_vector=[0.1, 0.2],
+        )
+        hybrid, *fallbacks = captured
+        search_clause = hybrid[0].split("SCORE AS raw_score")[0]
+        self.assertIn("AND node.consolidated = false", search_clause)
+        # The fulltext branch has no pre-filter: same predicate, applied after.
+        keyword_branch = hybrid[0].split("'vector' AS source")[1]
+        self.assertIn("coalesce(node.consolidated, false) = false", keyword_branch)
+        for query, params in fallbacks:
+            self.assertIs(params["include_consolidated"], False)
+
+    def test_recall_flag_backfill_derives_from_profile_and_skills(self) -> None:
+        # Rows written before the flag existed would fail the in-index
+        # predicate and vanish from recall, so the backfill must give every
+        # learning a value derived from the two consolidation sources.
+        captured: list[str] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append(query)
+                return []
+
+        project_common.ensure_learning_recall_flags(FakeDriver(), "neo4j")
+        self.assertEqual(len(captured), 1)
+        query = captured[0]
+        self.assertIn("WHERE l.consolidated IS NULL", query)
+        self.assertIn("(sk:Skill {status: 'approved'})-[d:DERIVED_FROM]->(l)", query)
+        self.assertIn("l.consolidated_at IS NOT NULL", query)
+        self.assertIn("<= l.consolidated_at", query)
+        self.assertIn("l.consolidated = size(skill_ids) > 0", query)
+        self.assertIn("l.compiled_at = CASE", query)
+        self.assertEqual(
+            project_common.LEARNING_VECTOR_FILTER_PROPERTIES,
+            ("project_id", "scope", "status", "consolidated"),
+        )
+
+    def test_learning_writes_maintain_the_recall_flag(self) -> None:
+        # Born false; every write that bumps updated_at re-derives it so a
+        # compiled learning stays served by its skill while a folded user
+        # fact re-enters recall and the profile backlog.
+        source = inspect.getsource(process_project._write_processing)
+        self.assertIn("l.consolidated = false", source)
+        self.assertEqual(source.count("l.consolidated = (l.compiled_at IS NOT NULL)"), 2)
+
+    def test_prompt_injection_skips_retrieval_without_a_prompt_embedding(self) -> None:
+        # No embedding, no floor to clear: the hook injects nothing rather
+        # than falling back to an ungated keyword match.
+        captured: list[tuple[str, dict]] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append((query, params))
+                return []
+
+        rows = project_common.fetch_project_learnings(
+            FakeDriver(),
+            "neo4j",
+            project_id="mkg",
+            query="How do we deploy the graph schema?",
+            query_vector=None,
+            min_similarity=0.75,
+        )
+        self.assertEqual(rows, [])
+        self.assertEqual(captured, [])
+
+        rows = project_common.fetch_user_learnings(
+            FakeDriver(),
+            "neo4j",
+            query="How do we deploy the graph schema?",
+            query_vector=None,
+            min_similarity=0.75,
+            user_id="tomaz@example.com",
+        )
+        self.assertEqual(rows, [])
+        self.assertEqual(captured, [])
+
+    def test_gated_recall_never_falls_back_to_fulltext_when_the_index_is_missing(self) -> None:
+        # An older database without the vector index used to degrade gated
+        # recall to the legacy fulltext query; now the floor is absolute.
+        captured: list[str] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append(query)
+                raise RuntimeError("no such index")
+
+        rows = project_common.fetch_project_learnings(
+            FakeDriver(),
+            "neo4j",
+            project_id="mkg",
+            query="How do we deploy the graph schema?",
+            query_vector=[0.1, 0.2],
+            min_similarity=0.75,
+        )
+        self.assertEqual(rows, [])
+        self.assertEqual(len(captured), 1)
+        self.assertIn("VECTOR INDEX", captured[0])
 
     def test_prompt_injection_returns_empty_when_nothing_clears_the_floor(self) -> None:
         captured: list[tuple[str, dict]] = []
@@ -2217,16 +2354,18 @@ class ProjectHookTests(unittest.TestCase):
             "neo4j",
             query="Unrelated prompt.",
             query_vector=[0.1, 0.2],
-            min_similarity=0.7,
+            min_similarity=0.75,
             user_id="tomaz@example.com",
         )
 
         self.assertEqual(rows, [])
         self.assertEqual(len(captured), 1)
+        self.assertIn("VECTOR INDEX", captured[0][0])
+        self.assertNotIn("db.index.fulltext.queryNodes", captured[0][0])
         # The no-query SessionStart path stays recency-based and ungated.
         captured.clear()
         project_common.fetch_user_learnings(
-            FakeDriver(), "neo4j", query=None, min_similarity=0.7, user_id="tomaz@example.com"
+            FakeDriver(), "neo4j", query=None, min_similarity=0.75, user_id="tomaz@example.com"
         )
         self.assertEqual(len(captured), 1)
         self.assertIn("last_used_at", captured[0][0])
@@ -2237,7 +2376,7 @@ class ProjectHookTests(unittest.TestCase):
 
         with _mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("MKG_INJECT_MIN_SIMILARITY", None)
-            self.assertAlmostEqual(project_common.inject_min_similarity(), 0.7)
+            self.assertAlmostEqual(project_common.inject_min_similarity(), 0.75)
         with _mock.patch.dict(
             os.environ, {"MKG_INJECT_MIN_SIMILARITY": "0.55"}, clear=False
         ):
@@ -2286,7 +2425,7 @@ class ProjectHookTests(unittest.TestCase):
 
         self.assertEqual(len(captured), 2)
         for query, _ in captured:
-            self.assertIn("consolidated_at IS NULL", query)
+            self.assertIn("coalesce(node.consolidated, false) = false", query.replace("l.", "node."))
         # Injection is the default consumer and keeps folded facts hidden.
         self.assertIs(captured[-1][1]["include_consolidated"], False)
 
@@ -2311,7 +2450,7 @@ class ProjectHookTests(unittest.TestCase):
         self.assertTrue(captured)
         # Hybrid builds the predicate into the query text; the fallbacks take it
         # as a parameter. Neither may filter consolidated facts out here.
-        self.assertNotIn("consolidated_at", captured[0][0])
+        self.assertNotIn("consolidated", captured[0][0])
         for query, params in captured[1:]:
             self.assertIn("$include_consolidated", query)
             self.assertIs(params["include_consolidated"], True)
@@ -2332,9 +2471,7 @@ class ProjectHookTests(unittest.TestCase):
 
         for query, _ in captured:
             self.assertIn("scope AS scope", query)
-            self.assertIn("coalesce(", query)
-            self.assertIn("> ", query)
-            self.assertIn("consolidated_at", query)
+            self.assertIn("consolidated, false) = false", query)
 
     def test_context_injection_scope_follows_hook_event(self) -> None:
         self.assertEqual(
@@ -2450,6 +2587,30 @@ class ProjectHookTests(unittest.TestCase):
         self.assertNotIn("last_used_at = datetime()", query)
         self.assertIn("T", params["timestamp"])
         self.assertEqual(params["learning_ids"], ["learning:mkg:a"])
+
+    def test_hook_injection_counts_separately_from_agent_retrieval(self) -> None:
+        # inject_count is the hooks' own tally; use_count stays the combined
+        # counter that project_get_context also bumps (with retrieval_count).
+        captured: list[str] = []
+
+        class FakeDriver:
+            def execute_query(self, query: str, **params):
+                captured.append(query)
+                return []
+
+        project_common.mark_learnings_used(FakeDriver(), "neo4j", ["learning:mkg:a"])
+
+        query = captured[0]
+        self.assertIn("l.inject_count = coalesce(l.inject_count, 0) + 1", query)
+        self.assertIn("l.last_injected_at = datetime($timestamp)", query)
+        self.assertIn("l.use_count = coalesce(l.use_count, 0) + 1", query)
+        self.assertNotIn("retrieval_count", query)
+
+    def test_new_learnings_start_every_usage_counter_at_zero(self) -> None:
+        source = inspect.getsource(process_project._write_processing)
+        for counter in ("use_count", "inject_count", "retrieval_count"):
+            with self.subTest(counter=counter):
+                self.assertIn(f"l.{counter} = 0", source)
 
     def test_background_processor_is_fire_and_forget(self) -> None:
         with patch.object(process_project.subprocess, "Popen") as popen:

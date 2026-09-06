@@ -957,6 +957,9 @@ def _write_processing(
                           l.scope = row.scope,
                           l.user_id = row.user_id,
                           l.use_count = 0,
+                          l.inject_count = 0,
+                          l.retrieval_count = 0,
+                          l.consolidated = false,
                           l.support_count = 0
             SET l.text = row.text,
                 l.task_pattern = row.task_pattern,
@@ -973,6 +976,10 @@ def _write_processing(
                 l.last_llm_model = coalesce(row.llm_model, l.last_llm_model),
                 l.project_id = $project_id,
                 l.updated_at = datetime($timestamp),
+                // Every write that bumps updated_at re-derives the recall
+                // flag: a compiled learning stays served by its skill, a
+                // folded user fact re-enters recall and the profile backlog.
+                l.consolidated = (l.compiled_at IS NOT NULL),
                 l.support_count = coalesce(l.support_count, 0) + 1,
                 l.confidence = CASE
                     WHEN coalesce(l.confidence, 0.0) < row.confidence THEN row.confidence
@@ -1033,6 +1040,7 @@ def _write_processing(
                 l.last_llm_model = coalesce(row.llm_model, l.last_llm_model),
                 l.project_id = coalesce(l.project_id, $project_id),
                 l.updated_at = datetime($timestamp),
+                l.consolidated = (l.compiled_at IS NOT NULL),
                 l.support_count = coalesce(l.support_count, 0) + 1,
                 l.status = CASE WHEN demoted THEN 'candidate' ELSE l.status END,
                 l.reviewed_by = CASE WHEN demoted THEN null ELSE l.reviewed_by END,
@@ -1257,6 +1265,8 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
             try:
                 corpus = _event_corpus(events)
                 query_vector = embed_text(corpus)
+                # Dedup sees everything, including learnings a skill already
+                # serves: hidden here, a restatement would look brand new.
                 similar_learnings = fetch_project_learnings(
                     driver,
                     database,
@@ -1265,6 +1275,7 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     statuses=["approved", "candidate"],
                     limit=8,
                     query_vector=query_vector,
+                    include_consolidated=True,
                 )
                 # User facts belong in the same shortlist as project ones: this
                 # list is what the extractor deduplicates against, and a scope

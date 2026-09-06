@@ -301,6 +301,103 @@ class LuceneQueryTests(unittest.TestCase):
         self.assertEqual(len(consistency_gate._lucene_query(text).split()), 16)
 
 
+class VectorIndexSchemaTests(unittest.TestCase):
+    """The recall flag is an in-index filter, so it has to be declared on the
+    :Learning vector index and present on every learning."""
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def __iter__(self):
+            return iter(self._rows)
+
+        def consume(self):
+            return None
+
+    class _Session:
+        def __init__(self, driver):
+            self._driver = driver
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def run(self, query, **params):
+            self._driver.statements.append(query)
+            if query.startswith("SHOW VECTOR INDEXES"):
+                return VectorIndexSchemaTests._Result(self._driver.declared)
+            return VectorIndexSchemaTests._Result([])
+
+    class _Driver:
+        def __init__(self, declared):
+            self.declared = declared
+            self.statements: list[str] = []
+            self.writes: list[str] = []
+
+        def session(self, **kwargs):
+            return VectorIndexSchemaTests._Session(self)
+
+        def execute_query(self, query, **params):
+            self.writes.append(query)
+            return []
+
+    def test_learning_index_declares_the_recall_flag(self) -> None:
+        driver = self._Driver(declared=[])
+        consistency_gate.ensure_memory_vector_indexes(driver, "neo4j")
+        creates = [s for s in driver.statements if s.startswith("CREATE VECTOR INDEX")]
+        learning = next(s for s in creates if "project_learning_vector" in s)
+        self.assertIn("WITH [n.project_id, n.scope, n.status, n.consolidated]", learning)
+        for other in creates:
+            if "project_learning_vector" not in other:
+                self.assertIn("WITH [n.project_id, n.scope, n.status]", other)
+                self.assertNotIn("consolidated", other)
+        self.assertFalse([s for s in driver.statements if s.startswith("DROP INDEX")])
+        # Every learning must carry the flag or the in-index predicate drops it.
+        self.assertEqual(len(driver.writes), 1)
+        self.assertIn("WHERE l.consolidated IS NULL", driver.writes[0])
+
+    def test_index_built_before_the_flag_is_recreated(self) -> None:
+        # Neo4j accepts only declared properties in SEARCH ... WHERE, so an
+        # existing index without the flag has to be dropped and rebuilt —
+        # from the embeddings already stored, which are never touched.
+        driver = self._Driver(
+            declared=[
+                {
+                    "name": "project_learning_vector",
+                    "properties": ["embedding", "project_id", "scope", "status"],
+                },
+                {
+                    "name": "project_skill_vector",
+                    "properties": ["embedding", "project_id", "scope", "status"],
+                },
+            ]
+        )
+        consistency_gate.ensure_memory_vector_indexes(driver, "neo4j")
+        drops = [s for s in driver.statements if s.startswith("DROP INDEX")]
+        self.assertEqual(drops, ["DROP INDEX project_learning_vector IF EXISTS"])
+        order = [
+            s for s in driver.statements
+            if "project_learning_vector" in s and not s.startswith("SHOW")
+        ]
+        self.assertTrue(order[0].startswith("DROP INDEX"))
+        self.assertTrue(order[1].startswith("CREATE VECTOR INDEX"))
+
+    def test_up_to_date_index_is_left_alone(self) -> None:
+        driver = self._Driver(
+            declared=[
+                {
+                    "name": "project_learning_vector",
+                    "properties": ["embedding", "project_id", "scope", "status", "consolidated"],
+                }
+            ]
+        )
+        consistency_gate.ensure_memory_vector_indexes(driver, "neo4j")
+        self.assertFalse([s for s in driver.statements if s.startswith("DROP INDEX")])
+
+
 class _FakeSession:
     def __enter__(self):
         return self

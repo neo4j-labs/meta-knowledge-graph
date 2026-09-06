@@ -38,7 +38,10 @@ def _embedding_input(record: dict) -> str:
 def _fetch(session, label: str, only_missing: bool) -> list[dict]:
     # Only live memory belongs in the vector index: the gate removes the
     # embedding when it rejects or folds an item, and re-embedding those
-    # tombstones here would put them back into neighbour retrieval.
+    # tombstones here would put them back into neighbour retrieval. Learnings
+    # folded into the user profile or compiled into a skill are live: they
+    # keep their embedding for deduplication and stay out of recall through
+    # the ``consolidated`` flag, so they are embedded here like any other.
     predicate = "n.embedding IS NULL" if only_missing else "true"
     result = session.run(
         f"""

@@ -140,6 +140,9 @@ UNWIND $rows AS row
 MERGE (l:Learning {id: row.id})
 ON CREATE SET l.created_at = datetime($now),
               l.use_count = 0,
+              l.inject_count = 0,
+              l.retrieval_count = 0,
+              l.consolidated = false,
               l.support_count = 1
 SET l.text = row.text,
     l.summary = row.summary,
@@ -150,6 +153,7 @@ SET l.text = row.text,
     l.last_source = 'seed',
     l.project_id = $project_id,
     l.updated_at = datetime($now),
+    l.consolidated = (l.compiled_at IS NOT NULL),
     l.confidence = CASE
         WHEN coalesce(l.confidence, 0.0) < row.confidence THEN row.confidence
         ELSE l.confidence

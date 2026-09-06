@@ -181,7 +181,7 @@ cooldown has elapsed, the service:
 3. Asks the LLM to revise the `(:UserProfile)` "user adaptations" section.
 4. Archives the old section as a `:UserProfileVersion`.
 5. Writes the new current section.
-6. Stamps folded learnings with `consolidated_at`.
+6. Stamps folded learnings with `consolidated_at` and flags them `consolidated = true` (recall pre-filters the flag in-index; the embedding stays for dedup).
 
 Raw candidates and blocked tombstones never enter this loop. The gate's safety
 screen is the boundary between "captured text" and "trusted persona input" —

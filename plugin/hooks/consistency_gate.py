@@ -78,9 +78,11 @@ import re
 from typing import Any
 
 from project_common import (
+    LEARNING_VECTOR_FILTER_PROPERTIES,
     ProjectRef,
     embed_texts,
     embedding_dimensions,
+    ensure_learning_recall_flags,
     extraction_model_label,
     llm_complete,
     llm_readiness_status,
@@ -116,28 +118,61 @@ def _topk() -> int:
 # --------------------------------------------------------------------------- #
 # Schema
 # --------------------------------------------------------------------------- #
-def ensure_memory_vector_indexes(driver, database: str) -> None:
-    """Create cosine vector indexes on :Learning / :Observation ``embedding``.
+_BASE_INDEX_FILTER_PROPERTIES = ("project_id", "scope", "status")
 
-    ``project_id`` / ``scope`` / ``status`` are declared as index metadata
+
+def _index_filter_properties(label: str) -> tuple[str, ...]:
+    """Filter properties declared on a label's vector index. Only :Learning
+    carries the ``consolidated`` recall flag; the other labels never gate on
+    it."""
+    if label == "Learning":
+        return LEARNING_VECTOR_FILTER_PROPERTIES
+    return _BASE_INDEX_FILTER_PROPERTIES
+
+
+def _declared_index_properties(driver, database: str, name: str) -> list[str] | None:
+    """Properties a vector index was created over — ``embedding`` plus its
+    ``WITH [...]`` filter list; ``None`` when the index does not exist."""
+    with driver.session(database=database) as session:
+        for row in session.run("SHOW VECTOR INDEXES YIELD name, properties"):
+            if row["name"] == name:
+                return [str(prop) for prop in (row["properties"] or [])]
+    return None
+
+
+def ensure_memory_vector_indexes(driver, database: str) -> None:
+    """Create cosine vector indexes on :Learning / :Observation / :Skill
+    ``embedding``.
+
+    ``project_id`` / ``scope`` / ``status`` — and on :Learning the
+    ``consolidated`` recall flag — are declared as index metadata
     (``WITH [...]``) so the ``SEARCH`` clause can pre-filter on them in-index.
-    Retrieval only filters on ``project_id`` / ``scope``: dead items lose their
-    embedding (and thus leave the index), so no status predicate is needed.
-    Each ``CREATE`` runs in its own session so one schema statement never blocks
-    the next.
+    Neo4j accepts only declared properties in that filter, so an index built
+    before a property was added is dropped and recreated (embeddings are
+    untouched; the index repopulates from them). Each schema statement runs
+    in its own session so one never blocks the next. Finally the
+    ``consolidated`` flag is backfilled onto learnings that predate it, since
+    the pre-filter drops any node where it is missing.
     """
     dims = embedding_dimensions()
     for label, name in _VECTOR_INDEXES:
+        filter_properties = _index_filter_properties(label)
+        declared = _declared_index_properties(driver, database, name)
+        if declared is not None and not set(filter_properties).issubset(declared):
+            with driver.session(database=database) as session:
+                session.run(f"DROP INDEX {name} IF EXISTS").consume()
+        with_list = ", ".join(f"n.{prop}" for prop in filter_properties)
         stmt = (
             f"CREATE VECTOR INDEX {name} IF NOT EXISTS "
             f"FOR (n:{label}) ON n.embedding "
-            f"WITH [n.project_id, n.scope, n.status] "
+            f"WITH [{with_list}] "
             f"OPTIONS {{indexConfig: {{"
             f"`vector.dimensions`: {dims}, "
             f"`vector.similarity_function`: 'cosine'}}}}"
         )
         with driver.session(database=database) as session:
             session.run(stmt).consume()
+    ensure_learning_recall_flags(driver, database)
 
 
 # --------------------------------------------------------------------------- #

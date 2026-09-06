@@ -175,6 +175,73 @@ def test_skill_activation_mode_mirrors_hooks(monkeypatch) -> None:
     assert server._skill_activation_mode() == "auto"
 
 
+def test_project_get_context_counts_agent_retrieval_separately() -> None:
+    # On-demand pulls by an agent bump retrieval_count; the hooks keep
+    # inject_count; use_count is the combined tally both paths share.
+    source = Path(server.__file__).read_text()
+    assert "l.retrieval_count = coalesce(l.retrieval_count, 0) + 1" in source
+    assert "l.last_retrieved_at = datetime($timestamp)" in source
+    assert "l.use_count = coalesce(l.use_count, 0) + 1" in source
+    assert "inject_count = coalesce" not in source
+    # MCP-written learnings start every counter at zero.
+    assert "l.inject_count = 0" in source
+    assert "l.retrieval_count = 0" in source
+
+
+def test_skill_approval_takes_source_learnings_out_of_recall() -> None:
+    # Human publishing (project_resolve_skill approve) is the twin of the
+    # auto-gate activation: the DERIVED_FROM learnings are flagged
+    # consolidated (recall pre-filters it in-index) and carry compiled_at,
+    # their embedding stays for dedup, and retire clears the flag on sources
+    # no other live skill serves.
+    fn = _server_function_def("project_resolve_skill")
+    source = ast.get_source_segment(Path(server.__file__).read_text(), fn)
+    assert source is not None
+    approve = source.split("MERGE (sk)-[d:DERIVED_FROM]->(l)")[-1]
+    assert "l.consolidated = true" in approve
+    assert "l.embedding" not in approve
+    assert "l.compiled_at = coalesce(l.compiled_at, datetime($ts))" in approve
+    assert "l.compiled_skill_id = sk.id" in approve
+    retire = source.split('if action == "retire":')[1].split("else:")[0]
+    assert "(other:Skill {status: 'approved'})-[:DERIVED_FROM]->(l)" in retire
+    assert "l.consolidated = false" in retire
+    assert "l.compiled_at = null" in retire
+    assert "l.embedding" not in retire
+    # Rejecting a proposal still never touches a learning.
+    reject = source.split('if action == "reject":')[1].split("else:  # approve")[0]
+    assert "l.consolidated" not in reject
+
+
+def test_project_get_context_excludes_consolidated_memory_in_index() -> None:
+    # The MCP context tool mirrors the hooks: memory the profile or a live
+    # skill already serves is pre-filtered inside the vector index for both
+    # scopes, post-filtered on the fulltext branch, and left out of the
+    # recency fallbacks — all on the consolidated flag, never on embeddings.
+    text = Path(server.__file__).read_text()
+    hybrid = ast.get_source_segment(text, _server_function_def("_fetch_context_memory_hybrid"))
+    assert hybrid is not None
+    search_clause = hybrid.split("SCORE AS raw_score")[0]
+    assert "{consolidated_filter}" in search_clause
+    assert '"AND node.consolidated = false" if exclude_consolidated' in hybrid
+    assert "coalesce(node.consolidated, false) = false" in hybrid
+    assert "consolidated_at" not in hybrid
+    context = ast.get_source_segment(text, _server_function_def("project_get_context"))
+    assert context is not None
+    assert context.count("exclude_consolidated=True") == 2
+    assert context.count("coalesce(l.consolidated, false) = false") == 2
+    assert "consolidated_at" not in context
+
+
+def test_learning_writes_maintain_the_recall_flag_in_mcp() -> None:
+    # Born false on project_add_learning; every human or agent write that
+    # bumps updated_at re-derives it, so a folded user fact re-enters recall
+    # while a compiled learning stays served by its skill.
+    source = Path(server.__file__).read_text()
+    assert "l.consolidated = false," in source
+    assert source.count("l.consolidated = (l.compiled_at IS NOT NULL)") == 3
+    assert "c.consolidated = (c.compiled_at IS NOT NULL)" in source
+
+
 def test_resolve_learning_restores_embedding_on_reinstate() -> None:
     # Reinstating a blocked/rejected tombstone must re-embed it, or it stays
     # invisible to vector retrieval forever.

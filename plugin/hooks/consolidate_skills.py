@@ -1452,6 +1452,14 @@ def apply_skill_activation(
     version's ``derived_from`` / ``informed_by`` lists, and any
     ``needs_revision`` flag clears — an accepted patch folds in (or knowingly
     overrides) whatever made the sources stale.
+
+    The ``derived_from`` learnings are now served by the skill, so each is
+    stamped ``compiled_at`` / ``compiled_skill_id`` and flagged
+    ``consolidated = true``: prompt-time recall and ``project_get_context``
+    pre-filter the flag in-index, while the embedding stays so the extractor
+    and the gate keep deduplicating against it — the same treatment a folded
+    user fact gets when the profile takes it over. ``informed_by`` error
+    learnings are only cited in *Pitfalls* and stay live on their own.
     """
     name = str(proposal.get("name") or proposal.get("slug") or "")
     description = str(proposal.get("description") or "")
@@ -1488,6 +1496,11 @@ def apply_skill_activation(
             MATCH (l:Learning {id: lid})
             MERGE (sk)-[d:DERIVED_FROM]->(l)
             ON CREATE SET d.created_at = datetime($now)
+            // The skill serves this knowledge now: recall pre-filters the
+            // flag in-index; the embedding stays so dedup still sees it.
+            SET l.consolidated = true,
+                l.compiled_at = coalesce(l.compiled_at, datetime($now)),
+                l.compiled_skill_id = sk.id
         }
         CALL (sk, v) {
             UNWIND coalesce(v.informed_by, []) AS eid
