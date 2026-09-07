@@ -1795,6 +1795,7 @@ SKILL_MAX_PROPOSALS_PER_RUN = 2
 # This configurable heuristic depends on the embedding model; recalibrate
 # when changing EMBEDDING_MODEL.
 TASK_PATTERN_SIMILARITY_THRESHOLD = 0.80
+SKILL_INJECT_MIN_SIMILARITY = 0.80
 MAX_SKILL_CONTENT = 4000
 MAX_SKILL_DESCRIPTION = 300
 _FALSEY_ENV = {"0", "false", "off", "no"}
@@ -1897,6 +1898,66 @@ def fetch_approved_skill_slugs(
         limit=limit,
     )
     return [str(record["slug"]) for record in records if record["slug"]]
+
+
+def skill_prompt_inject_enabled() -> bool:
+    return os.environ.get("MKG_SKILL_PROMPT_INJECT", "1").strip().lower() not in _FALSEY_ENV
+
+
+def skill_inject_min_similarity() -> float:
+    threshold = _env_float(
+        "MKG_SKILL_INJECT_MIN_SIMILARITY", SKILL_INJECT_MIN_SIMILARITY
+    )
+    return max(-1.0, min(1.0, threshold))
+
+
+def fetch_relevant_skill_slugs(
+    driver,
+    database: str,
+    project_id: str,
+    query_vector: list[float] | None,
+    limit: int = 5,
+    min_similarity: float = SKILL_INJECT_MIN_SIMILARITY,
+) -> list[str]:
+    """Prompt-time discovery: approved slugs only, gated by raw cosine.
+
+    Score the project's live skills exactly so inactive or other-project
+    entries cannot consume a nearest-neighbor shortlist. This small catalog
+    needs no vector-index migration. Reuse the prompt's existing embedding;
+    never pad from keyword search or recency when nothing clears the floor.
+    """
+    if not query_vector or limit <= 0:
+        return []
+    try:
+        records = _execute_query(
+            driver,
+            database,
+            """
+            CYPHER 25
+            MATCH (:Project {id: $project_id})-[:HAS_SKILL]->(sk:Skill {status: 'approved'})
+            WHERE sk.embedding IS NOT NULL
+              AND size(sk.embedding) = size($query_vector)
+              AND sk.slug IS NOT NULL
+            WITH sk, vector.similarity.cosine(sk.embedding, $query_vector) AS score
+            // Similarity is float32; round its final digit so a cosine
+            // of exactly 0.8 (score 0.899999976...) clears the floor.
+            WHERE round(score, 7) >= $min_vector_score
+            RETURN sk.slug AS slug
+            ORDER BY score DESC, slug ASC
+            LIMIT $limit
+            """,
+            project_id=project_id,
+            query_vector=query_vector,
+            # Neo4j's cosine similarity is normalized to (1 + cosine) / 2.
+            min_vector_score=(1.0 + min_similarity) / 2.0,
+            limit=limit,
+        )
+        return [str(record["slug"]) for record in records if record["slug"]]
+    except Exception as exc:
+        # Skill discovery is optional; a failed lookup must not discard
+        # learning recall that succeeded for the same prompt.
+        print(f"[inject_project_context] skill discovery skipped: {exc}", file=sys.stderr)
+        return []
 
 
 def count_user_profile_memories_pending(driver, database: str, user_id: str) -> int:
@@ -3088,15 +3149,18 @@ def format_learning_context(
     observation_total: int = 0,
     user_id: str | None = None,
     pending_skills: int = 0,
+    relevant_skill_slugs: list[str] | None = None,
 ) -> str:
     user_learnings = user_learnings or []
     observations = observations or []
     skill_slugs = skill_slugs or []
+    relevant_skill_slugs = relevant_skill_slugs or []
     if (
         not learnings
         and not user_learnings
         and not observations
         and not skill_slugs
+        and not relevant_skill_slugs
         and not gate_blocked
         and not pending_skills
     ):
@@ -3159,6 +3223,13 @@ def format_learning_context(
                 + ", ".join(skill_slugs),
             ]
         )
+    if relevant_skill_slugs:
+        lines.extend([
+            "",
+            "Learned skills matching this prompt (load a relevant procedure "
+            "with skill_fetch(slug), or find others with skill_search): "
+            + ", ".join(relevant_skill_slugs),
+        ])
     if gate_blocked:
         plural = "item" if gate_blocked == 1 else "items"
         lines.extend(

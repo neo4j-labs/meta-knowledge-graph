@@ -24,6 +24,7 @@ from project_common import (  # noqa: E402
     fetch_approved_skill_slugs,
     fetch_project_learnings,
     fetch_recent_observations,
+    fetch_relevant_skill_slugs,
     fetch_user_learnings,
     format_learning_context,
     inject_min_similarity,
@@ -35,6 +36,8 @@ from project_common import (  # noqa: E402
     resolve_project,
     resolve_user,
     skill_catalog_inject_enabled,
+    skill_inject_min_similarity,
+    skill_prompt_inject_enabled,
     skill_review_required,
     truncate,
 )
@@ -120,6 +123,7 @@ def main() -> int:
     gate_blocked = 0
     pending_skills = 0
     skill_slugs: list[str] = []
+    relevant_skill_slugs: list[str] = []
 
     try:
         from neo4j import GraphDatabase
@@ -188,6 +192,14 @@ def main() -> int:
                         query_vector=query_vector,
                         min_similarity=inject_min_similarity(),
                     )
+                if hook_event == "UserPromptSubmit" and skill_prompt_inject_enabled():
+                    relevant_skill_slugs = fetch_relevant_skill_slugs(
+                        driver,
+                        database,
+                        project_id=project.id,
+                        query_vector=query_vector,
+                        min_similarity=skill_inject_min_similarity(),
+                    )
                 learning_ids = [
                     learning["id"]
                     for learning in (*user_learnings, *learnings)
@@ -215,6 +227,7 @@ def main() -> int:
         user_learnings,
         observations=observations,
         skill_slugs=skill_slugs,
+        relevant_skill_slugs=relevant_skill_slugs,
         gate_blocked=gate_blocked,
         observation_total=observation_total,
         user_id=user.id,

@@ -57,6 +57,8 @@ ENV = {
     "NEO4J_DATABASE": "neo4j",
     "MKG_SKILL_ACTIVATION": "auto",
     "MKG_SKILL_CATALOG_INJECT": "1",
+    "MKG_SKILL_PROMPT_INJECT": "1",
+    "MKG_SKILL_INJECT_MIN_SIMILARITY": "0.8",
 }
 
 OBSERVATION = {
@@ -178,7 +180,7 @@ def fake_neo4j(driver_factory) -> types.ModuleType:
     return module
 
 
-def run_hook(module, payload: dict, driver_factory) -> tuple[int, str, str]:
+def run_hook(module, payload: dict, driver_factory, *, embedding=(0.1, 0.2, 0.3)) -> tuple[int, str, str]:
     """Run ``module.main()`` as the harness would: payload on stdin, stdout
     and stderr captured, identity and embeddings stubbed, Neo4j faked."""
     stdout, stderr = io.StringIO(), io.StringIO()
@@ -188,7 +190,7 @@ def run_hook(module, payload: dict, driver_factory) -> tuple[int, str, str]:
         stack.enter_context(patch.object(module, "load_mkg_env", lambda root: root / ".env"))
         stack.enter_context(patch.object(module, "resolve_project", lambda payload, root: PROJECT))
         stack.enter_context(patch.object(module, "resolve_user", lambda root=None, client=None: USER))
-        stack.enter_context(patch.object(module, "embed_text", lambda text, **kw: [0.1, 0.2, 0.3]))
+        stack.enter_context(patch.object(module, "embed_text", lambda text, **kw: list(embedding) if embedding is not None else None))
         stack.enter_context(patch.object(sys, "stdin", io.StringIO(json.dumps(payload))))
         stack.enter_context(contextlib.redirect_stdout(stdout))
         stack.enter_context(contextlib.redirect_stderr(stderr))
@@ -256,6 +258,105 @@ class InjectProjectContextEntrypointTests(unittest.TestCase):
         self.assertNotIn("What we know about the user", context)
         injected = [params for query, params in driver.queries if "MERGE (m)-[r:INJECTED_IN]" in query]
         self.assertEqual(injected[0]["ids"], [PROJECT_LEARNING["id"]])
+
+    def test_prompt_injects_skill_slugs_without_bodies_or_startup_catalog(self) -> None:
+        driver = FakeDriver([
+            (lambda q, p: "vector.similarity.cosine(sk.embedding" in q,
+             [{"slug": "hook-debugging"}]),
+        ])
+        payload = {"hook_event_name": "UserPromptSubmit", "prompt": "debug hooks"}
+        with patch.dict(ENV, {"MKG_SKILL_CATALOG_INJECT": "0"}):
+            code, stdout, stderr = run_hook(inject_project_context, payload, lambda *a: driver)
+        self.assertEqual((code, stderr), (0, ""))
+        context = hook_output(stdout)["additionalContext"]
+        self.assertIn("Learned skills matching this prompt", context)
+        self.assertIn("hook-debugging", context)
+        self.assertIn("skill_fetch(slug)", context)
+        skill_queries = [(q, p) for q, p in driver.queries if "HAS_SKILL" in q]
+        self.assertEqual(len(skill_queries), 1)
+        query, params = skill_queries[0]
+        self.assertIn("Skill {status: 'approved'}", query)
+        self.assertIn("Project {id: $project_id}", query)
+        self.assertIn("WHERE round(score, 7) >= $min_vector_score", query)
+        self.assertNotIn("sk.content", query)
+        self.assertNotIn("sk.description", query)
+        self.assertEqual(params["project_id"], PROJECT.id)
+        self.assertEqual(params["query_vector"], [0.1, 0.2, 0.3])
+        self.assertEqual(params["limit"], 5)
+        self.assertAlmostEqual(params["min_vector_score"], 0.9)
+
+    def test_prompt_with_no_skill_matches_emits_nothing(self) -> None:
+        driver = FakeDriver()
+        code, stdout, stderr = run_hook(
+            inject_project_context,
+            {"hook_event_name": "UserPromptSubmit", "prompt": "unrelated task"},
+            lambda *a: driver,
+        )
+        self.assertEqual((code, stdout, stderr), (0, "", ""))
+        self.assertEqual(sum("HAS_SKILL" in q for q, _ in driver.queries), 1)
+
+    def test_no_embedding_skips_skill_lookup(self) -> None:
+        driver = FakeDriver()
+        code, stdout, stderr = run_hook(
+            inject_project_context,
+            {"hook_event_name": "UserPromptSubmit", "prompt": "debug hooks"},
+            lambda *a: driver, embedding=None,
+        )
+        self.assertEqual((code, stdout), (0, ""))
+        self.assertIn("embedding unavailable", stderr)
+        self.assertFalse(any("HAS_SKILL" in q for q, _ in driver.queries))
+
+    def test_prompt_skill_discovery_can_be_disabled(self) -> None:
+        driver = memory_driver()
+        with patch.dict(ENV, {"MKG_SKILL_PROMPT_INJECT": "off"}):
+            code, stdout, stderr = run_hook(
+                inject_project_context,
+                {"hook_event_name": "UserPromptSubmit", "prompt": "debug hooks"},
+                lambda *a: driver,
+            )
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn("Relevant project learnings", hook_output(stdout)["additionalContext"])
+        self.assertFalse(any("HAS_SKILL" in q for q, _ in driver.queries))
+
+    def test_skill_lookup_failure_preserves_learning_recall(self) -> None:
+        driver = memory_driver()
+        original = driver.execute_query
+
+        def fail_skills(query, **params):
+            if "vector.similarity.cosine(sk.embedding" in query:
+                raise RuntimeError("skill lookup unavailable")
+            return original(query, **params)
+
+        driver.execute_query = fail_skills
+        code, stdout, stderr = run_hook(
+            inject_project_context,
+            {"hook_event_name": "UserPromptSubmit", "prompt": "debug hooks"},
+            lambda *a: driver,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("Relevant project learnings", hook_output(stdout)["additionalContext"])
+        self.assertIn("skill discovery skipped", stderr)
+
+    def test_session_start_keeps_catalog_without_similarity_query(self) -> None:
+        driver = FakeDriver([(lambda q, p: "HAS_SKILL" in q, [{"slug": "hook-debugging"}])])
+        code, stdout, stderr = run_hook(
+            inject_project_context, {"hook_event_name": "SessionStart"}, lambda *a: driver,
+        )
+        self.assertEqual((code, stderr), (0, ""))
+        context = hook_output(stdout)["additionalContext"]
+        self.assertIn("Learned skills for this project", context)
+        self.assertIn("hook-debugging", context)
+        self.assertNotIn("matching this prompt", context)
+        self.assertFalse(any("vector.similarity.cosine" in q for q, _ in driver.queries))
+
+    def test_skill_similarity_setting_defaults_and_override(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(project_common.skill_prompt_inject_enabled())
+            self.assertEqual(project_common.skill_inject_min_similarity(), 0.8)
+        with patch.dict(os.environ, {"MKG_SKILL_INJECT_MIN_SIMILARITY": "0.7"}):
+            self.assertEqual(project_common.skill_inject_min_similarity(), 0.7)
+        with patch.dict(os.environ, {"MKG_SKILL_INJECT_MIN_SIMILARITY": "invalid"}):
+            self.assertEqual(project_common.skill_inject_min_similarity(), 0.8)
 
     def test_driver_credentials_come_from_neo4j_config(self) -> None:
         opened: list[tuple[str, tuple]] = []
