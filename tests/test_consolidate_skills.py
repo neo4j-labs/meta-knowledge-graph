@@ -106,7 +106,7 @@ class GroupingTests(unittest.TestCase):
             {"id": "tp-2", "normalized": "rebuild cache venv", "embedding": [1.0, 0.0]},
         ]
         matched = consolidate_skills.match_task_pattern(
-            "verify plugin release", [1.0, 0.0], existing, floor=0.65
+            "verify plugin release", [1.0, 0.0], existing, floor=0.80
         )
         self.assertEqual(matched, "tp-1")
 
@@ -115,11 +115,11 @@ class GroupingTests(unittest.TestCase):
             {"id": "tp-1", "normalized": "verify plugin release", "embedding": [1.0, 0.0]},
         ]
         matched = consolidate_skills.match_task_pattern(
-            "check release end to end", [0.95, 0.31], existing, floor=0.65
+            "check release end to end", [0.95, 0.31], existing, floor=0.80
         )
         self.assertEqual(matched, "tp-1")
         no_match = consolidate_skills.match_task_pattern(
-            "debug cypher query", [0.0, 1.0], existing, floor=0.65
+            "debug cypher query", [0.0, 1.0], existing, floor=0.80
         )
         self.assertIsNone(no_match)
 
@@ -129,7 +129,7 @@ class GroupingTests(unittest.TestCase):
         ]
         self.assertIsNone(
             consolidate_skills.match_task_pattern(
-                "verify the plugin release", None, existing, floor=0.65
+                "verify the plugin release", None, existing, floor=0.80
             )
         )
 
@@ -797,14 +797,14 @@ class SkillConfigTests(unittest.TestCase):
             self.assertEqual(project_common.skill_consolidation_threshold(), 4)
             self.assertEqual(project_common.skill_consolidation_interval_hours(), 24.0)
             self.assertEqual(project_common.skill_min_cluster_size(), 2)
-            self.assertEqual(project_common.task_pattern_similarity_threshold(), 0.65)
+            self.assertEqual(project_common.task_pattern_similarity_threshold(), 0.80)
             self.assertEqual(project_common.skill_max_proposals_per_run(), 2)
 
     def test_env_overrides(self) -> None:
         overrides = {
             "MKG_SKILL_CONSOLIDATION": "0",
             "MKG_SKILL_CONSOLIDATION_THRESHOLD": "7",
-            "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD": "0.8",
+            "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD": "0.9",
             "MKG_SKILL_CATALOG_INJECT": "off",
             "MKG_SKILL_MAX_PROPOSALS_PER_RUN": "5",
         }
@@ -812,7 +812,7 @@ class SkillConfigTests(unittest.TestCase):
             self.assertFalse(project_common.skill_consolidation_enabled())
             self.assertFalse(project_common.skill_catalog_inject_enabled())
             self.assertEqual(project_common.skill_consolidation_threshold(), 7)
-            self.assertEqual(project_common.task_pattern_similarity_threshold(), 0.8)
+            self.assertEqual(project_common.task_pattern_similarity_threshold(), 0.9)
             self.assertEqual(project_common.skill_max_proposals_per_run(), 5)
 
     def test_max_proposals_floor_is_one(self) -> None:

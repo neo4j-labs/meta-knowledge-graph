@@ -1791,11 +1791,10 @@ SKILL_MIN_CLUSTER_SIZE = 2
 # attempts count toward the budget so a bad model day cannot burn unbounded
 # calls.
 SKILL_MAX_PROPOSALS_PER_RUN = 2
-# Calibrated for text-embedding-3-small on short task-pattern strings:
-# paraphrases of the same procedure measure ~0.6-0.7, related-but-distinct
-# procedures ~0.45-0.6, unrelated <0.35. Recalibrate when changing
-# EMBEDDING_MODEL.
-TASK_PATTERN_SIMILARITY_THRESHOLD = 0.65
+# Require a close semantic match between short task-pattern labels.
+# This configurable heuristic depends on the embedding model; recalibrate
+# when changing EMBEDDING_MODEL.
+TASK_PATTERN_SIMILARITY_THRESHOLD = 0.80
 MAX_SKILL_CONTENT = 4000
 MAX_SKILL_DESCRIPTION = 300
 _FALSEY_ENV = {"0", "false", "off", "no"}

@@ -372,10 +372,8 @@ def match_task_pattern(
     """Resolve one pattern string against the existing ``:TaskPattern`` nodes.
 
     Exact normalized match wins outright; otherwise the nearest pattern by
-    embedding, if it clears ``floor``. Short procedural strings separate far
-    more cleanly than full learning text — paraphrases of the same procedure
-    land ~0.6-0.7 while distinct procedures stay below — which is what makes a
-    hard floor defensible here when it was not for learning-text clustering.
+    embedding, if it clears ``floor``. The configurable floor applies to
+    short procedural labels, not full learning text, and defaults to 0.80.
     Returns the matched pattern id, or ``None`` to mint a new node.
     """
     for row in existing:
