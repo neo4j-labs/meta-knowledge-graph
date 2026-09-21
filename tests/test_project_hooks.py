@@ -3292,3 +3292,40 @@ class ErrorLearningRecallTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DialogueSurvivesTheBudgetTests(unittest.TestCase):
+    """What was said stays in the window; tool events give way."""
+
+    def _window(self, tool_calls: int):
+        events = [{"event_id": "e0", "event_name": "UserPromptSubmit",
+                   "prompt": "Do not rebuild the index when embeddings are added.",
+                   "timestamp": "2026-09-20T10:00:00Z"}]
+        for number in range(tool_calls):
+            events.append({"event_id": f"t{number}", "event_name": "PostToolUse",
+                           "tool_name": "Bash", "tool_use_id": f"call_{number}",
+                           "tool_input": "x" * 1200,
+                           "timestamp": f"2026-09-20T10:{number // 60:02d}:{number % 60:02d}Z"})
+        events.append({"event_id": "e9", "event_name": "Stop",
+                       "last_assistant_message": "Rebuilt only the changed shard.",
+                       "timestamp": "2026-09-20T11:00:00Z"})
+        return events
+
+    def test_the_users_message_survives_a_tool_heavy_window(self) -> None:
+        corpus = process_project._event_corpus(self._window(40), 12000)
+        self.assertLessEqual(len(corpus), 12000)
+        self.assertIn("Do not rebuild the index", corpus)
+        self.assertIn("Rebuilt only the changed shard", corpus)
+        self.assertIn("earlier events elided", corpus)
+
+    def test_a_window_that_fits_is_unchanged(self) -> None:
+        events = self._window(2)
+        corpus = process_project._event_corpus(events, 12000)
+        self.assertNotIn("elided", corpus)
+        self.assertEqual(corpus.count("Event: PostToolUse"), 2)
+
+    def test_events_are_dropped_whole_and_stay_in_order(self) -> None:
+        corpus = process_project._event_corpus(self._window(40), 12000)
+        self.assertNotIn("\nx" * 3, corpus.split("Event: PostToolUse")[0])
+        self.assertLess(corpus.index("Do not rebuild the index"),
+                        corpus.index("Rebuilt only the changed shard"))

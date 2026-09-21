@@ -410,14 +410,54 @@ def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
                         f"{truncate(retry_input, MAX_RETRY_INPUT_TEXT)}"
                     )
         if parts:
-            entries.append((_ts_sort_key(event.get("timestamp")), order, "\n".join(parts)))
+            spoken = bool(_event_text(event, "prompt")
+                          or _event_text(event, "last_assistant_message"))
+            entries.append((_ts_sort_key(event.get("timestamp")), order,
+                            "\n".join(parts), spoken))
     for ts, text in _window_assistant_texts(events):
-        entries.append((_ts_sort_key(ts), len(events), f"assistant: {truncate(text, 1200)}"))
+        entries.append((_ts_sort_key(ts), len(events),
+                        f"assistant: {truncate(text, 1200)}", True))
     entries.sort(key=lambda entry: (entry[0], entry[1]))
-    joined = "\n".join(block for _, _, block in entries)
+    joined = "\n".join(entry[2] for entry in entries)
     if len(joined) <= limit:
         return joined
-    return "[earlier events elided]\n" + joined[-(limit - len("[earlier events elided]\n")):]
+    return _corpus_within_budget(entries, limit)
+
+
+def _corpus_within_budget(entries: list[tuple[Any, int, str, bool]], limit: int) -> str:
+    """Spend the budget on what was said, then fill it with tool events.
+
+    The events of one turn — the user's message, the assistant's reply and
+    every tool call between them — are overwhelmingly tool calls, and the user
+    speaks at the start of the turn. Keeping the last N characters therefore
+    drops the user's message first, which is precisely what the extraction
+    prompt is told to look for.
+
+    So the spoken events are placed first, whole events are dropped rather than
+    cut mid-line, and the rest of the budget goes to the most recent tool
+    events that still fit. When the spoken events alone exceed the budget, the
+    most recent of them win.
+    """
+    spoken = [entry for entry in entries if entry[3]]
+    tools = [entry for entry in entries if not entry[3]]
+    kept = list(spoken)
+    spent = sum(len(entry[2]) + 1 for entry in kept)
+    if spent > limit:
+        kept, spent = [], 0
+        for entry in sorted(spoken, key=lambda e: (e[0], e[1]), reverse=True):
+            if spent + len(entry[2]) + 1 > limit:
+                break
+            kept.append(entry)
+            spent += len(entry[2]) + 1
+    else:
+        for entry in sorted(tools, key=lambda e: (e[0], e[1]), reverse=True):
+            if spent + len(entry[2]) + 1 <= limit:
+                kept.append(entry)
+                spent += len(entry[2]) + 1
+    kept.sort(key=lambda entry: (entry[0], entry[1]))
+    dropped = len(entries) - len(kept)
+    head = f"[{dropped} earlier events elided]\n" if dropped else ""
+    return head + "\n".join(entry[2] for entry in kept)
 
 
 def _format_existing_memory(
