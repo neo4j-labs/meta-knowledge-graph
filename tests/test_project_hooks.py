@@ -3292,3 +3292,43 @@ class ErrorLearningRecallTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolCallDeduplicationTests(unittest.TestCase):
+    """A call logged before and after it runs is rendered once, not twice."""
+
+    def _corpus(self, events):
+        return process_project._event_corpus(events, 10 ** 6)
+
+    def test_paired_call_renders_its_input_once(self) -> None:
+        events = [
+            {"event_id": "e1", "event_name": "PreToolUse", "tool_name": "Bash",
+             "tool_use_id": "call_1", "tool_input": "{\"command\": \"du -sk store\"}",
+             "timestamp": "2026-09-20T10:00:00Z"},
+            {"event_id": "e2", "event_name": "PostToolUse", "tool_name": "Bash",
+             "tool_use_id": "call_1", "tool_input": "{\"command\": \"du -sk store\"}",
+             "timestamp": "2026-09-20T10:00:01Z"},
+        ]
+        corpus = self._corpus(events)
+        self.assertEqual(corpus.count("du -sk store"), 1)
+        self.assertIn("PostToolUse", corpus)
+        self.assertNotIn("PreToolUse", corpus)
+
+    def test_call_that_never_returned_keeps_its_entry(self) -> None:
+        events = [
+            {"event_id": "e1", "event_name": "PreToolUse", "tool_name": "Bash",
+             "tool_use_id": "call_9", "tool_input": "{\"command\": \"sleep 600\"}",
+             "timestamp": "2026-09-20T10:00:00Z"},
+        ]
+        corpus = self._corpus(events)
+        self.assertIn("PreToolUse", corpus)
+        self.assertIn("sleep 600", corpus)
+
+    def test_pairing_falls_back_to_the_call_itself_without_an_id(self) -> None:
+        events = [
+            {"event_id": "e1", "event_name": "PreToolUse", "tool_name": "shell",
+             "tool_input": "git status", "timestamp": "2026-09-20T10:00:00Z"},
+            {"event_id": "e2", "event_name": "PostToolUse", "tool_name": "shell",
+             "tool_input": "git status", "timestamp": "2026-09-20T10:00:01Z"},
+        ]
+        self.assertEqual(self._corpus(events).count("git status"), 1)
