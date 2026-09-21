@@ -379,9 +379,39 @@ def _later_success_same_tool(events: list[dict[str, Any]], index: int) -> str | 
     return None
 
 
+def _tool_calls_that_returned(events: list[dict[str, Any]]) -> set[str]:
+    """Keys of the tool calls whose PostToolUse event is in this turn.
+
+    A tool call is logged twice, once before the tool executes and once after,
+    and both events carry the full ``tool_input``, so rendering both writes
+    every call into the corpus twice. That repeat competes for the budget with
+    the material the extraction prompt is told to look for: the user's own
+    words. The PostToolUse event carries everything its PreToolUse partner
+    does, plus the failure text, so the earlier entry can be dropped once the
+    later one is present.
+    """
+    returned: set[str] = set()
+    for event in events:
+        if _event_text(event, "event_name") != "PostToolUse":
+            continue
+        key = event.get("tool_use_id") or (
+            f"{_event_text(event, 'tool_name')}\n{_event_text(event, 'tool_input')}")
+        if key:
+            returned.add(str(key))
+    return returned
+
+
 def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
     entries: list[tuple[str, int, str]] = []
+    covered_by_a_later_event = _tool_calls_that_returned(events)
     for order, event in enumerate(events):
+        # A call that never returned keeps its PreToolUse entry: that it was
+        # attempted and left unanswered is itself worth extracting.
+        if _event_text(event, "event_name") == "PreToolUse":
+            key = event.get("tool_use_id") or (
+                f"{_event_text(event, 'tool_name')}\n{_event_text(event, 'tool_input')}")
+            if str(key) in covered_by_a_later_event:
+                continue
         parts: list[str] = []
         event_name = _event_text(event, "event_name")
         if event_name:
