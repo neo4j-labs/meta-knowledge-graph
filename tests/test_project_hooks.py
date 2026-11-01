@@ -1258,6 +1258,100 @@ class ProjectHookTests(unittest.TestCase):
         self.assertIn("l.kind = coalesce(row.kind, l.kind)", source)
         self.assertIn("l.resolved = coalesce(row.resolved, l.resolved)", source)
 
+    def test_existing_memory_marks_items_injected_this_session(self) -> None:
+        rendered = process_project._format_existing_memory(
+            [
+                {"id": "learning:mkg:seen", "status": "approved", "injected_this_session": True, "text": "seen"},
+                {"id": "learning:mkg:new", "status": "approved", "text": "unseen"},
+            ]
+        )
+        self.assertIn("id=learning:mkg:seen; scope=project; status=approved; injected_this_session=true;", rendered)
+        self.assertIn("id=learning:mkg:new; scope=project; status=approved; task_pattern=None;", rendered)
+        # The prompt explains the mark: following an injected item is not evidence.
+        self.assertIn("injected_this_session=true", process_project.DEFAULT_MEMORY_EXTRACTION_PROMPT)
+        self.assertIn("return ignore for it", process_project.DEFAULT_MEMORY_EXTRACTION_PROMPT)
+
+    def test_flag_injected_in_session_marks_only_returned_ids(self) -> None:
+        captured: list[dict] = []
+
+        class FakeResult:
+            records = [{"id": "learning:mkg:seen"}]
+
+        class FakeDriver:
+            def execute_query(self, query, **params):
+                captured.append({"query": query, **params})
+                return FakeResult()
+
+        learnings = [{"id": "learning:mkg:seen"}, {"id": "learning:mkg:new"}]
+        process_project._flag_injected_in_session(
+            FakeDriver(), "neo4j", "session-1", learnings, "2026-06-17T12:00:00+00:00"
+        )
+        self.assertTrue(learnings[0].get("injected_this_session"))
+        self.assertNotIn("injected_this_session", learnings[1])
+        # Subagent sessions count, and only injections up to the window's end.
+        self.assertIn("[:HAS_SUBAGENT*0..]", captured[0]["query"])
+        self.assertIn("i.first_injected_at <= datetime($window_end)", captured[0]["query"])
+        self.assertEqual(captured[0]["window_end"], "2026-06-17T12:00:00+00:00")
+
+    def test_flag_injected_in_session_never_fails_extraction(self) -> None:
+        class FailingDriver:
+            def execute_query(self, query, **params):
+                raise RuntimeError("database unavailable")
+
+        learnings = [{"id": "learning:mkg:seen"}]
+        process_project._flag_injected_in_session(
+            FailingDriver(), "neo4j", "session-1", learnings, "2026-06-17T12:00:00+00:00"
+        )
+        self.assertNotIn("injected_this_session", learnings[0])
+
+    def test_restating_an_injected_learning_is_an_echo_not_support(self) -> None:
+        queries: list[str] = []
+        params: list[dict] = []
+
+        class FakeTx:
+            def run(self, query: str, **kwargs):
+                queries.append(query)
+                params.append(kwargs)
+
+        rows = [
+            {"id": "learning:mkg:a", "action": "create", "text": "a", "confidence": 0.8},
+            {"id": "learning:mkg:b", "action": "update", "text": "b", "confidence": 0.8},
+        ]
+        process_project._write_processing(
+            FakeTx(),
+            project_common.ProjectRef(id="mkg", name="MKG"),
+            "session-1",
+            "turn",
+            [
+                {"event_id": "event-1", "timestamp": "2026-06-17T11:00:00+00:00"},
+                {"event_id": "event-2", "timestamp": "2026-06-17T11:30:00+00:00"},
+            ],
+            rows,
+            "model",
+            "called",
+            None,
+            None,
+            "2026-06-17T12:00:00+00:00",
+            user_id="tomaz@example.com",
+        )
+        writes = [
+            (query, kwargs)
+            for query, kwargs in zip(queries, params)
+            if "UNWIND $learnings AS row" in query
+        ]
+        self.assertEqual(len(writes), 2, "create and update paths")
+        for query, kwargs in writes:
+            with self.subTest(path=kwargs["learnings"][0]["action"]):
+                self.assertEqual(kwargs["window_end"], "2026-06-17T11:30:00+00:00")
+                self.assertIn("MATCH (s)-[:HAS_SUBAGENT*0..]->(:Session)<-[i:INJECTED_IN]-(l)", query)
+                self.assertIn(
+                    "l.support_count = coalesce(l.support_count, 0) + CASE WHEN echo THEN 0 ELSE 1 END",
+                    query,
+                )
+                self.assertIn("l.echo_count = CASE WHEN echo THEN", query)
+                self.assertIn("WHEN NOT echo AND coalesce(l.confidence, 0.0) < row.confidence", query)
+                self.assertNotIn("l.support_count = coalesce(l.support_count, 0) + 1", query)
+
     def test_event_corpus_includes_intermediate_assistant_messages(self) -> None:
         base_records = [
             {

@@ -30,7 +30,8 @@ only at Stop, never at SessionEnd:
 5. Resolve: newer information is preferred but not absolute.
    - no contradiction .......... candidate -> ``approved``
    - already learned ........... candidate -> ``already_learned`` (``ALREADY_LEARNED_FROM``);
-     the canonical item's ``support_count`` is reinforced (+1) and its confidence raised
+     the canonical item's ``support_count`` is reinforced (+1) and its confidence raised,
+     unless the candidate's session was already injected with it (an echo: ``echo_count`` +1)
    - candidate wins a conflict .. candidate -> ``approved``; loser -> ``rejected`` (``SUPERSEDES``)
    - an existing item vetoes .... candidate -> ``rejected`` (``CONTRADICTED_BY``); existing stays approved
    - only ambiguous conflicts ... both sides are kept: candidate -> ``approved``
@@ -865,15 +866,29 @@ def _apply_resolutions(tx, *, label: str, rows: list[dict[str, Any]], model: str
         CALL (c, row) {{
             UNWIND row.already_learned_ids AS aid
             MATCH (canon:{label} {{id: aid}})
-            SET canon.support_count = coalesce(canon.support_count, 0) + 1,
+            // A candidate from a session the canonical item was already
+            // injected into restates the injection: it still collapses, but
+            // as an echo it leaves support, confidence and reinforcement time
+            // alone. Otherwise a stale item that keeps being injected would
+            // gain the support that lets it veto its own correction.
+            WITH c, aid, canon,
+                 EXISTS {{
+                     MATCH (c)-[:FROM_SESSION]->(:Session)-[:HAS_SUBAGENT*0..]->(:Session)
+                           <-[i:INJECTED_IN]-(canon)
+                     WHERE i.first_injected_at <= coalesce(c.created_at, datetime($timestamp))
+                 }} AS echo
+            SET canon.support_count = coalesce(canon.support_count, 0) + CASE WHEN echo THEN 0 ELSE 1 END,
+                canon.echo_count = CASE WHEN echo THEN coalesce(canon.echo_count, 0) + 1 ELSE canon.echo_count END,
                 canon.confidence = CASE
-                    WHEN coalesce(canon.confidence, 0.0) < coalesce(c.confidence, 0.0)
+                    WHEN NOT echo AND coalesce(canon.confidence, 0.0) < coalesce(c.confidence, 0.0)
                     THEN c.confidence ELSE canon.confidence END,
-                canon.last_reinforced_at = datetime($timestamp),
+                canon.last_reinforced_at = CASE
+                    WHEN echo THEN canon.last_reinforced_at ELSE datetime($timestamp) END,
                 c.already_learned_from = aid,
                 c.already_learned_at = datetime($timestamp)
             MERGE (c)-[r:ALREADY_LEARNED_FROM]->(canon)
-            SET r.created_at = datetime($timestamp)
+            SET r.created_at = datetime($timestamp),
+                r.echo = echo
             RETURN count(*) AS already_learned
         }}
         RETURN count(*) AS updated

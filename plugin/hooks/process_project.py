@@ -91,7 +91,11 @@ Prefer updating existing memory when it is materially the same idea. The existin
 list spans both scopes; a restatement of a listed user fact is an update to that
 id, not a new item. Create a new item only for a distinct reusable learning.
 Return ignore when the work is routine, transient, or already covered without
-needing reinforcement.
+needing reinforcement. An existing item marked injected_this_session=true was
+shown to the assistant during this session: the assistant following, quoting,
+or applying it is not new evidence that it holds, so return ignore for it.
+Update such an item only when the work corrected it, added a materially new
+detail, or hit its error again.
 
 A learning is any durable, reusable fact worth recalling in a future session:
 reusable facts, environment quirks, domain observations, durable user
@@ -436,11 +440,13 @@ def _format_existing_memory(
                     f"error_signature={item.get('error_signature')}; "
                     f"resolved={bool(item.get('resolved'))}; "
                 )
+            injected = "injected_this_session=true; " if item.get("injected_this_session") else ""
             lines.append(
                 "- "
                 f"id={item.get('id')}; "
                 f"scope={item.get('scope') or 'project'}; "
                 f"status={item.get('status')}; "
+                f"{injected}"
                 f"task_pattern={item.get('task_pattern')}; "
                 f"{error_fields}"
                 f"text={truncate(str(item.get('text') or ''), 300)}"
@@ -448,6 +454,45 @@ def _format_existing_memory(
     else:
         lines.append("- none")
     return "\n".join(lines)
+
+
+def _flag_injected_in_session(
+    driver,
+    database: str,
+    session_id: str,
+    learnings: list[dict[str, Any]],
+    window_end: str,
+) -> None:
+    """Mark the existing learnings injected into this session (or one of its
+    subagents) by the end of the window.
+
+    The extractor is told that the assistant repeating or applying one of them
+    is not new evidence; the write path enforces the same rule on
+    support_count. A failed lookup leaves the list unmarked rather than
+    failing extraction."""
+    ids = [str(item["id"]) for item in learnings if item.get("id")]
+    if not ids:
+        return
+    try:
+        result = driver.execute_query(
+            """
+            MATCH (:Session {session_id: $session_id})-[:HAS_SUBAGENT*0..]->(:Session)
+                  <-[i:INJECTED_IN]-(l:Learning)
+            WHERE l.id IN $ids AND i.first_injected_at <= datetime($window_end)
+            RETURN DISTINCT l.id AS id
+            """,
+            session_id=session_id,
+            ids=ids,
+            window_end=window_end,
+            database_=database,
+        )
+        injected = {record["id"] for record in result.records}
+    except Exception as exc:
+        print(f"[process_project] injected-memory lookup failed: {exc}", file=sys.stderr)
+        return
+    for item in learnings:
+        if item.get("id") in injected:
+            item["injected_this_session"] = True
 
 
 def render_memory_extraction_prompt(
@@ -934,6 +979,7 @@ def _write_processing(
 
     learning_create_rows = [row for row in learning_rows if row.get("action") == "create"]
     learning_update_rows = [row for row in learning_rows if row.get("action") == "update"]
+    window_end = _window_bounds(events)[1] or timestamp
 
     if learning_create_rows:
         tx.run(
@@ -961,6 +1007,14 @@ def _write_processing(
                           l.retrieval_count = 0,
                           l.consolidated = false,
                           l.support_count = 0
+            // Restating a learning this session (or a subagent) was already
+            // injected with echoes the injection: it is not independent
+            // support, so it raises neither support_count nor confidence.
+            WITH p, s, pp, row, l,
+                 EXISTS {
+                     MATCH (s)-[:HAS_SUBAGENT*0..]->(:Session)<-[i:INJECTED_IN]-(l)
+                     WHERE i.first_injected_at <= datetime($window_end)
+                 } AS echo
             SET l.text = row.text,
                 l.task_pattern = row.task_pattern,
                 l.kind = coalesce(row.kind, l.kind, 'fact'),
@@ -980,9 +1034,10 @@ def _write_processing(
                 // flag: a compiled learning stays served by its skill, a
                 // folded user fact re-enters recall and the profile backlog.
                 l.consolidated = (l.compiled_at IS NOT NULL),
-                l.support_count = coalesce(l.support_count, 0) + 1,
+                l.support_count = coalesce(l.support_count, 0) + CASE WHEN echo THEN 0 ELSE 1 END,
+                l.echo_count = CASE WHEN echo THEN coalesce(l.echo_count, 0) + 1 ELSE l.echo_count END,
                 l.confidence = CASE
-                    WHEN coalesce(l.confidence, 0.0) < row.confidence THEN row.confidence
+                    WHEN NOT echo AND coalesce(l.confidence, 0.0) < row.confidence THEN row.confidence
                     ELSE l.confidence
                 END
             MERGE (p)-[:HAS_LEARNING]->(l)
@@ -1002,6 +1057,7 @@ def _write_processing(
             session_id=session_id,
             processing_id=processing_id,
             learnings=learning_create_rows,
+            window_end=window_end,
             timestamp=timestamp,
         )
 
@@ -1025,7 +1081,12 @@ def _write_processing(
                  // the approved badge and human provenance.
                  (l.status = 'approved'
                   AND row.text IS NOT NULL
-                  AND row.text <> l.text) AS demoted
+                  AND row.text <> l.text) AS demoted,
+                 // Same echo rule as the create path.
+                 EXISTS {
+                     MATCH (s)-[:HAS_SUBAGENT*0..]->(:Session)<-[i:INJECTED_IN]-(l)
+                     WHERE i.first_injected_at <= datetime($window_end)
+                 } AS echo
             SET l.text = coalesce(row.text, l.text),
                 l.task_pattern = coalesce(row.task_pattern, l.task_pattern),
                 l.kind = coalesce(row.kind, l.kind),
@@ -1041,7 +1102,8 @@ def _write_processing(
                 l.project_id = coalesce(l.project_id, $project_id),
                 l.updated_at = datetime($timestamp),
                 l.consolidated = (l.compiled_at IS NOT NULL),
-                l.support_count = coalesce(l.support_count, 0) + 1,
+                l.support_count = coalesce(l.support_count, 0) + CASE WHEN echo THEN 0 ELSE 1 END,
+                l.echo_count = CASE WHEN echo THEN coalesce(l.echo_count, 0) + 1 ELSE l.echo_count END,
                 l.status = CASE WHEN demoted THEN 'candidate' ELSE l.status END,
                 l.reviewed_by = CASE WHEN demoted THEN null ELSE l.reviewed_by END,
                 l.reviewed_at = CASE WHEN demoted THEN null ELSE l.reviewed_at END,
@@ -1051,7 +1113,7 @@ def _write_processing(
                 l.consistency_status = CASE WHEN demoted THEN null ELSE l.consistency_status END,
                 l.consistency_checked_at = CASE WHEN demoted THEN null ELSE l.consistency_checked_at END,
                 l.confidence = CASE
-                    WHEN coalesce(l.confidence, 0.0) < row.confidence THEN row.confidence
+                    WHEN NOT echo AND coalesce(l.confidence, 0.0) < row.confidence THEN row.confidence
                     ELSE l.confidence
                 END
             MERGE (p)-[:HAS_LEARNING]->(l)
@@ -1065,6 +1127,7 @@ def _write_processing(
             session_id=session_id,
             processing_id=processing_id,
             learnings=learning_update_rows,
+            window_end=window_end,
             timestamp=timestamp,
         )
 
@@ -1292,6 +1355,13 @@ def process_project(payload: dict[str, Any], mode: str, limit: int) -> None:
                     query_vector=query_vector,
                     include_consolidated=True,
                     user_id=user.id,
+                )
+                _flag_injected_in_session(
+                    driver,
+                    database,
+                    session_id,
+                    similar_learnings + similar_user_learnings,
+                    _window_bounds(events)[1] or timestamp,
                 )
                 prompt = build_memory_extraction_prompt(
                     project,

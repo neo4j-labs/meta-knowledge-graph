@@ -592,6 +592,44 @@ class TombstoneTests(unittest.TestCase):
         self.assertIn("UNWIND row.unclear_conflicts AS u", query)
         self.assertIn("r.reason = u.reason", query)
 
+    def test_already_learned_from_an_injected_session_is_an_echo(self):
+        captured: list[str] = []
+
+        class _Tx:
+            def run(self, query, **params):
+                captured.append(query)
+
+        consistency_gate._apply_resolutions(
+            _Tx(),
+            label="Learning",
+            rows=[
+                {
+                    "id": "cand",
+                    "outcome": "already_learned",
+                    "consistency": "already_learned",
+                    "superseded_ids": [],
+                    "contradicted_by_ids": [],
+                    "unclear_conflicts": [],
+                    "already_learned_ids": ["canon"],
+                }
+            ],
+            model="m",
+            timestamp="2026-07-01T00:00:00Z",
+        )
+        query = captured[0]
+        # The duplicate still collapses, but a restatement of what the session
+        # was injected with must not reinforce the canonical item.
+        self.assertIn("<-[i:INJECTED_IN]-(canon)", query)
+        self.assertIn("[:HAS_SUBAGENT*0..]", query)
+        self.assertIn(
+            "canon.support_count = coalesce(canon.support_count, 0) + CASE WHEN echo THEN 0 ELSE 1 END",
+            query,
+        )
+        self.assertIn("WHEN NOT echo AND coalesce(canon.confidence, 0.0)", query)
+        self.assertIn("WHEN echo THEN canon.last_reinforced_at", query)
+        self.assertIn("r.echo = echo", query)
+        self.assertNotIn("canon.support_count = coalesce(canon.support_count, 0) + 1,", query)
+
     def test_apply_resolutions_stamps_block_fields_without_consistency(self):
         captured: list[str] = []
 
