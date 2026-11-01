@@ -469,6 +469,12 @@ nodes. The gate is additive — only the LLM judge is required; with the judge
 unavailable (or `MKG_CONSISTENCY_GATE=0`) candidates stay `candidate` as
 before, and the sweep resolves them once the judge returns.
 
+#### Discovering learned skills
+
+On `UserPromptSubmit`, the context hook reuses the prompt embedding to suggest up to five approved skill slugs from the current project with cosine similarity at least **0.8**. It scores the project's live skills before applying the limit, so inactive skills cannot crowd out eligible matches. No matching skill or no usable embedding means no skill suggestions; a failed skill lookup leaves successful learning recall intact. Only slugs and a `skill_fetch` hint enter context. The agent loads the selected procedure through MCP.
+
+Prompt suggestions and the session-start slug catalog are independently configurable. `MKG_SKILL_PROMPT_INJECT=0` disables suggestions; `MKG_SKILL_CATALOG_INJECT=0` disables the startup catalog. Both default to enabled. `skill_search` continues to return candidate slugs and descriptions for explicit discovery, and `skill_fetch` expands one procedure with its provenance.
+
 #### Human-in-the-loop skill publishing
 
 Skills are the one tier where a person can opt back in as a dependency. A
@@ -716,6 +722,9 @@ injected.
 | `NEO4J_TRANSPORT` | `--transport` | `stdio` | |
 | `MKG_USER_ID` | — | detected | Who you are to MKG: the id every session, learning, observation, and profile is tagged with, and that user-scoped recall filters on. Use an email. When unset, the signed-in Claude Code / Codex account email is used, then `git config user.email`, then the OS user name (see [User identity](#user-identity)). Set it explicitly on shared or CI machines. |
 | `MKG_CLIENT` | — | — | Optional harness hint (`claude_code` / `codex`) telling identity resolution which signed-in account to read first when `MKG_USER_ID` is unset. The Codex hook and MCP wiring set it; Claude Code is detected from its own env markers. |
+| `MKG_SKILL_PROMPT_INJECT` | — | `1` | Inject up to five matching approved skill slugs on `UserPromptSubmit`. Set to `0` to disable. Procedure bodies remain behind `skill_fetch`. |
+| `MKG_SKILL_INJECT_MIN_SIMILARITY` | — | `0.8` | Minimum raw cosine similarity between prompt and skill embeddings for prompt-time suggestions. Independent of the learning-recall threshold. |
+| `MKG_SKILL_CATALOG_INJECT` | — | `1` | Include the compact live-skill catalog at `SessionStart`. Independent of prompt-time suggestions. |
 | `MKG_SKILL_ACTIVATION` | — | `auto` | Who publishes a safety-screened skill proposal. `auto` lets the background service activate it in the same run that screened it. `human` (also `review` / `hitl` / `manual`) parks it in `skill_review_queue` until a person approves it through `project_resolve_skill` — the `/mkg-skill-review` command walks the reviewer through the queue. See [Human-in-the-loop skill publishing](#human-in-the-loop-skill-publishing). |
 | `OPENAI_API_KEY` | — | — | Default provider key for Codex/dev runs: the hooks call `LLM_MODEL` and Neocarta embeds with `EMBEDDING_MODEL`, both via litellm, and both default to OpenAI models outside Claude Code. Claude Code hook batches can default to Claude subscription OAuth when `LLM_MODEL` is unset. For other providers, set the relevant model var and supply that provider's key. |
 | `DIFFBOT_TOKEN` | — | — | Enables `search_news` and `enhance_entity` when set. |
