@@ -21,10 +21,14 @@ rarely:
    pending — approved, project-scoped, carrying a ``task_pattern``, and not
    yet folded into (or proposed for) a live skill.
 3. Group by procedure, not by topic. Every learning's ``task_pattern``
-   resolves to a first-class ``(:TaskPattern)`` node — exact normalized match
-   first, then pattern-embedding similarity
-   (``MKG_TASK_PATTERN_SIMILARITY_THRESHOLD``) — and a group is simply the
-   learnings ``TAGGED_WITH`` one pattern. There is no cosine floor over
+   resolves to a first-class ``(:TaskPattern)`` node by exact normalized match
+   (aliases left by earlier merges included), and a group is simply the
+   learnings ``TAGGED_WITH`` one pattern. Paraphrased labels are not guessed
+   at here: the task-pattern merge job (``merge_task_patterns.py``: GDS
+   Leiden communities over pattern embeddings, then an LLM merge decision,
+   at most once per ``MKG_TASK_PATTERN_MERGE_INTERVAL_HOURS``) runs at the
+   start of each invocation and folds them together before grouping. There
+   is no cosine floor over
    learning *text* at all: full-text similarity measures "same neighborhood",
    not "same procedure". Eligible learnings and the *anchors*
    (learnings already derived into live skills) are grouped together: a group
@@ -123,7 +127,6 @@ from project_common import (  # noqa: E402
     llm_ready,
     load_mkg_env,
     neo4j_config,
-    normalize_task_pattern,
     project_env,
     project_git_root,
     resolve_project,
@@ -136,14 +139,16 @@ from project_common import (  # noqa: E402
     skill_max_proposals_per_run,
     skill_min_cluster_size,
     skill_node_id,
-    task_pattern_node_id,
-    task_pattern_similarity_threshold,
     slugify,
     truncate,
 )
 from consistency_gate import (  # noqa: E402
     _parse_safety as parse_safety_verdict,
     ensure_memory_vector_indexes,
+)
+from merge_task_patterns import (  # noqa: E402
+    resolve_task_patterns,
+    run_task_pattern_merge,
 )
 
 
@@ -361,37 +366,6 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     if norm_left == 0.0 or norm_right == 0.0:
         return 0.0
     return dot / (norm_left * norm_right)
-
-
-def match_task_pattern(
-    normalized: str,
-    embedding: list[float] | None,
-    existing: list[dict[str, Any]],
-    floor: float,
-) -> str | None:
-    """Resolve one pattern string against the existing ``:TaskPattern`` nodes.
-
-    Exact normalized match wins outright; otherwise the nearest pattern by
-    embedding, if it clears ``floor``. The configurable floor applies to
-    short procedural labels, not full learning text, and defaults to 0.80.
-    Returns the matched pattern id, or ``None`` to mint a new node.
-    """
-    for row in existing:
-        if row.get("normalized") == normalized:
-            return str(row["id"])
-    if embedding:
-        best_id: str | None = None
-        best_score = 0.0
-        for row in existing:
-            vector = row.get("embedding")
-            if not vector:
-                continue
-            score = cosine_similarity(embedding, vector)
-            if score > best_score:
-                best_score, best_id = score, str(row["id"])
-        if best_id is not None and best_score >= floor:
-            return best_id
-    return None
 
 
 def group_by_pattern(pattern_by_learning: dict[str, str]) -> list[list[str]]:
@@ -1033,153 +1007,6 @@ def fetch_anchor_learnings(
     return [dict(record) for record in records]
 
 
-def fetch_existing_task_patterns(
-    driver, database: str, project_id: str
-) -> list[dict[str, Any]]:
-    records = _execute_query(
-        driver,
-        database,
-        """
-        MATCH (tp:TaskPattern {project_id: $project_id})
-        RETURN tp.id AS id, tp.normalized AS normalized, tp.embedding AS embedding
-        """,
-        project_id=project_id,
-    )
-    return [dict(record) for record in records]
-
-
-def fetch_existing_tags(
-    driver, database: str, learning_ids: list[str]
-) -> dict[str, str]:
-    if not learning_ids:
-        return {}
-    records = _execute_query(
-        driver,
-        database,
-        """
-        MATCH (l:Learning)-[:TAGGED_WITH]->(tp:TaskPattern)
-        WHERE l.id IN $ids
-        RETURN l.id AS learning_id, tp.id AS pattern_id
-        """,
-        ids=learning_ids,
-    )
-    return {str(r["learning_id"]): str(r["pattern_id"]) for r in records}
-
-
-def resolve_task_patterns(
-    driver,
-    database: str,
-    project_id: str,
-    rows: list[dict[str, Any]],
-    floor: float,
-    now: str,
-) -> dict[str, str]:
-    """Ensure every learning row is ``TAGGED_WITH`` a ``:TaskPattern`` node.
-
-    Resolution per untagged learning: exact normalized match against the
-    project's existing patterns, then nearest pattern embedding above
-    ``floor``, else a new node is minted (and immediately joins the candidate
-    pool, so same-batch paraphrases collapse). Without embedding credentials
-    this degrades to exact-match-only — a paraphrased pattern then mints its
-    own node, which merely splits one skill group until a human or a later
-    merge catches it.
-
-    Every resolved pattern is also linked ``(tp)-[:OBSERVED_IN]->(:Session)``
-    to the origin sessions of its tagged learnings, making the pattern the
-    grouping hub for the whole task: through the sessions it transitively
-    collects the tool failures and observations of one kind
-    of task, which is where the skill proposer sources its error context.
-    Returns learning id -> pattern id for every row with a task pattern.
-    """
-    rows = [row for row in rows if str(row.get("task_pattern") or "").strip()]
-    tagged = fetch_existing_tags(driver, database, [str(r["id"]) for r in rows])
-    existing = fetch_existing_task_patterns(driver, database, project_id)
-
-    untagged = [row for row in rows if str(row["id"]) not in tagged]
-    raw_patterns = [str(row["task_pattern"]).strip() for row in untagged]
-    vectors = embed_texts(raw_patterns) if untagged else []
-
-    assignments: list[dict[str, Any]] = []
-    for row, raw, vector in zip(untagged, raw_patterns, vectors):
-        normalized = normalize_task_pattern(raw)
-        if not normalized:
-            continue
-        matched = match_task_pattern(normalized, vector, existing, floor)
-        if matched is None:
-            matched = task_pattern_node_id(project_id, normalized)
-            existing.append(
-                {"id": matched, "normalized": normalized, "embedding": vector}
-            )
-            assignments.append(
-                {
-                    "learning_id": str(row["id"]),
-                    "pattern_id": matched,
-                    "text": raw,
-                    "normalized": normalized,
-                    "embedding": vector,
-                    "is_new": True,
-                }
-            )
-        else:
-            assignments.append(
-                {
-                    "learning_id": str(row["id"]),
-                    "pattern_id": matched,
-                    "text": raw,
-                    "normalized": normalized,
-                    "embedding": None,
-                    "is_new": False,
-                }
-            )
-        tagged[str(row["id"])] = matched
-
-    if assignments:
-        _execute_query(
-            driver,
-            database,
-            """
-            MATCH (p:Project {id: $project_id})
-            UNWIND $assignments AS row
-            MERGE (tp:TaskPattern {id: row.pattern_id})
-            ON CREATE SET tp.text = row.text,
-                          tp.normalized = row.normalized,
-                          tp.project_id = $project_id,
-                          tp.embedding = row.embedding,
-                          tp.created_at = datetime($now)
-            SET tp.updated_at = datetime($now)
-            MERGE (p)-[:HAS_TASK_PATTERN]->(tp)
-            WITH row, tp
-            MATCH (l:Learning {id: row.learning_id})
-            MERGE (l)-[t:TAGGED_WITH]->(tp)
-            ON CREATE SET t.created_at = datetime($now)
-            """,
-            project_id=project_id,
-            assignments=assignments,
-            now=now,
-        )
-
-    if tagged:
-        # Materialize the task hub for every tagged learning (not only this
-        # batch's assignments): MERGE keeps the backfill idempotent.
-        _execute_query(
-            driver,
-            database,
-            """
-            UNWIND $links AS row
-            MATCH (l:Learning {id: row.learning_id})-[:FROM_SESSION]->(s:Session)
-            MATCH (tp:TaskPattern {id: row.pattern_id})
-            MERGE (tp)-[o:OBSERVED_IN]->(s)
-            ON CREATE SET o.created_at = datetime($now)
-            """,
-            links=[
-                {"learning_id": learning_id, "pattern_id": pattern_id}
-                for learning_id, pattern_id in tagged.items()
-            ],
-            now=now,
-        )
-    return tagged
-
-
 def fetch_skill_inventory(driver, database: str, project_id: str) -> list[dict[str, Any]]:
     records = _execute_query(
         driver,
@@ -1719,7 +1546,6 @@ def consolidate(payload: dict[str, Any]) -> None:
     uri, db_user, password, database = neo4j_config()
     threshold = skill_consolidation_threshold()
     interval_hours = skill_consolidation_interval_hours()
-    pattern_floor = task_pattern_similarity_threshold()
     min_size = skill_min_cluster_size()
 
     with GraphDatabase.driver(uri, auth=(db_user, password)) as driver:
@@ -1733,6 +1559,15 @@ def consolidate(payload: dict[str, Any]) -> None:
         # unscreened and leaves the screened backlog to the reviewer.
         if llm_ready():
             activate_pending_proposals(driver, database, project.id, timestamp)
+
+        # Fold paraphrased task patterns together before anything groups on
+        # them. The merge job keeps its own (shorter) cooldown and is a
+        # single read when it is not due; a failure must not cost the
+        # skill pass.
+        try:
+            run_task_pattern_merge(driver, database, project, now)
+        except Exception as exc:
+            print(f"[consolidate_skills] task-pattern merge failed: {exc}", file=sys.stderr)
 
         pending_count = count_eligible_learnings(driver, database, project.id)
         last_run_at = read_last_skill_run(driver, database, project.id)
@@ -1778,7 +1613,6 @@ def consolidate(payload: dict[str, Any]) -> None:
             database,
             project.id,
             [*eligible, *anchors],
-            floor=pattern_floor,
             now=timestamp,
         )
         groups = group_by_pattern(pattern_by_learning)

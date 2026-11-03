@@ -22,7 +22,7 @@ MAX_LEARNING_TEXT = 500
 HYBRID_RRF_K = 60.0
 HYBRID_KEYWORD_TERMS = 16
 # Relevance floor for prompt-time injection, in raw cosine units (matching
-# MKG_TASK_PATTERN_SIMILARITY_THRESHOLD). Gated recall is vector-only: a
+# MKG_SKILL_INJECT_MIN_SIMILARITY). Gated recall is vector-only: a
 # keyword hit carries a Lucene score with no cosine scale, so it can neither
 # clear nor fail the floor and is not consulted at all. Without a prompt
 # embedding there is nothing to gate, so nothing is injected. Learnings that
@@ -1780,9 +1780,11 @@ def inject_min_similarity() -> float:
 # person approves it through ``project_resolve_skill``.
 #
 # Grouping is procedural, not thematic: every learning's ``task_pattern``
-# resolves to a first-class ``(:TaskPattern)`` node (exact normalized match,
-# then pattern-embedding similarity), and a skill group is simply the learnings
-# tagged with one pattern — no cosine floor over learning text at all.
+# resolves to a first-class ``(:TaskPattern)`` node by exact normalized match
+# (including aliases a merge left behind), and a skill group is simply the
+# learnings tagged with one pattern — no cosine floor over learning text at
+# all. Paraphrased patterns are folded together later by the task-pattern
+# merge job (hooks/merge_task_patterns.py), never at tag time.
 SKILL_CONSOLIDATION_THRESHOLD = 4
 SKILL_CONSOLIDATION_INTERVAL_HOURS = 24.0
 SKILL_MIN_CLUSTER_SIZE = 2
@@ -1791,11 +1793,19 @@ SKILL_MIN_CLUSTER_SIZE = 2
 # attempts count toward the budget so a bad model day cannot burn unbounded
 # calls.
 SKILL_MAX_PROPOSALS_PER_RUN = 2
-# Require a close semantic match between short task-pattern labels.
-# This configurable heuristic depends on the embedding model; recalibrate
-# when changing EMBEDDING_MODEL.
-TASK_PATTERN_SIMILARITY_THRESHOLD = 0.80
 SKILL_INJECT_MIN_SIMILARITY = 0.80
+
+# Task-pattern merge job: a rate-limited batch pass that builds a similarity
+# graph over pattern-label embeddings, finds communities with GDS Leiden, and
+# asks the LLM which labels in each community name the same task.
+TASK_PATTERN_MERGE_INTERVAL_HOURS = 8.0
+# Raw-cosine floor for an edge in the pattern similarity graph. It only
+# decides which labels the LLM gets to compare, not what merges, so it sits
+# well below what an automatic match would need. Depends on the embedding
+# model; recalibrate when changing EMBEDDING_MODEL.
+TASK_PATTERN_EDGE_MIN_SIMILARITY = 0.65
+# LLM calls (one per community) a single merge pass may spend.
+TASK_PATTERN_MERGE_MAX_COMMUNITIES = 10
 MAX_SKILL_CONTENT = 4000
 MAX_SKILL_DESCRIPTION = 300
 _FALSEY_ENV = {"0", "false", "off", "no"}
@@ -1857,9 +1867,36 @@ def skill_max_proposals_per_run() -> int:
     )
 
 
-def task_pattern_similarity_threshold() -> float:
-    return _env_float(
-        "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD", TASK_PATTERN_SIMILARITY_THRESHOLD
+def task_pattern_merge_enabled() -> bool:
+    """The merge job is on by default; ``MKG_TASK_PATTERN_MERGE=0`` disables."""
+    return os.environ.get("MKG_TASK_PATTERN_MERGE", "1").strip().lower() not in _FALSEY_ENV
+
+
+def task_pattern_merge_interval_hours() -> float:
+    return max(
+        0.0,
+        _env_float(
+            "MKG_TASK_PATTERN_MERGE_INTERVAL_HOURS", TASK_PATTERN_MERGE_INTERVAL_HOURS
+        ),
+    )
+
+
+def task_pattern_edge_min_similarity() -> float:
+    threshold = _env_float(
+        "MKG_TASK_PATTERN_EDGE_MIN_SIMILARITY", TASK_PATTERN_EDGE_MIN_SIMILARITY
+    )
+    return max(-1.0, min(1.0, threshold))
+
+
+def task_pattern_merge_max_communities() -> int:
+    return max(
+        1,
+        int(
+            _env_float(
+                "MKG_TASK_PATTERN_MERGE_MAX_COMMUNITIES",
+                TASK_PATTERN_MERGE_MAX_COMMUNITIES,
+            )
+        ),
     )
 
 

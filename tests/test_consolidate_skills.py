@@ -100,39 +100,6 @@ class GroupingTests(unittest.TestCase):
         )
         self.assertEqual(project_common.normalize_task_pattern(None), "")
 
-    def test_match_prefers_exact_normalized_match(self) -> None:
-        existing = [
-            {"id": "tp-1", "normalized": "verify plugin release", "embedding": [0.0, 1.0]},
-            {"id": "tp-2", "normalized": "rebuild cache venv", "embedding": [1.0, 0.0]},
-        ]
-        matched = consolidate_skills.match_task_pattern(
-            "verify plugin release", [1.0, 0.0], existing, floor=0.80
-        )
-        self.assertEqual(matched, "tp-1")
-
-    def test_match_falls_back_to_embedding_above_floor(self) -> None:
-        existing = [
-            {"id": "tp-1", "normalized": "verify plugin release", "embedding": [1.0, 0.0]},
-        ]
-        matched = consolidate_skills.match_task_pattern(
-            "check release end to end", [0.95, 0.31], existing, floor=0.80
-        )
-        self.assertEqual(matched, "tp-1")
-        no_match = consolidate_skills.match_task_pattern(
-            "debug cypher query", [0.0, 1.0], existing, floor=0.80
-        )
-        self.assertIsNone(no_match)
-
-    def test_match_without_embedding_is_exact_only(self) -> None:
-        existing = [
-            {"id": "tp-1", "normalized": "verify plugin release", "embedding": [1.0, 0.0]},
-        ]
-        self.assertIsNone(
-            consolidate_skills.match_task_pattern(
-                "verify the plugin release", None, existing, floor=0.80
-            )
-        )
-
     def test_group_by_pattern(self) -> None:
         groups = consolidate_skills.group_by_pattern(
             {"l1": "tp-1", "l2": "tp-1", "l3": "tp-2"}
@@ -783,7 +750,10 @@ class SkillConfigTests(unittest.TestCase):
                 "MKG_SKILL_CONSOLIDATION_THRESHOLD",
                 "MKG_SKILL_CONSOLIDATION_INTERVAL_HOURS",
                 "MKG_SKILL_MIN_CLUSTER_SIZE",
-                "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD",
+                "MKG_TASK_PATTERN_MERGE",
+                "MKG_TASK_PATTERN_MERGE_INTERVAL_HOURS",
+                "MKG_TASK_PATTERN_EDGE_MIN_SIMILARITY",
+                "MKG_TASK_PATTERN_MERGE_MAX_COMMUNITIES",
                 "MKG_SKILL_CATALOG_INJECT",
                 "MKG_SKILL_MAX_PROPOSALS_PER_RUN",
                 "MKG_SKILL_ACTIVATION",
@@ -797,14 +767,20 @@ class SkillConfigTests(unittest.TestCase):
             self.assertEqual(project_common.skill_consolidation_threshold(), 4)
             self.assertEqual(project_common.skill_consolidation_interval_hours(), 24.0)
             self.assertEqual(project_common.skill_min_cluster_size(), 2)
-            self.assertEqual(project_common.task_pattern_similarity_threshold(), 0.80)
+            self.assertTrue(project_common.task_pattern_merge_enabled())
+            self.assertEqual(project_common.task_pattern_merge_interval_hours(), 8.0)
+            self.assertEqual(project_common.task_pattern_edge_min_similarity(), 0.65)
+            self.assertEqual(project_common.task_pattern_merge_max_communities(), 10)
             self.assertEqual(project_common.skill_max_proposals_per_run(), 2)
 
     def test_env_overrides(self) -> None:
         overrides = {
             "MKG_SKILL_CONSOLIDATION": "0",
             "MKG_SKILL_CONSOLIDATION_THRESHOLD": "7",
-            "MKG_TASK_PATTERN_SIMILARITY_THRESHOLD": "0.9",
+            "MKG_TASK_PATTERN_MERGE": "off",
+            "MKG_TASK_PATTERN_MERGE_INTERVAL_HOURS": "2",
+            "MKG_TASK_PATTERN_EDGE_MIN_SIMILARITY": "0.7",
+            "MKG_TASK_PATTERN_MERGE_MAX_COMMUNITIES": "0",
             "MKG_SKILL_CATALOG_INJECT": "off",
             "MKG_SKILL_MAX_PROPOSALS_PER_RUN": "5",
         }
@@ -812,7 +788,11 @@ class SkillConfigTests(unittest.TestCase):
             self.assertFalse(project_common.skill_consolidation_enabled())
             self.assertFalse(project_common.skill_catalog_inject_enabled())
             self.assertEqual(project_common.skill_consolidation_threshold(), 7)
-            self.assertEqual(project_common.task_pattern_similarity_threshold(), 0.9)
+            self.assertFalse(project_common.task_pattern_merge_enabled())
+            self.assertEqual(project_common.task_pattern_merge_interval_hours(), 2.0)
+            self.assertEqual(project_common.task_pattern_edge_min_similarity(), 0.7)
+            # The per-pass LLM budget never drops below one call.
+            self.assertEqual(project_common.task_pattern_merge_max_communities(), 1)
             self.assertEqual(project_common.skill_max_proposals_per_run(), 5)
 
     def test_max_proposals_floor_is_one(self) -> None:

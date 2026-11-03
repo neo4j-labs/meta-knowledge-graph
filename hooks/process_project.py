@@ -612,9 +612,10 @@ def _scope_from_action(item: dict[str, Any], existing_id: str) -> str:
 
 
 # ``task_pattern`` is the grouping key skill distillation clusters on: it
-# resolves to a ``(:TaskPattern)`` node by exact normalized match first, then by
-# embedding similarity over this very string. A paragraph-length value matches
-# nothing and never will, so its learning becomes a permanent singleton that no
+# resolves to a ``(:TaskPattern)`` node by exact normalized match, and the
+# task-pattern merge job later folds paraphrases together by clustering the
+# embedding of this very string. A paragraph-length value matches and
+# clusters with nothing, so its learning becomes a permanent singleton that no
 # skill can ever form from — the field silently stops working while still
 # looking populated. Anything past a short phrase is dropped rather than
 # clipped: a null pattern leaves the learning skill-ineligible, which is the
