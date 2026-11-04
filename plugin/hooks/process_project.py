@@ -51,6 +51,7 @@ from project_common import (  # noqa: E402
     neo4j_config,
     normalize_scope,
     observation_id,
+    pair_tool_calls,
     project_env,
     project_git_root,
     resolve_llm_model,
@@ -384,8 +385,20 @@ def _later_success_same_tool(events: list[dict[str, Any]], index: int) -> str | 
 
 
 def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
+    # A tool call is logged before and after it runs, and both events carry
+    # the full tool_input. Render each call once, from its PostToolUse: that
+    # event repeats the name and input and adds the outcome. A call nothing
+    # answered keeps its PreToolUse entry and says so, since a denied or
+    # blocked call is evidence the extractor should not have to infer from an
+    # absence.
+    answered: set[int] = set()
+    unanswered: set[int] = set()
+    for pre, post in pair_tool_calls(events):
+        (answered if post is not None else unanswered).add(id(pre))
     entries: list[tuple[str, int, str]] = []
     for order, event in enumerate(events):
+        if id(event) in answered:
+            continue
         parts: list[str] = []
         event_name = _event_text(event, "event_name")
         if event_name:
@@ -397,6 +410,8 @@ def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
             text = _event_text(event, key)
             if text:
                 parts.append(f"{key}: {truncate(text, 1200)}")
+        if id(event) in unanswered:
+            parts.append("tool_result: none recorded in this window")
         if _is_failed_tool_event(event):
             error_text = tool_failure_text(event.get("tool_response"), MAX_ERROR_TEXT)
             if error_text and is_transient_failure(error_text):

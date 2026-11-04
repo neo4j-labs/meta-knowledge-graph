@@ -233,6 +233,59 @@ def is_transient_failure(text: Any) -> bool:
     return bool(flat) and any(pattern.search(flat) for pattern in _TRANSIENT_FAILURE_PATTERNS)
 
 
+def pair_tool_calls(
+    events: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+    """Pair each ``PreToolUse`` event with the ``PostToolUse`` that answered it.
+
+    A tool call is logged twice, before it runs and after it returns (a failed
+    call arrives as a normalized ``PostToolUse`` too). Pairing is one to one:
+    by ``tool_use_id`` when both events carry one, otherwise with the earliest
+    unclaimed later ``PostToolUse`` of the same tool and input. One to one
+    means two identical calls of which only one returned still leave one
+    unanswered call; an id on both sides is authoritative, so a call can never
+    claim the result of a different call that happens to share its input.
+    Returns ``(pre, post_or_None)`` in the order the ``PreToolUse`` events
+    appear in ``events``."""
+
+    def text(event: dict[str, Any], key: str) -> str:
+        value = event.get(key)
+        return value if isinstance(value, str) else ""
+
+    posts = [event for event in events if event.get("event_name") == "PostToolUse"]
+    claimed: set[int] = set()
+    pairs: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+    for pre in events:
+        if pre.get("event_name") != "PreToolUse":
+            continue
+        use_id = text(pre, "tool_use_id")
+        match = next(
+            (
+                post
+                for post in posts
+                if id(post) not in claimed and use_id and text(post, "tool_use_id") == use_id
+            ),
+            None,
+        )
+        if match is None:
+            match = next(
+                (
+                    post
+                    for post in posts
+                    if id(post) not in claimed
+                    and not (use_id and text(post, "tool_use_id"))
+                    and text(post, "timestamp") >= text(pre, "timestamp")
+                    and text(post, "tool_name") == text(pre, "tool_name")
+                    and text(post, "tool_input") == text(pre, "tool_input")
+                ),
+                None,
+            )
+        if match is not None:
+            claimed.add(id(match))
+        pairs.append((pre, match))
+    return pairs
+
+
 def _non_empty_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None

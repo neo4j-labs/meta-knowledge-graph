@@ -3388,5 +3388,91 @@ class ErrorLearningRecallTests(unittest.TestCase):
         )
         self.assertIn("- [approved, confidence 0.90] plain fact", context)
 
+
+def _tool_event(event_id, name, ts, tool_input, use_id=None, **extra):
+    event = {"event_id": event_id, "event_name": name, "tool_name": "Bash",
+             "tool_input": tool_input, "timestamp": ts}
+    if use_id:
+        event["tool_use_id"] = use_id
+    event.update(extra)
+    return event
+
+
+class ToolCallPairingTests(unittest.TestCase):
+    """A call logged before and after it runs is rendered once, not twice."""
+
+    def _corpus(self, events):
+        return process_project._event_corpus(events, 10 ** 6)
+
+    def test_paired_call_renders_its_input_once(self) -> None:
+        corpus = self._corpus([
+            _tool_event("e1", "PreToolUse", "2026-09-20T10:00:00Z", "du -sk store", "c1"),
+            _tool_event("e2", "PostToolUse", "2026-09-20T10:00:01Z", "du -sk store", "c1"),
+        ])
+        self.assertEqual(corpus.count("du -sk store"), 1)
+        self.assertIn("PostToolUse", corpus)
+        self.assertNotIn("PreToolUse", corpus)
+
+    def test_unanswered_call_keeps_its_entry_and_says_so(self) -> None:
+        corpus = self._corpus([
+            _tool_event("e1", "PreToolUse", "2026-09-20T10:00:00Z", "rm -rf build", "c9"),
+        ])
+        self.assertIn("rm -rf build", corpus)
+        self.assertIn("tool_result: none recorded", corpus)
+
+    def test_answered_call_is_not_labelled_unanswered(self) -> None:
+        corpus = self._corpus([
+            _tool_event("e1", "PreToolUse", "2026-09-20T10:00:00Z", "ls", "c1"),
+            _tool_event("e2", "PostToolUse", "2026-09-20T10:00:01Z", "ls", "c1"),
+        ])
+        self.assertNotIn("none recorded", corpus)
+
+    def test_failed_call_keeps_its_error_and_drops_the_pre_entry(self) -> None:
+        corpus = self._corpus([
+            _tool_event("e1", "PreToolUse", "2026-09-20T10:00:00Z", "uv run nope", "c1"),
+            _tool_event("e2", "PostToolUse", "2026-09-20T10:00:01Z", "uv run nope", "c1",
+                        tool_error=True, tool_response="error: no such command nope"),
+        ])
+        self.assertEqual(corpus.count("uv run nope"), 1)
+        self.assertIn("no such command nope", corpus)
+
+    def test_pairing_without_ids_falls_back_to_tool_and_input(self) -> None:
+        corpus = self._corpus([
+            _tool_event("e1", "PreToolUse", "2026-09-20T10:00:00Z", "git status"),
+            _tool_event("e2", "PostToolUse", "2026-09-20T10:00:01Z", "git status"),
+        ])
+        self.assertEqual(corpus.count("git status"), 1)
+
+    def test_identical_calls_pair_one_to_one(self) -> None:
+        # Two identical id-less calls, one of which never returned: one
+        # PreToolUse entry must survive, not both be dropped.
+        pairs = process_project.pair_tool_calls([
+            _tool_event("e1", "PreToolUse", "2026-09-20T10:00:00Z", "sleep 5"),
+            _tool_event("e2", "PreToolUse", "2026-09-20T10:00:01Z", "sleep 5"),
+            _tool_event("e3", "PostToolUse", "2026-09-20T10:00:06Z", "sleep 5"),
+        ])
+        self.assertEqual([(pre["event_id"], post and post["event_id"]) for pre, post in pairs],
+                         [("e1", "e3"), ("e2", None)])
+        corpus = self._corpus([pre for pre, _ in pairs] + [pairs[0][1]])
+        self.assertEqual(corpus.count("sleep 5"), 2)
+        self.assertEqual(corpus.count("none recorded"), 1)
+
+    def test_an_id_is_never_paired_with_another_calls_result(self) -> None:
+        pairs = process_project.pair_tool_calls([
+            _tool_event("e1", "PreToolUse", "2026-09-20T10:00:00Z", "make", "a"),
+            _tool_event("e2", "PreToolUse", "2026-09-20T10:00:01Z", "make", "b"),
+            _tool_event("e3", "PostToolUse", "2026-09-20T10:00:02Z", "make", "b"),
+        ])
+        self.assertEqual([(pre["event_id"], post and post["event_id"]) for pre, post in pairs],
+                         [("e1", None), ("e2", "e3")])
+
+    def test_a_result_logged_before_its_call_is_not_paired_by_input(self) -> None:
+        pairs = process_project.pair_tool_calls([
+            _tool_event("e0", "PostToolUse", "2026-09-20T09:59:59Z", "pwd"),
+            _tool_event("e1", "PreToolUse", "2026-09-20T10:00:00Z", "pwd"),
+        ])
+        self.assertEqual(pairs[0][1], None)
+
+
 if __name__ == "__main__":
     unittest.main()

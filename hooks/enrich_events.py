@@ -45,6 +45,7 @@ from project_common import (  # noqa: E402
     load_mkg_env,
     merge_project_and_session,
     neo4j_config,
+    pair_tool_calls,
     project_env,
     project_git_root,
     resolve_project,
@@ -334,15 +335,6 @@ def build_event_enrichment_projection(
         turn_prompts[event.get("turn_id")] = prompt_ref
         last_prompt = prompt_ref
 
-    pre_events = [event for event in sorted_events if event.get("event_name") == "PreToolUse"]
-    post_events = [event for event in sorted_events if event.get("event_name") == "PostToolUse"]
-    posts_by_use_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for event in post_events:
-        tool_use_id = _event_text(event, "tool_use_id")
-        if tool_use_id:
-            posts_by_use_id[tool_use_id].append(event)
-
-    used_post_ids: set[str] = set()
     turn_rows: dict[str, dict[str, Any]] = {}
     tool_call_rows: list[dict[str, Any]] = []
     result_rows: list[dict[str, Any]] = []
@@ -352,33 +344,11 @@ def build_event_enrichment_projection(
     dependency_rows: list[dict[str, Any]] = []
     calls_by_turn: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
-    for index, pre_event in enumerate(pre_events, start=1):
+    for index, (pre_event, post_event) in enumerate(pair_tool_calls(sorted_events), start=1):
         tool_name = _event_text(pre_event, "tool_name") or "unknown"
         raw_tool_input = _event_text(pre_event, "tool_input")
         tool_input = _json_object(raw_tool_input)
         tool_use_id = _event_text(pre_event, "tool_use_id")
-        post_event = None
-        if tool_use_id and posts_by_use_id.get(tool_use_id):
-            for candidate in posts_by_use_id[tool_use_id]:
-                candidate_id = _event_text(candidate, "event_id")
-                if candidate_id not in used_post_ids:
-                    post_event = candidate
-                    break
-        if post_event is None:
-            for candidate in post_events:
-                candidate_id = _event_text(candidate, "event_id")
-                if candidate_id in used_post_ids:
-                    continue
-                if _event_time(candidate) < _event_time(pre_event):
-                    continue
-                if _event_text(candidate, "tool_name") != tool_name:
-                    continue
-                if _event_text(candidate, "tool_input") != raw_tool_input:
-                    continue
-                post_event = candidate
-                break
-        if post_event:
-            used_post_ids.add(_event_text(post_event, "event_id"))
 
         turn_id = pre_event.get("turn_id") or (post_event or {}).get("turn_id")
         prompt_ref = turn_prompts.get(turn_id) or last_prompt or {}
