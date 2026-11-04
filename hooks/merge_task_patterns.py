@@ -74,6 +74,7 @@ from project_common import (  # noqa: E402
     embed_texts,
     ensure_project_schema,
     extraction_model_label,
+    gds_available,
     in_extraction_subprocess,
     llm_complete,
     llm_ready,
@@ -519,14 +520,6 @@ def prune_edges(edges: list[dict[str, Any]], top_k: int = EDGE_TOP_K) -> list[di
 # --------------------------------------------------------------------------- #
 # Community detection — GDS Leiden, connected components as the fallback
 # --------------------------------------------------------------------------- #
-def gds_available(driver, database: str) -> bool:
-    try:
-        _execute_query(driver, database, "RETURN gds.version() AS version")
-        return True
-    except Exception:
-        return False
-
-
 def leiden_communities(
     driver, database: str, project_id: str, edges: list[dict[str, Any]]
 ) -> dict[str, int]:

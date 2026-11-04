@@ -1045,7 +1045,10 @@ def _write_processing(
             MERGE (l)-[:FROM_SESSION]->(s)
             MERGE (pp)-[produced:PRODUCED_LEARNING]->(l)
             SET produced.llm_model = row.llm_model,
-                produced.created_at = datetime($timestamp)
+                produced.created_at = datetime($timestamp),
+                // Kept on the edge so salience can tell real work from a
+                // restated injection (learning_salience.py seeds on it).
+                produced.echo = echo
             // A user fact belongs to the person it describes: hang it off
             // their (:User) the way a project fact hangs off its (:Project).
             FOREACH (_ IN CASE WHEN row.scope = 'user' THEN [1] ELSE [] END |
@@ -1122,7 +1125,8 @@ def _write_processing(
             MERGE (pp)-[updated:UPDATED_LEARNING]->(l)
             SET updated.llm_model = row.llm_model,
                 updated.updated_at = datetime($timestamp),
-                updated.demoted_from_approved = demoted
+                updated.demoted_from_approved = demoted,
+                updated.echo = echo
             """,
             project_id=project.id,
             session_id=session_id,

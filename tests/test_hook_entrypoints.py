@@ -59,6 +59,8 @@ ENV = {
     "MKG_SKILL_CATALOG_INJECT": "1",
     "MKG_SKILL_PROMPT_INJECT": "1",
     "MKG_SKILL_INJECT_MIN_SIMILARITY": "0.8",
+    "MKG_SALIENCE": "1",
+    "MKG_SALIENCE_WEIGHT": "0.1",
 }
 
 OBSERVATION = {
@@ -258,6 +260,41 @@ class InjectProjectContextEntrypointTests(unittest.TestCase):
         self.assertNotIn("What we know about the user", context)
         injected = [params for query, params in driver.queries if "MERGE (m)-[r:INJECTED_IN]" in query]
         self.assertEqual(injected[0]["ids"], [PROJECT_LEARNING["id"]])
+        # Salience reorders a wider pool of floor-clearing candidates; the
+        # floor itself is unchanged.
+        recall = [
+            (query, params)
+            for query, params in driver.queries
+            if "VECTOR INDEX project_learning_vector" in query
+        ]
+        self.assertEqual(len(recall), 1)
+        query, params = recall[0]
+        self.assertIn("coalesce(node.salience, 0.0)", query)
+        self.assertIn("raw_score >= $min_vector_score", query)
+        self.assertAlmostEqual(params["salience_weight"], 0.1)
+        self.assertEqual(params["rank_limit"], 5 * project_common.SALIENCE_CANDIDATE_POOL)
+        self.assertEqual(params["limit"], 5)
+
+    def test_disabled_salience_leaves_prompt_recall_as_before(self) -> None:
+        driver = memory_driver()
+        payload = {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "sess-1",
+            "prompt": "how do the hooks get mirrored into the plugin payload?",
+            "cwd": PROJECT.repo_root,
+        }
+        with patch.dict(ENV, {"MKG_SALIENCE": "0"}):
+            code, _stdout, stderr = run_hook(
+                inject_project_context, payload, lambda uri, auth: driver
+            )
+        self.assertEqual((code, stderr), (0, ""))
+        recall = [
+            params
+            for query, params in driver.queries
+            if "VECTOR INDEX project_learning_vector" in query
+        ]
+        self.assertEqual(recall[0]["salience_weight"], 0.0)
+        self.assertEqual(recall[0]["rank_limit"], 5)
 
     def test_prompt_injects_skill_slugs_without_bodies_or_startup_catalog(self) -> None:
         driver = FakeDriver([
@@ -284,6 +321,10 @@ class InjectProjectContextEntrypointTests(unittest.TestCase):
         self.assertEqual(params["query_vector"], [0.1, 0.2, 0.3])
         self.assertEqual(params["limit"], 5)
         self.assertAlmostEqual(params["min_vector_score"], 0.9)
+        # Salience reorders skills that cleared the floor, on raw cosine.
+        self.assertAlmostEqual(params["salience_weight"], 0.1)
+        self.assertIn("(2.0 * score - 1.0)", query)
+        self.assertIn("coalesce(sk.salience, 0.0)", query)
 
     def test_prompt_with_no_skill_matches_emits_nothing(self) -> None:
         driver = FakeDriver()

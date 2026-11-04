@@ -1351,6 +1351,10 @@ class ProjectHookTests(unittest.TestCase):
                 self.assertIn("l.echo_count = CASE WHEN echo THEN", query)
                 self.assertIn("WHEN NOT echo AND coalesce(l.confidence, 0.0) < row.confidence", query)
                 self.assertNotIn("l.support_count = coalesce(l.support_count, 0) + 1", query)
+                # The write edge keeps the verdict, so salience seeds only on
+                # real work (learning_salience.fetch_learning_rows).
+                edge = "produced" if kwargs["learnings"][0]["action"] == "create" else "updated"
+                self.assertIn(f"{edge}.echo = echo", query)
 
     def test_event_corpus_includes_intermediate_assistant_messages(self) -> None:
         base_records = [

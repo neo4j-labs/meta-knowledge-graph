@@ -28,6 +28,7 @@ from project_common import (  # noqa: E402
     fetch_user_learnings,
     format_learning_context,
     inject_min_similarity,
+    learning_salience_weight,
     load_mkg_env,
     mark_injected_in_session,
     mark_learnings_used,
@@ -191,6 +192,7 @@ def main() -> int:
                         exclude_session_id=exclude_session_id,
                         query_vector=query_vector,
                         min_similarity=inject_min_similarity(),
+                        salience_weight=learning_salience_weight(),
                     )
                 if hook_event == "UserPromptSubmit" and skill_prompt_inject_enabled():
                     relevant_skill_slugs = fetch_relevant_skill_slugs(
@@ -199,6 +201,7 @@ def main() -> int:
                         project_id=project.id,
                         query_vector=query_vector,
                         min_similarity=skill_inject_min_similarity(),
+                        salience_weight=learning_salience_weight(),
                     )
                 learning_ids = [
                     learning["id"]

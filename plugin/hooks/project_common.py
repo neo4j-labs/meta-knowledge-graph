@@ -1444,6 +1444,17 @@ def _execute_query_single(driver, database: str, query: str, **params):
     return records[0] if records else None
 
 
+def gds_available(driver, database: str) -> bool:
+    """True when the in-database GDS plugin answers. The batch jobs that use
+    it (Leiden in the task-pattern merge, PageRank in learning salience) fall
+    back to plain Python when it does not."""
+    try:
+        _execute_query(driver, database, "RETURN gds.version() AS version")
+        return True
+    except Exception:
+        return False
+
+
 def ensure_learning_recall_flags(driver, database: str) -> None:
     """Backfill ``consolidated`` onto learnings written before the flag existed.
 
@@ -1806,6 +1817,22 @@ TASK_PATTERN_MERGE_INTERVAL_HOURS = 8.0
 TASK_PATTERN_EDGE_MIN_SIMILARITY = 0.65
 # LLM calls (one per community) a single merge pass may spend.
 TASK_PATTERN_MERGE_MAX_COMMUNITIES = 10
+
+# Learning salience (hooks/learning_salience.py): one Personalized PageRank
+# per project over the learnings graph, seeded on the project's recent,
+# non-echo work. ``l.salience`` in [0, 1] is how close a learning sits to
+# where the project has been working lately. It never makes a learning
+# eligible for recall; it only reorders what already cleared relevance.
+SALIENCE_INTERVAL_HOURS = 4.0
+# Relevance multiplier at full salience: score * (1 + weight * salience).
+SALIENCE_WEIGHT = 0.1
+# Seed decay per project session since the touch (sessions, not days, so a
+# dormant project does not fade).
+SALIENCE_DECAY = 0.9
+# With salience on, recall widens each ranked branch to this many times the
+# result limit, so a salient learning that cleared the floor can be chosen
+# over a slightly closer one instead of only being reordered within the cut.
+SALIENCE_CANDIDATE_POOL = 3
 MAX_SKILL_CONTENT = 4000
 MAX_SKILL_DESCRIPTION = 300
 _FALSEY_ENV = {"0", "false", "off", "no"}
@@ -1900,6 +1927,33 @@ def task_pattern_merge_max_communities() -> int:
     )
 
 
+def learning_salience_enabled() -> bool:
+    """Salience is on by default; ``MKG_SALIENCE=0`` disables both the job
+    and its effect on recall (scores already written are then ignored)."""
+    return os.environ.get("MKG_SALIENCE", "1").strip().lower() not in _FALSEY_ENV
+
+
+def learning_salience_interval_hours() -> float:
+    return max(0.0, _env_float("MKG_SALIENCE_INTERVAL_HOURS", SALIENCE_INTERVAL_HOURS))
+
+
+def learning_salience_weight() -> float:
+    """Recall boost at full salience; 0 when salience is disabled."""
+    if not learning_salience_enabled():
+        return 0.0
+    return max(0.0, min(1.0, _env_float("MKG_SALIENCE_WEIGHT", SALIENCE_WEIGHT)))
+
+
+def learning_salience_decay() -> float:
+    decay = _env_float("MKG_SALIENCE_DECAY", SALIENCE_DECAY)
+    return decay if 0.0 < decay <= 1.0 else SALIENCE_DECAY
+
+
+def salience_rank_limit(limit: int, salience_weight: float) -> int:
+    base = max(1, int(limit))
+    return base * SALIENCE_CANDIDATE_POOL if salience_weight > 0 else base
+
+
 def skill_node_id(project_id: str, slug: str) -> str:
     return f"skill:{project_id}:{slug}"
 
@@ -1955,6 +2009,7 @@ def fetch_relevant_skill_slugs(
     query_vector: list[float] | None,
     limit: int = 5,
     min_similarity: float = SKILL_INJECT_MIN_SIMILARITY,
+    salience_weight: float = 0.0,
 ) -> list[str]:
     """Prompt-time discovery: approved slugs only, gated by raw cosine.
 
@@ -1962,6 +2017,9 @@ def fetch_relevant_skill_slugs(
     entries cannot consume a nearest-neighbor shortlist. This small catalog
     needs no vector-index migration. Reuse the prompt's existing embedding;
     never pad from keyword search or recency when nothing clears the floor.
+
+    ``salience_weight`` reorders the skills that cleared the floor by
+    ``cosine * (1 + weight * sk.salience)``; it never admits one below it.
     """
     if not query_vector or limit <= 0:
         return []
@@ -1979,8 +2037,12 @@ def fetch_relevant_skill_slugs(
             // Similarity is float32; round its final digit so a cosine
             // of exactly 0.8 (score 0.899999976...) clears the floor.
             WHERE round(score, 7) >= $min_vector_score
+            // Boost the raw cosine, not the (1 + cos) / 2 index score, whose
+            // compressed range would let salience swamp relevance.
+            WITH sk, (2.0 * score - 1.0)
+                     * (1.0 + $salience_weight * coalesce(sk.salience, 0.0)) AS ranked
             RETURN sk.slug AS slug
-            ORDER BY score DESC, slug ASC
+            ORDER BY ranked DESC, slug ASC
             LIMIT $limit
             """,
             project_id=project_id,
@@ -1988,6 +2050,7 @@ def fetch_relevant_skill_slugs(
             # Neo4j's cosine similarity is normalized to (1 + cosine) / 2.
             min_vector_score=(1.0 + min_similarity) / 2.0,
             limit=limit,
+            salience_weight=float(salience_weight),
         )
         return [str(record["slug"]) for record in records if record["slug"]]
     except Exception as exc:
@@ -2567,6 +2630,12 @@ def _ranked_fulltext_branch(
     """
 
 
+# Applied after RRF fusion: a no-op at salience_weight 0 or for a learning the
+# salience job has not scored (coalesce to 0).
+_SALIENCE_BOOST = """WITH node, sources,
+                 score * (1.0 + $salience_weight * coalesce(node.salience, 0.0)) AS score"""
+
+
 def _fetch_memory_hybrid(
     driver,
     database: str,
@@ -2582,8 +2651,18 @@ def _fetch_memory_hybrid(
     exclude_consolidated: bool = False,
     min_similarity: float | None = None,
     user_id: str | None = None,
+    salience_weight: float = 0.0,
 ) -> list[dict[str, Any]] | None:
     """Hybrid (vector + keyword RRF) retrieval over one memory label.
+
+    ``salience_weight`` multiplies the fused score by
+    ``1 + weight * coalesce(node.salience, 0)``, where ``node.salience`` is
+    the batch-written Personalized PageRank score (learning_salience.py).
+    Every candidate must still come from a ranked branch, and under a floor
+    still clear it, so salience reorders relevant memory and never adds
+    irrelevant memory. When it is on, each branch ranks
+    ``SALIENCE_CANDIDATE_POOL`` times the limit, so the boost can choose
+    which relevant learnings make the cut, not only their order.
 
     ``min_similarity`` (raw cosine) turns the search vector-only and gated: a
     keyword hit has no cosine score to measure against the floor, so the
@@ -2639,7 +2718,7 @@ def _fetch_memory_hybrid(
         fulltext_post_filter = (
             post_filter + "\n          AND coalesce(node.consolidated, false) = false"
         )
-    rank_limit = max(1, limit)
+    rank_limit = salience_rank_limit(limit, salience_weight)
 
     params = {
         "project_id": project_id,
@@ -2648,6 +2727,7 @@ def _fetch_memory_hybrid(
         "limit": limit,
         "rank_limit": rank_limit,
         "rrf_k": HYBRID_RRF_K,
+        "salience_weight": float(salience_weight),
         "session_id": exclude_session_id,
         "user_id": user_id,
         "search_query": keyword_query,
@@ -2684,6 +2764,7 @@ def _fetch_memory_hybrid(
             WITH node,
                  sum(1.0 / ($rrf_k + rank)) AS score,
                  collect(source) AS sources
+            {_SALIENCE_BOOST}
             RETURN {projection}
             ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
                      score DESC,
@@ -2711,6 +2792,7 @@ def _fetch_memory_hybrid(
             WITH node,
                  1.0 / ($rrf_k + rank) AS score,
                  [source] AS sources
+            {_SALIENCE_BOOST}
             RETURN {projection}
             ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
                      score DESC,
@@ -2739,8 +2821,14 @@ def fetch_project_learnings(
     query_vector: list[float] | None = None,
     min_similarity: float | None = None,
     include_consolidated: bool = False,
+    salience_weight: float = 0.0,
 ) -> list[dict[str, Any]]:
-    """``include_consolidated`` keeps learnings already compiled into a live
+    """``salience_weight`` boosts the hybrid ranking by ``l.salience`` (see
+    ``_fetch_memory_hybrid``). Injection passes ``learning_salience_weight()``;
+    the extractor leaves it 0, since its list is a dedup shortlist where only
+    similarity should count.
+
+    ``include_consolidated`` keeps learnings already compiled into a live
     skill (``consolidated = true``) in the result. Injection leaves it
     ``False`` — the skill serves that knowledge — while the extractor passes
     ``True`` because this list is what it deduplicates against.
@@ -2770,6 +2858,7 @@ def fetch_project_learnings(
                 exclude_session_id=exclude_session_id,
                 exclude_consolidated=not include_consolidated,
                 min_similarity=min_similarity,
+                salience_weight=salience_weight,
             )
             # Nothing cleared the bar, or the vector index is unavailable:
             # inject nothing rather than padding from the fallbacks.
@@ -2786,6 +2875,7 @@ def fetch_project_learnings(
             project_id=project_id,
             exclude_session_id=exclude_session_id,
             exclude_consolidated=not include_consolidated,
+            salience_weight=salience_weight,
         )
         if rows:
             return rows

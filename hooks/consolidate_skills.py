@@ -87,6 +87,12 @@ threshold/cooldown gate — so proposals stranded pending by an earlier safety
 outage (or screened while human review was on and then handed back to auto)
 activate or block promptly instead of waiting for the next proposal cycle.
 
+The learning-salience pass (``learning_salience.py``: Personalized PageRank
+over the project's learnings, seeded on recent work) also runs at the start of
+every invocation, right after the task-pattern merge, on its own cooldown
+(``MKG_SALIENCE_INTERVAL_HOURS``, default 4h). It needs no LLM, so it runs
+even when the skill pass below stops for lack of credentials.
+
 Skills age as memory moves on: when a learning a live skill was derived from
 is later rejected or superseded (by the gate or by a human override), the
 resolver flags the skill ``needs_revision``. This service then prioritizes
@@ -150,6 +156,7 @@ from merge_task_patterns import (  # noqa: E402
     resolve_task_patterns,
     run_task_pattern_merge,
 )
+from learning_salience import run_learning_salience  # noqa: E402
 
 
 # Stable provenance tag for skills minted by this service, paralleling the
@@ -1568,6 +1575,14 @@ def consolidate(payload: dict[str, Any]) -> None:
             run_task_pattern_merge(driver, database, project, now)
         except Exception as exc:
             print(f"[consolidate_skills] task-pattern merge failed: {exc}", file=sys.stderr)
+
+        # Recompute learning salience (Personalized PageRank over the
+        # project's learnings, seeded on recent work). Needs no LLM, keeps its
+        # own cooldown, and a failure leaves recall on plain relevance.
+        try:
+            run_learning_salience(driver, database, project, now)
+        except Exception as exc:
+            print(f"[consolidate_skills] learning salience failed: {exc}", file=sys.stderr)
 
         pending_count = count_eligible_learnings(driver, database, project.id)
         last_run_at = read_last_skill_run(driver, database, project.id)

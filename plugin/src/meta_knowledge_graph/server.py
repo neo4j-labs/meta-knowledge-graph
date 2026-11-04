@@ -28,6 +28,32 @@ MAX_LEARNING_TEXT = 500
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 HYBRID_RRF_K = 60.0
 HYBRID_KEYWORD_TERMS = 16
+# Learning salience (hooks/learning_salience.py writes l.salience and
+# sk.salience). Kept in step with hooks/project_common.py: recall multiplies
+# relevance by 1 + weight * salience and widens each ranked branch so the
+# boost can pick among relevant candidates, never add an irrelevant one.
+SALIENCE_WEIGHT = 0.1
+SALIENCE_CANDIDATE_POOL = 3
+_FALSEY_ENV = {"0", "false", "off", "no"}
+_SALIENCE_BOOST = (
+    "WITH node, sources, "
+    "score * (1.0 + $salience_weight * coalesce(node.salience, 0.0)) AS score"
+)
+
+
+def _salience_weight() -> float:
+    if os.environ.get("MKG_SALIENCE", "1").strip().lower() in _FALSEY_ENV:
+        return 0.0
+    try:
+        weight = float(os.environ.get("MKG_SALIENCE_WEIGHT") or SALIENCE_WEIGHT)
+    except ValueError:
+        weight = SALIENCE_WEIGHT
+    return max(0.0, min(1.0, weight))
+
+
+def _salience_rank_limit(limit: int, salience_weight: float) -> int:
+    base = max(1, int(limit))
+    return base * SALIENCE_CANDIDATE_POOL if salience_weight > 0 else base
 DIFFBOT_API_BASE_URL = "https://kg.diffbot.com/kg/v3"
 DIFFBOT_TIMEOUT_SECONDS = 30.0
 MAX_DIFFBOT_LOCATIONS = 3
@@ -782,6 +808,7 @@ def create_mcp_server(
         project_id: Optional[str] = None,
         exclude_consolidated: bool = False,
         user_id: Optional[str] = None,
+        salience_weight: float = 0.0,
     ) -> list[dict]:
         keyword_query = _hybrid_keyword_query(query_text)
         if not query_vector and not keyword_query:
@@ -815,7 +842,7 @@ def create_mcp_server(
             fulltext_post_filter = (
                 post_filter + "\n          AND coalesce(node.consolidated, false) = false"
             )
-        rank_limit = max(1, int(limit))
+        rank_limit = _salience_rank_limit(limit, salience_weight)
         params = {
             "project_id": project_id,
             "scope": scope,
@@ -825,6 +852,7 @@ def create_mcp_server(
             "rank_limit": rank_limit,
             "limit": limit,
             "rrf_k": HYBRID_RRF_K,
+            "salience_weight": float(salience_weight),
             "user_id": user_id,
         }
 
@@ -882,6 +910,7 @@ def create_mcp_server(
                 WITH node,
                      sum(1.0 / ($rrf_k + rank)) AS score,
                      collect(source) AS sources
+                {_SALIENCE_BOOST}
                 RETURN {projection}
                 ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
                          score DESC,
@@ -912,6 +941,7 @@ def create_mcp_server(
             WITH row.node AS node,
                  1.0 / ($rrf_k + rank) AS score,
                  ['keyword'] AS sources
+            {_SALIENCE_BOOST}
             RETURN {projection}
             ORDER BY CASE node.status WHEN 'approved' THEN 0 ELSE 1 END,
                      score DESC,
@@ -1244,6 +1274,7 @@ def create_mcp_server(
                     limit=limit,
                     project_id=resolved_pid,
                     exclude_consolidated=True,
+                    salience_weight=_salience_weight(),
                 )
 
             if not learnings:
@@ -2281,13 +2312,15 @@ def create_mcp_server(
         if normalized_query:
             query_vector = await _embed_learning_text(normalized_query)
             keyword_query = _hybrid_keyword_query(normalized_query)
+            salience_weight = _salience_weight()
             params = {
                 "project_id": resolved_pid,
                 "search_query": keyword_query,
                 "query_vector": query_vector,
-                "rank_limit": max(1, int(limit)),
+                "rank_limit": _salience_rank_limit(limit, salience_weight),
                 "limit": limit,
                 "rrf_k": HYBRID_RRF_K,
+                "salience_weight": salience_weight,
             }
             projection = (
                 "node.slug AS slug, node.description AS description, score, sources"
@@ -2335,6 +2368,7 @@ def create_mcp_server(
                     WITH node,
                          sum(1.0 / ($rrf_k + rank)) AS score,
                          collect(source) AS sources
+                    {_SALIENCE_BOOST}
                     RETURN {projection}
                     ORDER BY score DESC
                     LIMIT $limit
@@ -2361,6 +2395,7 @@ def create_mcp_server(
                     WITH row.node AS node,
                          1.0 / ($rrf_k + rank) AS score,
                          ['keyword'] AS sources
+                    {_SALIENCE_BOOST}
                     RETURN {projection}
                     ORDER BY score DESC
                     LIMIT $limit
