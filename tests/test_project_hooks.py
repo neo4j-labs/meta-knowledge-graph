@@ -3474,5 +3474,99 @@ class ToolCallPairingTests(unittest.TestCase):
         self.assertEqual(pairs[0][1], None)
 
 
+class CorpusBudgetTests(unittest.TestCase):
+    """When a window overflows the budget, what was said stays, failed calls
+    come next, and the other tool events give way."""
+
+    PROMPT = "Do not rebuild the index when embeddings are added."
+    REPLY = "Rebuilt only the changed shard."
+
+    def _window(self, tool_calls: int, failed: dict[int, str] | None = None):
+        failed = failed or {}
+        events = [{"event_id": "e0", "event_name": "UserPromptSubmit",
+                   "prompt": self.PROMPT, "timestamp": "2026-09-20T10:00:00Z"}]
+        for number in range(tool_calls):
+            event = {"event_id": f"t{number}", "event_name": "PostToolUse",
+                     "tool_name": "Bash", "tool_use_id": f"call_{number}",
+                     "tool_input": f"call {number:02d} " + "x" * 1190,
+                     "timestamp": f"2026-09-20T10:{number // 60:02d}:{number % 60:02d}Z"}
+            if number in failed:
+                event["tool_response"] = failed[number]
+                event["tool_error"] = True
+            events.append(event)
+        events.append({"event_id": "e9", "event_name": "Stop",
+                       "last_assistant_message": self.REPLY,
+                       "timestamp": "2026-09-20T11:00:00Z"})
+        return events
+
+    @staticmethod
+    def _kept_calls(corpus: str) -> list[int]:
+        return [int(number) for number in re.findall(r"tool_input: call (\d+) ", corpus)]
+
+    def test_the_users_message_survives_a_tool_heavy_window(self) -> None:
+        corpus = process_project._event_corpus(self._window(40), 12000)
+        self.assertLessEqual(len(corpus), 12000)
+        self.assertIn(self.PROMPT, corpus)
+        self.assertIn(self.REPLY, corpus)
+        self.assertTrue(corpus.startswith("[")
+                        and corpus.split("\n", 1)[0].endswith(" events elided]"))
+
+    def test_a_window_that_fits_is_unchanged(self) -> None:
+        corpus = process_project._event_corpus(self._window(2), 12000)
+        self.assertNotIn("elided", corpus)
+        self.assertEqual(self._kept_calls(corpus), [0, 1])
+
+    def test_events_are_dropped_whole_and_stay_in_order(self) -> None:
+        corpus = process_project._event_corpus(self._window(40), 12000)
+        # Every line after the header belongs to an event kept in full.
+        self.assertTrue(corpus.split("\n")[1].startswith("Event: "))
+        kept = self._kept_calls(corpus)
+        self.assertEqual(corpus.count("x" * 1190), len(kept))
+        # The most recent tool calls are the ones kept, in their order.
+        self.assertEqual(kept, list(range(40 - len(kept), 40)))
+        self.assertLess(corpus.index(self.PROMPT), corpus.index("tool_input: call"))
+        self.assertLess(corpus.index("tool_input: call"), corpus.index(self.REPLY))
+
+    def test_a_failed_call_outlasts_the_successful_calls_after_it(self) -> None:
+        events = self._window(40, failed={0: "ModuleNotFoundError: No module named 'pytest'"})
+        corpus = process_project._event_corpus(events, 12000)
+        self.assertLessEqual(len(corpus), 12000)
+        self.assertIn("tool_error: ModuleNotFoundError", corpus)
+        self.assertIn(self.PROMPT, corpus)
+        kept = self._kept_calls(corpus)
+        self.assertEqual(kept[0], 0)
+        # The rest of the budget still goes to the most recent successful calls.
+        self.assertEqual(kept[1:], list(range(40 - len(kept) + 1, 40)))
+
+    def test_a_transient_failure_gets_no_priority(self) -> None:
+        # The extractor never learns from a timeout, so it competes with the
+        # successful calls instead of displacing them.
+        events = self._window(40, failed={0: "Command timed out after 2m 0.0s"})
+        corpus = process_project._event_corpus(events, 12000)
+        self.assertNotIn("transient failure elided", corpus)
+        self.assertNotIn(0, self._kept_calls(corpus))
+
+    def test_successful_calls_get_budget_only_once_every_failure_fits(self) -> None:
+        failures = {number: f"ValueError: bad input {number}" for number in range(12)}
+        corpus = process_project._event_corpus(self._window(16, failed=failures), 12000)
+        self.assertLessEqual(len(corpus), 12000)
+        self.assertIn(self.PROMPT, corpus)
+        kept = self._kept_calls(corpus)
+        self.assertTrue(kept)
+        # Not every failure fits, so no successful call is kept, and the
+        # failures that are kept are the most recent ones.
+        self.assertTrue(all(number in failures for number in kept))
+        self.assertEqual(kept, list(range(12 - len(kept), 12)))
+
+    def test_the_corpus_never_runs_past_the_limit(self) -> None:
+        # One limit per character across more than one tool call's width, so
+        # some limit leaves less room after the last kept event than the
+        # header takes.
+        events = self._window(40)
+        for limit in range(10500, 12001):
+            with self.subTest(limit=limit):
+                self.assertLessEqual(len(process_project._event_corpus(events, limit)), limit)
+
+
 if __name__ == "__main__":
     unittest.main()

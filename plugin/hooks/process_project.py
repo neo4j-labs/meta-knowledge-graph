@@ -384,6 +384,14 @@ def _later_success_same_tool(events: list[dict[str, Any]], index: int) -> str | 
     return None
 
 
+# What a window keeps when its events overflow the corpus budget, highest
+# priority first: what was said, then the failed tool calls an error learning
+# is built from, then every other tool event.
+PRIORITY_SAID = 0
+PRIORITY_FAILED_CALL = 1
+PRIORITY_TOOL_EVENT = 2
+
+
 def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
     # A tool call is logged before and after it runs, and both events carry
     # the full tool_input. Render each call once, from its PostToolUse: that
@@ -395,11 +403,12 @@ def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
     unanswered: set[int] = set()
     for pre, post in pair_tool_calls(events):
         (answered if post is not None else unanswered).add(id(pre))
-    entries: list[tuple[str, int, str]] = []
+    entries: list[tuple[str, int, str, int]] = []
     for order, event in enumerate(events):
         if id(event) in answered:
             continue
         parts: list[str] = []
+        priority = PRIORITY_TOOL_EVENT
         event_name = _event_text(event, "event_name")
         if event_name:
             parts.append(f"Event: {event_name}")
@@ -420,6 +429,7 @@ def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
                 # and the event is not paired with a later retry.
                 parts.append("tool_error: [transient failure elided]")
             elif error_text:
+                priority = PRIORITY_FAILED_CALL
                 parts.append(f"tool_key: {tool_key(event.get('tool_name')) or 'unknown'}")
                 parts.append(f"tool_error: {error_text}")
                 retry_input = _later_success_same_tool(events, order)
@@ -429,14 +439,57 @@ def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
                         f"{truncate(retry_input, MAX_RETRY_INPUT_TEXT)}"
                     )
         if parts:
-            entries.append((_ts_sort_key(event.get("timestamp")), order, "\n".join(parts)))
+            if _event_text(event, "prompt") or _event_text(event, "last_assistant_message"):
+                priority = PRIORITY_SAID
+            entries.append((_ts_sort_key(event.get("timestamp")), order,
+                            "\n".join(parts), priority))
     for ts, text in _window_assistant_texts(events):
-        entries.append((_ts_sort_key(ts), len(events), f"assistant: {truncate(text, 1200)}"))
+        entries.append((_ts_sort_key(ts), len(events),
+                        f"assistant: {truncate(text, 1200)}", PRIORITY_SAID))
     entries.sort(key=lambda entry: (entry[0], entry[1]))
-    joined = "\n".join(block for _, _, block in entries)
+    joined = "\n".join(entry[2] for entry in entries)
     if len(joined) <= limit:
         return joined
-    return "[earlier events elided]\n" + joined[-(limit - len("[earlier events elided]\n")):]
+    return _corpus_within_budget(entries, limit)
+
+
+def _corpus_within_budget(entries: list[tuple[str, int, str, int]], limit: int) -> str:
+    """Fit a window's events into the budget by priority, whole events only.
+
+    The events of one turn — the user's message, the assistant's reply and
+    every tool call between them — are overwhelmingly tool calls, and the user
+    speaks at the start of the turn. Keeping the last N characters therefore
+    drops the user's message first, which is precisely what the extraction
+    prompt is told to look for. A failed call is the other thing extraction
+    cannot do without: its error, and the retry that fixed it, are what an
+    error learning is built from, and in a busy turn the successful calls
+    after it would push it out.
+
+    So the budget goes to what was said, then to failed calls, then to every
+    other tool event. Within a priority the most recent events go first, an
+    event that does not fit is dropped whole rather than cut mid-line, and a
+    lower priority gets budget only once everything above it fits. The kept
+    events stay in their original order.
+    """
+    # The header's room is reserved first, sized for the largest count it
+    # could report, so the corpus never runs past the limit.
+    spent = len(f"[{len(entries)} events elided]")
+    kept: list[tuple[str, int, str, int]] = []
+    for priority in (PRIORITY_SAID, PRIORITY_FAILED_CALL, PRIORITY_TOOL_EVENT):
+        tier = [entry for entry in entries if entry[3] == priority]
+        everything_fit = True
+        for entry in sorted(tier, key=lambda e: (e[0], e[1]), reverse=True):
+            cost = len(entry[2]) + 1  # and the newline before it
+            if spent + cost > limit:
+                everything_fit = False
+                continue
+            kept.append(entry)
+            spent += cost
+        if not everything_fit:
+            break
+    kept.sort(key=lambda entry: (entry[0], entry[1]))
+    header = f"[{len(entries) - len(kept)} events elided]"
+    return header + "".join(f"\n{entry[2]}" for entry in kept)
 
 
 def _format_existing_memory(
