@@ -709,6 +709,96 @@ class PerRowApplyTests(unittest.TestCase):
         self.assertEqual(events, ["fetch:l1", "write:l1", "fetch:l2", "write:l2"])
 
 
+class SupersededInBatchTests(unittest.TestCase):
+    """Two contradicting candidates gated in one batch. The first one judged
+    supersedes the second; the second must not then be judged and flip the
+    outcome (live repro: A SUPERSEDES B and B SUPERSEDES A, the loser left
+    approved with no embedding and a stale rejected_reason)."""
+
+    def _gate(self, driver, llm_replies):
+        with patch.object(
+            consistency_gate,
+            "_fetch_neighbours_hybrid",
+            side_effect=lambda *a, **k: [
+                {"id": "learning:b" if k["candidate_id"] == "learning:a" else "learning:a",
+                 "text": "the other one", "status": "candidate"}
+            ],
+        ) as hybrid, patch.object(
+            consistency_gate, "llm_complete", side_effect=llm_replies
+        ) as llm:
+            applied = consistency_gate._gate_one_label(
+                driver,
+                "neo4j",
+                project=type("P", (), {"id": "proj"})(),
+                label="Learning",
+                index_name="project_learning_vector",
+                fulltext_index="project_learning_fulltext",
+                kind="learning",
+                rows=[
+                    {"id": "learning:a", "text": "a", "embedding": [0.1], "scope": "project"},
+                    {"id": "learning:b", "text": "b", "embedding": [0.2], "scope": "project"},
+                ],
+                model=None,
+                timestamp="2026-07-01T00:00:00Z",
+            )
+        return applied, hybrid, llm
+
+    def test_candidate_superseded_earlier_in_batch_is_not_judged_again(self):
+        driver = _CapturingDriver()
+        a_supersedes_b = (
+            '{"contradictions": [{"existing_id": "learning:b", "winner": "new", '
+            '"reason": "a is correct"}], "already_learned_of": null}'
+        )
+        applied, hybrid, llm = self._gate(driver, [SAFETY_PASS, a_supersedes_b])
+        self.assertEqual(applied, 1)
+        # Safety screen + judge for A only; B never reaches either.
+        self.assertEqual(llm.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["candidate_id"] for call in hybrid.call_args_list],
+            ["learning:a"],
+        )
+        self.assertEqual([row["id"] for row in driver.written], ["learning:a"])
+        self.assertEqual(driver.written[0]["superseded_ids"], ["learning:b"])
+
+    def test_candidate_not_superseded_is_still_judged(self):
+        # An unclear conflict keeps both sides live, so B is still open and
+        # gets its own verdict.
+        driver = _CapturingDriver()
+        unclear = (
+            '{"contradictions": [{"existing_id": "learning:b", "winner": "unclear", '
+            '"reason": "cannot tell"}], "already_learned_of": null}'
+        )
+        applied, _, llm = self._gate(
+            driver, [SAFETY_PASS, unclear, SAFETY_PASS, JUDGE_EMPTY]
+        )
+        self.assertEqual(applied, 2)
+        self.assertEqual(llm.call_count, 4)
+        self.assertEqual(
+            [row["id"] for row in driver.written], ["learning:a", "learning:b"]
+        )
+
+    def test_apply_resolutions_only_resolves_open_candidates(self):
+        # The guard that holds even when the in-loop skip cannot see the
+        # earlier verdict (a row resolved by another gate run).
+        captured: list[str] = []
+
+        class _Tx:
+            def run(self, query, **params):
+                captured.append(query)
+
+        consistency_gate._apply_resolutions(
+            _Tx(),
+            label="Learning",
+            rows=[consistency_gate._resolve("cand", [], [], None)],
+            model="m",
+            timestamp="2026-07-01T00:00:00Z",
+        )
+        query = captured[0]
+        guard = query.index("WHERE c.status = 'candidate'")
+        self.assertLess(query.index("MATCH (c:Learning {id: row.id})"), guard)
+        self.assertLess(guard, query.index("SET c.status = row.outcome"))
+
+
 class _CapturingSession:
     def __init__(self, written):
         self._written = written

@@ -795,6 +795,11 @@ def _apply_resolutions(tx, *, label: str, rows: list[dict[str, Any]], model: str
         f"""
         UNWIND $rows AS row
         MATCH (c:{label} {{id: row.id}})
+        // Only an open candidate takes a verdict. An earlier row in the same
+        // batch may already have superseded this one; applying its own
+        // verdict now would flip it back to live and let it supersede the
+        // row that beat it (A SUPERSEDES B and B SUPERSEDES A).
+        WHERE c.status = 'candidate'
         // A blocked row never reached the consistency judge, so its
         // consistency fields stay untouched (row.consistency is null there);
         // the safety fields are stamped whenever the safety screen ran.
@@ -917,9 +922,14 @@ def _gate_one_label(
 ) -> int:
     topk = _topk()
     applied = 0
+    # Rows this batch already resolved through an earlier row's verdict. The
+    # rows were fetched up front, so a candidate an earlier row superseded is
+    # still in the list; it is settled, and judging it again would only spend
+    # two LLM calls on a verdict _apply_resolutions refuses to apply.
+    settled: set[str] = set()
     for row in rows:
         candidate_id = row.get("id")
-        if not candidate_id:
+        if not candidate_id or candidate_id in settled:
             continue
         vector = row.get("embedding")
         scope = str(row.get("scope") or "project")
@@ -1052,6 +1062,7 @@ def _gate_one_label(
             )
             continue
         applied += 1
+        settled.update(resolution["superseded_ids"])
 
     return applied
 
