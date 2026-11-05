@@ -51,6 +51,37 @@ OAUTH_EXPIRY_GRACE_SECONDS = 60
 INJECTION_EVENT_WINDOW_SECONDS = 120
 SUBAGENT_HOOK_EVENTS = frozenset({"SubagentStart", "SubagentStop"})
 PROJECT_NEUTRAL_LIFECYCLE_EVENTS = frozenset({"SessionStart", "SessionEnd"})
+# Newer Claude Code hook events that log_event captures with their own fields
+# but extraction never reads: they record context (which CLAUDE.md loaded, a
+# slash-command expansion, an auto-mode denial, a task-list change, a
+# compaction, a model switch), not work. The corpus skips them, and log_event
+# stores no transcript snapshot on them. StopFailure is the one newer event
+# extraction does read: it says a turn was cut off by an API error.
+CAPTURE_ONLY_EVENTS = frozenset(
+    {
+        "InstructionsLoaded",
+        "UserPromptExpansion",
+        "PermissionDenied",
+        "TaskCreated",
+        "TaskCompleted",
+        "PostCompact",
+        "PostModelSwitch",
+    }
+)
+# Wrappers Claude Code puts around a prompt it submits on someone else's
+# behalf. Subagents run in the background by default, so a subagent's report
+# reaches the session as one of these, as do teammate, cross-session, and
+# channel messages. UserPromptSubmit fires for each with nothing in the
+# payload to tell it from typed text, so the opening tag is the only mark.
+# Maps the tag to the corpus key the extractor reads it under.
+HARNESS_PROMPT_TAGS = {
+    "task-notification": "background_task_notification",
+    "agent-message": "subagent_report",
+    "teammate-message": "teammate_message",
+    "cross-session-message": "message_from_another_session",
+    "channel": "channel_message",
+}
+_PROMPT_TAG_RE = re.compile(r"<([a-z][a-z-]*)[\s>]")
 # Claude Code-only lifecycle event fired instead of PostToolUse when a tool
 # call fails; Codex has no equivalent and represents failures as error-shaped
 # tool results.
@@ -59,6 +90,18 @@ ROLLOUT_TRANSCRIPT_ID_RE = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$",
     re.IGNORECASE,
 )
+
+
+def prompt_origin(prompt: Any) -> str:
+    """Who a submitted prompt came from: the harness wrapper tag that opens
+    it (a key of ``HARNESS_PROMPT_TAGS``), else ``user``.
+
+    A scheduled prompt (``/loop``, a cron) arrives bare and still reads as
+    ``user``; nothing in the prompt or the payload marks it.
+    """
+    match = _PROMPT_TAG_RE.match(prompt.lstrip()) if isinstance(prompt, str) else None
+    tag = match.group(1) if match else None
+    return tag if tag in HARNESS_PROMPT_TAGS else "user"
 
 
 def injection_window_start() -> str:

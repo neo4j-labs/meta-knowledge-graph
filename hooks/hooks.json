@@ -1,5 +1,5 @@
 {
-  "description": "MKG capture/recall hooks. Resolves its own root: ${CLAUDE_PLUGIN_ROOT} when installed as a plugin, else ${CLAUDE_PROJECT_DIR} when committed in-repo. Each hook is a self-contained PEP 723 uv script (`uv run --script`): uv builds and caches a tiny per-script environment from the inline `# /// script` dependencies (just `neo4j`, plus `litellm` for the background extraction scripts) instead of syncing the full MCP-server project venv. The first run installs ~2 packages and caches the env; later runs reuse it (~0.1s, no install). No bootstrap or `--no-sync` ordering is required.",
+  "description": "MKG capture/recall hooks. log_event.py is never wired to WorktreeCreate or WorktreeRemove: a hook there replaces the harness's own worktree handling. Resolves its own root: ${CLAUDE_PLUGIN_ROOT} when installed as a plugin, else ${CLAUDE_PROJECT_DIR} when committed in-repo. Each hook is a self-contained PEP 723 uv script (`uv run --script`): uv builds and caches a tiny per-script environment from the inline `# /// script` dependencies (just `neo4j`, plus `litellm` for the background extraction scripts) instead of syncing the full MCP-server project venv. The first run installs ~2 packages and caches the env; later runs reuse it (~0.1s, no install). No bootstrap or `--no-sync` ordering is required.",
   "hooks": {
     "SessionStart": [
       {
@@ -24,6 +24,16 @@
         ]
       }
     ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -31,6 +41,16 @@
             "type": "command",
             "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/inject_project_context.py\""
           },
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
           {
             "type": "command",
             "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
@@ -77,6 +97,16 @@
         ]
       }
     ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "hooks": [
@@ -109,6 +139,16 @@
         ]
       }
     ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
     "SubagentStart": [
       {
         "hooks": [
@@ -129,7 +169,47 @@
         ]
       }
     ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
     "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"${CLAUDE_PLUGIN_ROOT:-$CLAUDE_PROJECT_DIR}\"; uv run --script \"$ROOT/hooks/log_event.py\" --client claude_code"
+          }
+        ]
+      }
+    ],
+    "PostModelSwitch": [
       {
         "hooks": [
           {

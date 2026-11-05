@@ -28,6 +28,8 @@ if str(HOOK_DIR) not in sys.path:
     sys.path.insert(0, str(HOOK_DIR))
 
 from project_common import (  # noqa: E402
+    CAPTURE_ONLY_EVENTS,
+    HARNESS_PROMPT_TAGS,
     ProjectRef,
     UserRef,
     dialog_entry,
@@ -54,6 +56,7 @@ from project_common import (  # noqa: E402
     pair_tool_calls,
     project_env,
     project_git_root,
+    prompt_origin,
     resolve_llm_model,
     resolve_project,
     resolve_user,
@@ -86,6 +89,17 @@ Current completed work:
 [[CORPUS]]
 
 [[EXISTING_MEMORY]]
+
+Reading the work: only "prompt" lines are the user's own words. A
+subagent_report, background_task_notification, teammate_message, or
+message_from_another_session is a message the harness delivered from an agent
+or another session, not from the user: attribute its contents to that sender,
+and never take it as evidence of a fact about the user. A channel_message
+arrives through an external chat bridge; it is the user's only when it names
+the user as its sender. background_work_at_turn_end lists work still running
+or scheduled when the turn ended; its results arrive later, so the turn paused
+rather than finished, and that work is pending, not an outcome.
+turn_ended_by_api_error means the turn stopped before it finished.
 
 Decide whether this completed work contains durable memory worth storing.
 Prefer updating existing memory when it is materially the same idea. The existing
@@ -193,6 +207,12 @@ DEFAULT_OBSERVATION_EXTRACTION_PROMPT = """Project: [[PROJECT_NAME]] ([[PROJECT_
 
 Completed work window:
 [[CORPUS]]
+
+Only "prompt" lines are what the user asked. subagent_report,
+background_task_notification, teammate_message, message_from_another_session,
+and channel_message lines are messages the harness delivered from their
+senders. background_work_at_turn_end means that work was still in progress
+when the window closed; turn_ended_by_api_error means the turn was cut off.
 
 Write an episodic record of this work window for the project timeline.
 Unlike durable memory, this is unconditional: always return at least one
@@ -392,6 +412,39 @@ PRIORITY_FAILED_CALL = 1
 PRIORITY_TOOL_EVENT = 2
 
 
+def _prompt_key(event: dict[str, Any]) -> str:
+    """The corpus key a prompt is read under: ``prompt`` when the user typed
+    it, else the sender of a prompt the harness submitted on someone else's
+    behalf (a background subagent's report, a teammate, another session).
+    Events captured before log_event recorded ``prompt_origin`` fall back to
+    reading the wrapper tag."""
+    if _event_text(event, "event_name") != "UserPromptSubmit":
+        return "prompt"
+    origin = _event_text(event, "prompt_origin") or prompt_origin(event.get("prompt"))
+    return HARNESS_PROMPT_TAGS.get(origin, "prompt")
+
+
+def _background_work(event: dict[str, Any]) -> str:
+    """What a Stop left running or scheduled, or "" when nothing was."""
+    parts = []
+    for heading, field in (
+        ("still running", "background_tasks"),
+        ("scheduled", "session_crons"),
+    ):
+        value = event.get(field)
+        entries = [value] if isinstance(value, str) else list(value or [])
+        lines = [str(line).strip() for line in entries if str(line).strip()]
+        if lines:
+            parts.append(f"{heading}: " + "; ".join(lines))
+    return " | ".join(parts)
+
+
+def _api_error_text(event: dict[str, Any]) -> str:
+    """The API error that ended a turn (StopFailure), as one line."""
+    parts = (_event_text(event, "error") or "unknown", _event_text(event, "error_details"))
+    return ": ".join(part for part in parts if part)
+
+
 def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
     # A tool call is logged before and after it runs, and both events carry
     # the full tool_input. Render each call once, from its PostToolUse: that
@@ -407,9 +460,15 @@ def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
     for order, event in enumerate(events):
         if id(event) in answered:
             continue
+        event_name = _event_text(event, "event_name")
+        # Context, not work: which file loaded, a model switch, a compaction.
+        # A UserPromptExpansion would also repeat its prompt as a second
+        # "said" line, and a PermissionDenied its call's input.
+        if event_name in CAPTURE_ONLY_EVENTS:
+            continue
         parts: list[str] = []
         priority = PRIORITY_TOOL_EVENT
-        event_name = _event_text(event, "event_name")
+        said = False
         if event_name:
             parts.append(f"Event: {event_name}")
         # Successful tool outputs are deliberately excluded: memory extraction
@@ -418,7 +477,18 @@ def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
         for key in ("prompt", "last_assistant_message", "tool_name", "tool_input"):
             text = _event_text(event, key)
             if text:
-                parts.append(f"{key}: {truncate(text, 1200)}")
+                label = _prompt_key(event) if key == "prompt" else key
+                parts.append(f"{label}: {truncate(text, 1200)}")
+                said = said or key in ("prompt", "last_assistant_message")
+        if event_name == "Stop":
+            # A turn that paused for its background agents, not one that ended.
+            pending = _background_work(event)
+            if pending:
+                parts.append(f"background_work_at_turn_end: {truncate(pending, 1200)}")
+                said = True
+        if event_name == "StopFailure":
+            parts.append(f"turn_ended_by_api_error: {truncate(_api_error_text(event), 600)}")
+            said = True
         if id(event) in unanswered:
             parts.append("tool_result: none recorded in this window")
         if _is_failed_tool_event(event):
@@ -439,7 +509,7 @@ def _event_corpus(events: list[dict[str, Any]], limit: int = 12000) -> str:
                         f"{truncate(retry_input, MAX_RETRY_INPUT_TEXT)}"
                     )
         if parts:
-            if _event_text(event, "prompt") or _event_text(event, "last_assistant_message"):
+            if said:
                 priority = PRIORITY_SAID
             entries.append((_ts_sort_key(event.get("timestamp")), order,
                             "\n".join(parts), priority))
