@@ -132,7 +132,7 @@ Resolution order (first existing wins): `MKG_ENV_FILE` → `<project>/.env`
 the dir with `MKG_CONFIG_DIR` or `XDG_CONFIG_HOME`. Start a new session after
 changing credentials.
 
-### Codex (plugin)
+### Codex / ChatGPT Work (local plugin)
 
 The installable plugin package lives in [`plugin/`](plugin/), following the
 same layout as `claude-mem`: the repo root is the marketplace/catalog checkout,
@@ -148,9 +148,10 @@ and `plugin/` is the versioned payload copied into the host plugin cache.
   the Claude Code commands:
   `mkg-start`, `mkg-orchestrate`, `mkg-skill-review`, `sales-agent-demo`, and
   `mkg-recall`.
-- [`plugin/.mcp.json`](plugin/.mcp.json) is shared with the Claude Code plugin
-  and starts the same `meta-knowledge-graph` MCP server from the installed
-  plugin cache or repo checkout. Warm plugin starts bypass `uv` and run the
+- [`plugin/.codex-mcp.json`](plugin/.codex-mcp.json) starts the same
+  `meta-knowledge-graph` MCP server with `MKG_CLIENT=codex` for consistent
+  account identity. Claude Code keeps its existing `plugin/.mcp.json`.
+  Warm plugin starts bypass `uv` and run the
   cached virtualenv's Python directly; `uv run --project` remains the fallback
   when the virtualenv has not been created yet.
 
@@ -175,12 +176,18 @@ Codex also supports a repo-local checkout mode:
 recall scripts through `git rev-parse --show-toplevel`, which is convenient when
 developing MKG from this repository. Installed plugins use
 [`plugin/hooks/codex-hooks.json`](plugin/hooks/codex-hooks.json) instead, so
-hook commands resolve the plugin cache rather than the user's active project
-checkout. The repo does not use a recursive
+hook commands use the host-provided `PLUGIN_ROOT` (with legacy root-variable
+fallbacks). Cache discovery is used only when no root is supplied; an invalid
+explicit root never silently selects another installed version. The repo does
+not use a recursive
 `plugins/meta-knowledge-graph -> ..` symlink.
 
-Start a new Codex thread after install so the plugin hooks, skills, and MCP tools
-are picked up.
+Review and trust the plugin hooks, then start a new thread after install so
+the hooks, skills, and MCP tools are picked up. This integration needs local
+execution (Codex or local ChatGPT Work); installing it in ChatGPT on the web
+does not deploy its shell scripts. Cloud-orchestrated Work does not run local
+plugin command hooks. See the [OpenAI plugin packaging guide](https://developers.openai.com/plugins/build/plugins)
+and [hook support and trust requirements](https://learn.chatgpt.com/docs/hooks).
 
 ### Codex (repo checkout)
 
@@ -204,8 +211,12 @@ approval_mode = "approve"
 ```
 
 Credentials are read from `~/.config/meta-knowledge-graph/.env` exactly as for
-Claude Code. Codex doesn't currently document a `SessionEnd` hook, so MKG only
-wires Stop-time extraction for Codex.
+Claude Code. Both hosts extract memory at `Stop`, and log and launch prompt/skill
+consolidation at `SessionEnd`. Codex session-end commands use its maximum
+three-second timeout; cold dependency setup or slow logging can exceed that
+window, so `Stop` remains the primary processing path. Codex also recalls
+context when a thread starts, resumes, clears, compacts, or forks. Claude-only
+events such as `PostToolUseFailure` are not registered in the Codex configuration.
 
 ### Claude Desktop & other harnesses
 

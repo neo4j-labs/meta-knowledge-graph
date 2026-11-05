@@ -17,7 +17,7 @@
     "hooks"
   ],
   "skills": "./plugin/codex-skills/",
-  "mcpServers": "./plugin/.mcp.json",
+  "mcpServers": "./plugin/.codex-mcp.json",
   "hooks": "./plugin/hooks/codex-hooks.json",
   "interface": {
     "displayName": "Meta Knowledge Graph",

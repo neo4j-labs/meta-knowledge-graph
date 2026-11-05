@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "meta-knowledge-graph": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "ROOT=\"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}\"; if [ -z \"$ROOT\" ]; then ROOT=\"$(ls -dt \"${CODEX_HOME:-$HOME/.codex}\"/plugins/cache/*/meta-knowledge-graph/*/ 2>/dev/null | head -1)\"; fi; if [ ! -f \"$ROOT/pyproject.toml\" ]; then echo \"[mkg mcp] Codex plugin root not found\" >&2; exit 1; fi; LAUNCHER=\"$ROOT/scripts/mcp-launcher.sh\"; [ -f \"$LAUNCHER\" ] || LAUNCHER=\"$ROOT/plugin/scripts/mcp-launcher.sh\"; exec bash \"$LAUNCHER\" \"$ROOT\""
+      ],
+      "env": {
+        "MKG_CLIENT": "codex"
+      }
+    }
+  }
+}

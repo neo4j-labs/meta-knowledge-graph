@@ -2820,7 +2820,7 @@ class ProjectHookTests(unittest.TestCase):
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
 
         session_start_hooks = config["hooks"]["SessionStart"][0]["hooks"]
-        self.assertEqual(config["hooks"]["SessionStart"][0]["matcher"], "startup|resume|clear|compact")
+        self.assertEqual(config["hooks"]["SessionStart"][0]["matcher"], "startup|resume|clear|compact|fork")
         self.assertTrue(
             any("hooks/inject_system_prompt.py" in hook["command"] for hook in session_start_hooks)
         )
@@ -2876,7 +2876,7 @@ class ProjectHookTests(unittest.TestCase):
                 self.assertEqual(len(commands), 1)
                 self.assertIn("hooks/log_event.py", commands[0])
 
-    def test_codex_logs_documented_lifecycle_events_without_session_end(self) -> None:
+    def test_codex_logs_documented_lifecycle_events_with_session_end(self) -> None:
         config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
         expected_logged_events = {
             "SessionStart",
@@ -2892,7 +2892,7 @@ class ProjectHookTests(unittest.TestCase):
         }
 
         self.assertTrue(expected_logged_events.issubset(config["hooks"].keys()))
-        self.assertNotIn("SessionEnd", config["hooks"])
+        self.assertIn("SessionEnd", config["hooks"])
 
         for event in expected_logged_events:
             commands = [
@@ -2912,15 +2912,15 @@ class ProjectHookTests(unittest.TestCase):
         checkout_config = json.loads((ROOT / ".codex" / "hooks.json").read_text())
 
         self.assertEqual(manifest["skills"], "./plugin/codex-skills/")
-        self.assertEqual(manifest["mcpServers"], "./plugin/.mcp.json")
+        self.assertEqual(manifest["mcpServers"], "./plugin/.codex-mcp.json")
         self.assertEqual(manifest["hooks"], "./plugin/hooks/codex-hooks.json")
         self.assertEqual(package_manifest["skills"], "./codex-skills/")
-        self.assertEqual(package_manifest["mcpServers"], "./.mcp.json")
+        self.assertEqual(package_manifest["mcpServers"], "./.codex-mcp.json")
         self.assertEqual(package_manifest["hooks"], "./hooks/codex-hooks.json")
         self.assertEqual(set(plugin_config["hooks"].keys()), set(checkout_config["hooks"].keys()))
         self.assertIn("SessionStart", plugin_config["hooks"])
         self.assertIn("Stop", plugin_config["hooks"])
-        self.assertNotIn("SessionEnd", plugin_config["hooks"])
+        self.assertIn("SessionEnd", plugin_config["hooks"])
 
     def test_skill_review_command_ships_for_both_hosts(self) -> None:
         # The human-in-the-loop publishing walk is a Claude Code command
@@ -2956,7 +2956,7 @@ class ProjectHookTests(unittest.TestCase):
             self.assertNotIn("git rev-parse", command)
             self.assertNotIn("CODEX_PLUGIN_ROOT:-$PWD", command)
             self.assertNotIn("MKG_PLUGIN_ROOT", command)
-            self.assertNotIn("CLAUDE_PLUGIN_ROOT", command)
+            self.assertIn("PLUGIN_ROOT", command)
             self.assertNotIn("$PWD/hooks", command)
             self.assertNotIn("--project", command)
 
