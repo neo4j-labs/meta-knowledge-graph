@@ -45,7 +45,6 @@ never blocks the session.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -70,10 +69,12 @@ from project_common import (  # noqa: E402
     llm_ready,
     load_mkg_env,
     neo4j_config,
+    read_hook_payload,
     read_user_profile_state,
     resolve_user,
     snapshot_and_update_user_profile,
     truncate,
+    use_utf8_output,
     user_env,
 )
 
@@ -332,14 +333,6 @@ def consolidate(payload: dict[str, Any]) -> None:
             )
 
 
-def _read_payload() -> dict[str, Any]:
-    try:
-        raw = sys.stdin.read()
-        return json.loads(raw) if raw.strip() else {}
-    except Exception:
-        return {}
-
-
 def _spawn_background(session_id: str) -> None:
     project_root = Path(__file__).resolve().parents[1]
     command = [
@@ -364,6 +357,7 @@ def _spawn_background(session_id: str) -> None:
 
 
 def main() -> int:
+    use_utf8_output()
     parser = argparse.ArgumentParser()
     parser.add_argument("--session-id")
     parser.add_argument(
@@ -379,7 +373,7 @@ def main() -> int:
 
     project_root = Path(__file__).resolve().parents[1]
     load_mkg_env(project_root)
-    payload = _read_payload()
+    payload = read_hook_payload()
     if args.session_id:
         payload["session_id"] = args.session_id
 

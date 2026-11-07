@@ -34,8 +34,10 @@ if str(HOOK_DIR) not in sys.path:
 from project_common import (  # noqa: E402
     load_mkg_env,
     neo4j_config,
+    read_hook_payload,
     resolve_user,
     skill_activation_mode,
+    use_utf8_output,
 )
 
 DEFAULT_PROMPT = """You are a general-purpose AI assistant with persistent memory.
@@ -390,14 +392,11 @@ def record_injection(
 
 
 def main() -> int:
+    use_utf8_output()
     project_root = Path(__file__).resolve().parents[1]
     load_mkg_env(project_root)
 
-    try:
-        raw = sys.stdin.read()
-        payload = json.loads(raw) if raw.strip() else {}
-    except Exception:
-        payload = {}
+    payload = read_hook_payload()
 
     session_id = payload.get("session_id", "unknown")
     hook_event = payload.get("hook_event_name", "SessionStart")

@@ -4,6 +4,7 @@ import base64
 import binascii
 import getpass
 import json
+import locale
 import os
 import re
 import shutil
@@ -724,11 +725,14 @@ def _complete_claude_cli_once(messages: list[dict[str, str]]) -> str:
     timeout = float(
         os.environ.get("MKG_CLAUDE_CLI_TIMEOUT") or DEFAULT_CLAUDE_CLI_TIMEOUT
     )
+    # The CLI reads and writes UTF-8; text=True alone would encode the corpus
+    # in the Windows code page and raise on the first character outside it.
     proc = subprocess.run(
         cmd,
         input=user,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         env=_claude_cli_env(),
         cwd=tempfile.gettempdir(),
         timeout=timeout,
@@ -970,7 +974,8 @@ def _read_macos_claude_oauth_token() -> ClaudeOAuthCredential | None:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=OAUTH_READ_TIMEOUT_SECONDS,
                 check=False,
             )
@@ -997,7 +1002,8 @@ def _read_linux_claude_oauth_token() -> ClaudeOAuthCredential | None:
                 getpass.getuser(),
             ],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=OAUTH_READ_TIMEOUT_SECONDS,
             check=False,
         )
@@ -1119,10 +1125,88 @@ CREDENTIAL_ENV_VARS = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# Text encoding
+#
+# Everything the hooks exchange is UTF-8: the harness's stdin payload, the
+# transcript JSONL, ~/.claude.json, and the MKG .env. Python decodes text it
+# isn't told the encoding of with the locale's code page instead, which on
+# Windows before Python 3.15 is the ANSI code page (cp1252 on a western
+# install). That raises on some characters (``č``, ``”``) and silently garbles
+# others (``ž`` -> ``Å¾``), including the ``cwd`` and ``transcript_path`` of
+# every event for a user folder like ``C:\Users\Tomaž``. So every text read
+# and write here names UTF-8 itself rather than relying on the interpreter's
+# defaults or on PYTHONUTF8 being set by whoever launched the hook.
+# --------------------------------------------------------------------------- #
+
+
+def use_utf8_output() -> None:
+    """Write stdout and stderr as UTF-8, which is what the harness reads.
+
+    Called first in every hook entrypoint. On Windows a piped or devnull
+    stdout encodes with the ANSI code page and raises on anything outside it,
+    so a background worker printing an LLM-written reason with a ``→`` in it
+    would die mid-run. Streams already in UTF-8, or that can't be reconfigured
+    (a test's ``StringIO``), are left as they are.
+    """
+    for name, errors in (("stdout", "replace"), ("stderr", "backslashreplace")):
+        stream = getattr(sys, name, None)
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "").replace("_", "")
+        if encoding == "utf8" or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors=errors)
+        except (OSError, ValueError):
+            pass  # a stream that can't be reconfigured keeps working as it was
+
+
+def read_stdin_text() -> str:
+    """All of stdin, decoded as UTF-8 whatever the console code page is.
+
+    Reads the raw bytes so ``sys.stdin``'s locale decoding never runs. A byte
+    that isn't UTF-8 becomes U+FFFD instead of losing the whole payload.
+    """
+    stream = sys.stdin
+    if stream is None:
+        return ""
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None:  # an in-memory text stream (tests) is already decoded
+        return stream.read()
+    return buffer.read().decode("utf-8", errors="replace")
+
+
+def read_hook_payload() -> dict[str, Any]:
+    """The harness's JSON hook payload from stdin; ``{}`` when it is missing
+    or unparseable, so a hook degrades instead of crashing the session."""
+    try:
+        raw = read_stdin_text()
+        payload = json.loads(raw) if raw.strip() else {}
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def read_env_text(env_path: Path) -> str:
+    """Text of a ``.env`` file, decoded the way python-dotenv (the MCP server's
+    loader) decodes it, so the hooks and the server read the same values.
+
+    UTF-8 is the format; ``utf-8-sig`` also drops a byte-order mark, which
+    would otherwise glue itself onto the first key. A file that isn't valid
+    UTF-8 was written in the locale encoding by an older
+    ``meta-knowledge-graph setup`` on Windows, so it is decoded that way
+    rather than failing every hook before it can start.
+    """
+    data = env_path.read_bytes()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode(locale.getpreferredencoding(False), errors="replace")
+
+
 def load_dotenv(env_path: Path, *, override: bool = False) -> None:
     if not env_path.exists():
         return
-    for raw in env_path.read_text().splitlines():
+    for raw in read_env_text(env_path).splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -1195,7 +1279,7 @@ def load_mkg_env(project_root: Path | None = None) -> Path:
 def _override_credentials_from(env_path: Path) -> None:
     if not env_path.exists():
         return
-    for raw in env_path.read_text().splitlines():
+    for raw in read_env_text(env_path).splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -1257,7 +1341,7 @@ def _claude_account_email() -> str | None:
     override = os.environ.get("CLAUDE_CONFIG_DIR")
     base = Path(override).expanduser() if override else Path.home()
     try:
-        payload = json.loads((base / ".claude.json").read_text())
+        payload = json.loads((base / ".claude.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     account = payload.get("oauthAccount") if isinstance(payload, dict) else None
@@ -1285,7 +1369,7 @@ def _codex_account_email() -> str | None:
     override = os.environ.get("CODEX_HOME")
     base = Path(override).expanduser() if override else Path.home() / ".codex"
     try:
-        payload = json.loads((base / "auth.json").read_text())
+        payload = json.loads((base / "auth.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     tokens = payload.get("tokens") if isinstance(payload, dict) else None
@@ -1305,7 +1389,8 @@ def _git_user_email(cwd: Path | None) -> str | None:
         proc = subprocess.run(
             ["git", "config", "--get", "user.email"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=IDENTITY_LOOKUP_TIMEOUT_SECONDS,
             check=False,
             cwd=str(cwd) if cwd is not None and cwd.is_dir() else None,

@@ -80,8 +80,10 @@ from project_common import (  # noqa: E402
     normalize_tool_failure_payload,
     project_git_root,
     prompt_origin,
+    read_stdin_text,
     resolve_project,
     resolve_user,
+    use_utf8_output,
 )
 
 MAX_RESPONSE_CHARS = 4000
@@ -199,7 +201,7 @@ def _read_transcript(path: str | None) -> str | None:
     if not path:
         return None
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
     except Exception:
         return None
@@ -697,6 +699,7 @@ def log_event(data: dict, client: str) -> None:
 
 
 def main() -> int:
+    use_utf8_output()
     # A headless run (-p, the Agent SDK) exits as soon as an API error ends its
     # turn and sends SIGTERM to the StopFailure hooks still running, which
     # would kill the one record of why the turn ended before its write.
@@ -713,7 +716,7 @@ def main() -> int:
     load_mkg_env(project_root)
 
     try:
-        raw = sys.stdin.read()
+        raw = read_stdin_text()
         data = json.loads(raw) if raw.strip() else {}
         log_event(data, client=args.client)
     except Exception as exc:  # pragma: no cover - hook must never crash the session

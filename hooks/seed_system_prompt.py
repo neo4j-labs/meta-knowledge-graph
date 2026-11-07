@@ -32,13 +32,15 @@ from project_common import (  # noqa: E402
     load_mkg_env,
     neo4j_config,
     upsert_prompt_node,
+    use_utf8_output,
 )
 
 
 def main(argv: list[str]) -> int:
+    use_utf8_output()
     name = argv[1] if len(argv) > 1 else "default"
     if len(argv) > 2:
-        content = Path(argv[2]).read_text()
+        content = Path(argv[2]).read_text(encoding="utf-8")
     else:
         content = DEFAULT_PROMPT
 

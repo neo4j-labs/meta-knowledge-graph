@@ -1,10 +1,12 @@
 import argparse
 import asyncio
 import getpass
+import io
+import locale
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from meta_knowledge_graph import server
 
@@ -47,12 +49,30 @@ def _mkg_config_dir() -> Path:
     return base / "meta-knowledge-graph"
 
 
+def _read_env_text(path: Path) -> str:
+    """Text of a ``.env`` file; mirrors hooks/project_common.read_env_text so
+    the server and the hooks read the same values. UTF-8 is the format, but a
+    file an older ``setup`` wrote in the Windows code page is decoded in the
+    locale encoding instead of failing this module's import, which would also
+    keep ``setup`` from running to rewrite it."""
+    data = path.read_bytes()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode(locale.getpreferredencoding(False), errors="replace")
+
+
+def _load_env_file(path: str | Path, *, override: bool = False) -> None:
+    if path and Path(path).is_file():
+        load_dotenv(stream=io.StringIO(_read_env_text(Path(path))), override=override)
+
+
 def _run_setup() -> int:
     """Interactively write credentials to <config-dir>/.env with mode 600."""
     target = _mkg_config_dir() / ".env"
     existing: dict[str, str] = {}
     if target.exists():
-        for raw in target.read_text().splitlines():
+        for raw in _read_env_text(target).splitlines():
             line = raw.strip()
             if line and not line.startswith("#") and "=" in line:
                 key, value = line.split("=", 1)
@@ -73,7 +93,7 @@ def _run_setup() -> int:
             values[key] = chosen
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("".join(f"{k}={v}\n" for k, v in values.items()))
+    target.write_text("".join(f"{k}={v}\n" for k, v in values.items()), encoding="utf-8")
     target.chmod(0o600)
     print(f"\nWrote {len(values)} value(s) to {target} (mode 600).")
     return 0
@@ -81,8 +101,8 @@ def _run_setup() -> int:
 
 # Project/cwd .env first (repo-checkout / demo mode), then the user-global MKG
 # .env authoritatively (installed plugin/CLI mode — survives plugin updates).
-load_dotenv()
-load_dotenv(_mkg_config_dir() / ".env", override=True)
+_load_env_file(find_dotenv())
+_load_env_file(_mkg_config_dir() / ".env", override=True)
 
 
 def main():

@@ -174,7 +174,7 @@ def _claude_account_email() -> str | None:
     override = os.environ.get("CLAUDE_CONFIG_DIR")
     base = Path(override).expanduser() if override else Path.home()
     try:
-        payload = json.loads((base / ".claude.json").read_text())
+        payload = json.loads((base / ".claude.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     account = payload.get("oauthAccount") if isinstance(payload, dict) else None
@@ -202,7 +202,7 @@ def _codex_account_email() -> str | None:
     override = os.environ.get("CODEX_HOME")
     base = Path(override).expanduser() if override else Path.home() / ".codex"
     try:
-        payload = json.loads((base / "auth.json").read_text())
+        payload = json.loads((base / "auth.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     tokens = payload.get("tokens") if isinstance(payload, dict) else None
@@ -222,7 +222,8 @@ def _git_user_email(cwd: Path | None) -> str | None:
         proc = subprocess.run(
             ["git", "config", "--get", "user.email"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=IDENTITY_LOOKUP_TIMEOUT_SECONDS,
             check=False,
             cwd=str(cwd) if cwd is not None and cwd.is_dir() else None,

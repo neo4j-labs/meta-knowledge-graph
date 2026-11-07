@@ -12,10 +12,12 @@ of how it lays out ``sys.path``.
 
 from __future__ import annotations
 
+import io
+import locale
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 
 def mkg_config_dir() -> Path:
@@ -32,7 +34,23 @@ def mkg_config_dir() -> Path:
     return base / "meta-knowledge-graph"
 
 
+def read_env_text(path: Path) -> str:
+    """Text of a ``.env`` file. Mirrors ``hooks/project_common.read_env_text``:
+    UTF-8 (byte-order mark dropped), or the locale encoding for a file an older
+    ``meta-knowledge-graph setup`` wrote in the Windows code page."""
+    data = path.read_bytes()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode(locale.getpreferredencoding(False), errors="replace")
+
+
+def _load_env_file(path: str | Path, *, override: bool = False) -> None:
+    if path and Path(path).is_file():
+        load_dotenv(stream=io.StringIO(read_env_text(Path(path))), override=override)
+
+
 def load_seed_env() -> None:
     """Load cwd ``.env`` (if any), then the user-global MKG ``.env`` over it."""
-    load_dotenv()
-    load_dotenv(mkg_config_dir() / ".env", override=True)
+    _load_env_file(find_dotenv())
+    _load_env_file(mkg_config_dir() / ".env", override=True)

@@ -82,7 +82,7 @@ def _prepare_inline_gcp_credentials() -> tuple[Path | None, str]:
 
     fd, path = tempfile.mkstemp(prefix="sales-agent-sa-", suffix=".json")
     try:
-        with os.fdopen(fd, "w") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(service_account_json)
         os.chmod(path, 0o600)
     except Exception:

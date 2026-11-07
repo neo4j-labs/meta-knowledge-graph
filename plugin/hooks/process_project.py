@@ -57,6 +57,7 @@ from project_common import (  # noqa: E402
     project_env,
     project_git_root,
     prompt_origin,
+    read_hook_payload,
     resolve_llm_model,
     resolve_project,
     resolve_user,
@@ -64,6 +65,7 @@ from project_common import (  # noqa: E402
     tool_key,
     transcript_records,
     truncate,
+    use_utf8_output,
 )
 
 from consistency_gate import (  # noqa: E402
@@ -233,14 +235,6 @@ Each observation:
 Describe only what the window shows. Return JSON only with this shape:
 {"observations": [{"type": "...", "title": "...", "facts": ["..."], "narrative": "..."}]}
 """
-
-
-def _read_payload() -> dict[str, Any]:
-    try:
-        raw = sys.stdin.read()
-        return json.loads(raw) if raw.strip() else {}
-    except Exception:
-        return {}
 
 
 def _event_text(event: dict[str, Any], key: str) -> str:
@@ -1668,6 +1662,7 @@ def _spawn_background(
 
 
 def main() -> int:
+    use_utf8_output()
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["turn", "session"], required=True)
     parser.add_argument("--limit", type=int, default=200)
@@ -1687,7 +1682,7 @@ def main() -> int:
 
     project_root = Path(__file__).resolve().parents[1]
     load_mkg_env(project_root)
-    payload = _read_payload()
+    payload = read_hook_payload()
     if args.session_id:
         payload["session_id"] = args.session_id
     project = resolve_project(payload, project_root)

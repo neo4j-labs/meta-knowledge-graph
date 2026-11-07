@@ -39,8 +39,10 @@ from project_common import (  # noqa: E402
     neo4j_config,
     normalize_tool_failure_payload,
     project_git_root,
+    read_stdin_text,
     resolve_project,
     resolve_user,
+    use_utf8_output,
 )
 
 LEARNING_TOOL_SUFFIX = "project_add_learning"
@@ -156,11 +158,12 @@ def link(payload: dict[str, Any]) -> int:
 
 
 def main() -> int:
+    use_utf8_output()
     project_root = Path(__file__).resolve().parents[1]
     load_mkg_env(project_root)
 
     try:
-        raw = sys.stdin.read()
+        raw = read_stdin_text()
         payload = json.loads(raw) if raw.strip() else {}
         linked = link(payload)
         if linked:

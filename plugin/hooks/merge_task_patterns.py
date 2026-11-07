@@ -88,6 +88,7 @@ from project_common import (  # noqa: E402
     task_pattern_merge_max_communities,
     task_pattern_node_id,
     truncate,
+    use_utf8_output,
 )
 
 
@@ -1115,6 +1116,7 @@ def run_task_pattern_merge(
 # Manual entry point
 # --------------------------------------------------------------------------- #
 def main() -> int:
+    use_utf8_output()
     parser = argparse.ArgumentParser(
         description="Run one task-pattern merge pass for the current project."
     )

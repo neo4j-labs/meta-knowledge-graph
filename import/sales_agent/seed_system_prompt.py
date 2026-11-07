@@ -50,7 +50,7 @@ def _seed(session, name: str, content: str, now: str) -> None:
 
 
 def main(_argv: list[str]) -> int:
-    content = PROMPT_FILE.read_text()
+    content = PROMPT_FILE.read_text(encoding="utf-8")
 
     uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
     user = os.environ.get("NEO4J_USERNAME", "neo4j")

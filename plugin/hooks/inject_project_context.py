@@ -34,6 +34,7 @@ from project_common import (  # noqa: E402
     mark_learnings_used,
     neo4j_config,
     project_git_root,
+    read_hook_payload,
     resolve_project,
     resolve_user,
     skill_catalog_inject_enabled,
@@ -41,19 +42,12 @@ from project_common import (  # noqa: E402
     skill_prompt_inject_enabled,
     skill_review_required,
     truncate,
+    use_utf8_output,
 )
 
 
 USER_SCOPED_CONTEXT_EVENTS = {"SessionStart"}
 MAX_DEGRADED_REASON = 200
-
-
-def _read_payload() -> dict:
-    try:
-        raw = sys.stdin.read()
-        return json.loads(raw) if raw.strip() else {}
-    except Exception:
-        return {}
 
 
 def context_scope_for_hook(hook_event: str) -> str:
@@ -88,10 +82,11 @@ def _emit(hook_event: str, context: str) -> None:
 
 
 def main() -> int:
+    use_utf8_output()
     project_root = Path(__file__).resolve().parents[1]
     load_mkg_env(project_root)
 
-    payload = _read_payload()
+    payload = read_hook_payload()
     hook_event = payload.get("hook_event_name", "UserPromptSubmit")
     session_id = payload.get("session_id") or None
     # On clear/compact the conversation context was wiped, so earlier
